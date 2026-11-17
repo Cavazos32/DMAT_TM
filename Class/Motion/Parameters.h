@@ -59,6 +59,8 @@ static const bool  PARAM_LASER_ACTIVE_HIGH  = false;
 static const int   PARAM_PIN_JOINT_R        = 12;
 static const int   PARAM_PIN_JOINT_L        = 13;
 static const bool  PARAM_JOINT_ACTIVE_HIGH  = false;
+// Evita falsos ON cruzados por ruido/acoplamiento entre GPIO 12/13.
+static const uint32_t PARAM_JOINT_DEBOUNCE_MS = 25;
 static const int   PARAM_PIN_SAFETY         = 26;
 static const float PARAM_ENC_OFFSET_MM        = 0.0f;
 

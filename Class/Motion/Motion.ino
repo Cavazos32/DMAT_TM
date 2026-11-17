@@ -67,6 +67,8 @@ enum FeedStageError {
   FEED_STAGE_ERR_COMP,
   FEED_STAGE_ERR_SAFETY,
   FEED_STAGE_ERR_STOP,
+  FEED_STAGE_ERR_JOINT_R,
+  FEED_STAGE_ERR_JOINT_L,
 };
 
 struct FeedStageSideResult {
@@ -805,11 +807,36 @@ static bool laserIsOn(MotionSide side) {
   return level == LOW;
 }
 
-static bool jointIsOn(MotionSide side) {
+static bool gJointOn[MOTION_SIDE_COUNT] = {false, false};
+static uint32_t gJointEdgeMs[MOTION_SIDE_COUNT] = {0, 0};
+
+static bool jointRawOn(MotionSide side) {
   int pin = (side == MOTION_SIDE_R) ? JOINT_PIN_R : JOINT_PIN_L;
   int level = digitalRead(pin);
   if (JOINT_ACTIVE_HIGH) return level == HIGH;
   return level == LOW;
+}
+
+/** Filtra picos: el joint solo cuenta ON/OFF si el nivel se mantiene PARAM_JOINT_DEBOUNCE_MS. */
+static void jointPoll(uint32_t nowMs) {
+  for (int i = 0; i < MOTION_SIDE_COUNT; i++) {
+    bool raw = jointRawOn((MotionSide)i);
+    if (raw == gJointOn[i]) {
+      gJointEdgeMs[i] = 0;
+      continue;
+    }
+    if (gJointEdgeMs[i] == 0) {
+      gJointEdgeMs[i] = nowMs;
+    } else if ((nowMs - gJointEdgeMs[i]) >= PARAM_JOINT_DEBOUNCE_MS) {
+      gJointOn[i] = raw;
+      gJointEdgeMs[i] = 0;
+    }
+  }
+}
+
+static bool jointIsOn(MotionSide side) {
+  jointPoll(millis());
+  return gJointOn[side];
 }
 
 static void motionPollEncoders(uint32_t nowMs) {
@@ -848,6 +875,10 @@ static const char* feedStageErrorName(FeedStageError err) {
       return "safety";
     case FEED_STAGE_ERR_STOP:
       return "stopped";
+    case FEED_STAGE_ERR_JOINT_R:
+      return "joint_r";
+    case FEED_STAGE_ERR_JOINT_L:
+      return "joint_l";
     default:
       return "unknown";
   }
@@ -956,6 +987,26 @@ static FeedStageResult FeedStage(FeedStageRequest req) {
 
     if (safetyIsActive()) {
       fail = FEED_STAGE_ERR_SAFETY;
+      break;
+    }
+
+    // Joint: detener el lado afectado y abortar FeedStage con error por lado.
+    if (req.useR && jointIsOn(MOTION_SIDE_R)) {
+      if (!sideFeedStopped[MOTION_SIDE_R]) {
+        feederStop(MOTION_SIDE_R);
+        canSdoDownloadU32(feederNode(MOTION_SIDE_R), SERVO_OD_TARGET_VELOCITY, 0, 0);
+        sideFeedStopped[MOTION_SIDE_R] = true;
+      }
+      fail = FEED_STAGE_ERR_JOINT_R;
+      break;
+    }
+    if (req.useL && jointIsOn(MOTION_SIDE_L)) {
+      if (!sideFeedStopped[MOTION_SIDE_L]) {
+        feederStop(MOTION_SIDE_L);
+        canSdoDownloadU32(feederNode(MOTION_SIDE_L), SERVO_OD_TARGET_VELOCITY, 0, 0);
+        sideFeedStopped[MOTION_SIDE_L] = true;
+      }
+      fail = FEED_STAGE_ERR_JOINT_L;
       break;
     }
 
@@ -1718,6 +1769,7 @@ static void motionYieldMs(uint32_t ms) {
   while ((uint32_t)(millis() - t0) < ms) {
     pollSerial();
     canServiceRxDrain();
+    jointPoll(millis());
     delay(1);
   }
 }
@@ -1747,6 +1799,7 @@ void loop() {
   canServiceRxDrain();
 
   uint32_t now = millis();
+  jointPoll(now);
   if (now - gLastEncoderPollMs >= PARAM_ENC_POLL_MS) {
     gLastEncoderPollMs = now;
     updateEncoderSide(MOTION_SIDE_R, now);

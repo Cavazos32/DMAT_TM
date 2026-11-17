@@ -67,16 +67,15 @@ static void wifiPoll() {
 }
 
 static void clampSide(PfSideParams& p) {
+  // RPM de salida. Puller 10:1 → techo salida 300 (eje 3000).
   if (p.rpm < 1.0f) p.rpm = 1.0f;
   if (p.rpm > 3000.0f) p.rpm = 3000.0f;
   if (p.pullerRpm < 1.0f) p.pullerRpm = 1.0f;
-  if (p.pullerRpm > 3000.0f) p.pullerRpm = 3000.0f;
+  if (p.pullerRpm > 300.0f) p.pullerRpm = 300.0f;
   if (p.settleMs < 10) p.settleMs = 10;
   if (p.settleMs > 500) p.settleMs = 500;
   if (p.onSec < 0.1f) p.onSec = 0.1f;
   if (p.onSec > 120.0f) p.onSec = 120.0f;
-  if (p.offFaultSec < 0.5f) p.offFaultSec = 0.5f;
-  if (p.offFaultSec > 300.0f) p.offFaultSec = 300.0f;
   if (p.stallFaultSec < 0.5f) p.stallFaultSec = 0.5f;
   if (p.stallFaultSec > 60.0f) p.stallFaultSec = 60.0f;
 }
@@ -123,8 +122,6 @@ static void appendCfg(String& j, const PfSideParams& c) {
   j += String(c.settleMs);
   j += ",\"on_s\":";
   appendFloat(j, c.onSec, 2);
-  j += ",\"off_fault_s\":";
-  appendFloat(j, c.offFaultSec, 2);
   j += ",\"stall_fault_s\":";
   appendFloat(j, c.stallFaultSec, 2);
   j += "}";
@@ -151,8 +148,8 @@ static uint8_t sideReportedFault(const SideLive& s) {
 }
 
 static bool sideEffectiveIdle(const SideLive& s) {
-  // Holgura omitida: el esclavo puede reportar error/HOLGURA o quedar en
-  // error tras limpiar fault; para listo/estabilizado cuenta como idle.
+  // Alimentacion omitida: el esclavo puede reportar error/HOLGURA residual;
+  // para listo/estabilizado cuenta como idle.
   if (s.omitHolgura && (s.fault == FAULT_HOLGURA || strcmp(s.state, "error") == 0))
     return true;
   return strcmp(s.state, "idle") == 0;
@@ -245,8 +242,7 @@ static void sendStatus() {
 
 static bool cfgSame(const PfSideParams& a, const PfSideParams& b) {
   return a.rpm == b.rpm && a.pullerRpm == b.pullerRpm && a.settleMs == b.settleMs
-    && a.onSec == b.onSec && a.offFaultSec == b.offFaultSec
-    && a.stallFaultSec == b.stallFaultSec;
+    && a.onSec == b.onSec && a.stallFaultSec == b.stallFaultSec;
 }
 
 static void cfgLoadNvsSide(char side, PfSideParams& dst) {
@@ -259,8 +255,6 @@ static void cfgLoadNvsSide(char side, PfSideParams& dst) {
   dst.settleMs = (uint16_t)gPrefs.getUShort(key, dst.settleMs);
   snprintf(key, sizeof(key), "%c_on", side);
   dst.onSec = gPrefs.getFloat(key, dst.onSec);
-  snprintf(key, sizeof(key), "%c_off", side);
-  dst.offFaultSec = gPrefs.getFloat(key, dst.offFaultSec);
   snprintf(key, sizeof(key), "%c_stall", side);
   dst.stallFaultSec = gPrefs.getFloat(key, dst.stallFaultSec);
 }
@@ -275,8 +269,6 @@ static void cfgSaveNvsSide(char side, const PfSideParams& src) {
   gPrefs.putUShort(key, src.settleMs);
   snprintf(key, sizeof(key), "%c_on", side);
   gPrefs.putFloat(key, src.onSec);
-  snprintf(key, sizeof(key), "%c_off", side);
-  gPrefs.putFloat(key, src.offFaultSec);
   snprintf(key, sizeof(key), "%c_stall", side);
   gPrefs.putFloat(key, src.stallFaultSec);
 }
@@ -349,7 +341,7 @@ static void handleStatusPost() {
       live->state[sizeof(live->state) - 1] = 0;
     }
   }
-  // Con omit activo no se sostiene ni se reinyecta FAULT_HOLGURA.
+  // Con omit alimentacion activo no se sostiene ni se reinyecta FAULT_HOLGURA.
   // También hay que salir de "error": si solo se limpia fault, masterStable
   // sigue viendo state=error y nunca marca stable/ready (E099 en el HMI).
   if (live->omitHolgura && live->fault == FAULT_HOLGURA) {
@@ -374,7 +366,6 @@ static bool readCfg(const String& body, PfSideParams& cfg) {
   if (jsonNum(body, "puller_rpm", v)) { cfg.pullerRpm = v; any = true; }
   if (jsonNum(body, "settle_ms", v)) { cfg.settleMs = (uint16_t)v; any = true; }
   if (jsonNum(body, "on_s", v)) { cfg.onSec = v; any = true; }
-  if (jsonNum(body, "off_fault_s", v)) { cfg.offFaultSec = v; any = true; }
   if (jsonNum(body, "stall_fault_s", v)) { cfg.stallFaultSec = v; any = true; }
   if (any) clampSide(cfg);
   return any;
@@ -414,7 +405,7 @@ static void replySetOmitSerial(const String& body) {
   }
   bool on = live->omitHolgura;
   if (jsonBool(body, "on", on)) live->omitHolgura = on;
-  // Omitir debe liberar la falla de holgura ya latcheada (si no, Reset queda bloqueado).
+  // Omitir alimentacion libera FAULT_HOLGURA latcheada (si no, Reset queda bloqueado).
   if (live->omitHolgura && live->fault == FAULT_HOLGURA) {
     live->fault = FAULT_NONE;
     if (strcmp(live->state, "error") == 0) {

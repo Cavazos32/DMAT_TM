@@ -4,7 +4,7 @@
 #include "config.h"
 #include "ErrorCode.h"
 #include <HTTPClient.h>
-#include <StepperRMT.h>
+#include "MotorControl.h"
 #include <WiFi.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
@@ -20,7 +20,6 @@ struct FeedParams {
   float pullerRpm = PULLER_RPM;
   uint16_t settleMs = HOLGURA_SETTLE_MS;
   float onSec = HOLGURA_ON_FEED_SEC;
-  float offFaultSec = HOLGURA_OFF_FAULT_SEC;
   float stallFaultSec = HOLGURA_STALL_FAULT_SEC;
 };
 
@@ -50,114 +49,61 @@ static FeedParams paramsNow() {
 }
 
 static void clampFeed(FeedParams& p) {
-  if (p.rpm < RPM_MIN) p.rpm = RPM_MIN;
-  if (p.rpm > RPM_MAX) p.rpm = RPM_MAX;
-  if (p.pullerRpm < RPM_MIN) p.pullerRpm = RPM_MIN;
-  if (p.pullerRpm > RPM_MAX) p.pullerRpm = RPM_MAX;
+  // RPM de salida; el límite de eje (3K) lo aplica MotorControl vía gearRatio.
+  const float pullerOutMax = MOTOR_CTRL_RPM_MAX / PULLER_GEAR_RATIO;
+  if (p.rpm < MOTOR_CTRL_RPM_MIN) p.rpm = MOTOR_CTRL_RPM_MIN;
+  if (p.rpm > MOTOR_CTRL_RPM_MAX) p.rpm = MOTOR_CTRL_RPM_MAX;
+  if (p.pullerRpm < MOTOR_CTRL_RPM_MIN) p.pullerRpm = MOTOR_CTRL_RPM_MIN;
+  if (p.pullerRpm > pullerOutMax) p.pullerRpm = pullerOutMax;
   if (p.settleMs < HOLGURA_SETTLE_MS_MIN) p.settleMs = HOLGURA_SETTLE_MS_MIN;
   if (p.settleMs > HOLGURA_SETTLE_MS_MAX) p.settleMs = HOLGURA_SETTLE_MS_MAX;
   if (p.onSec < 0.1f) p.onSec = 0.1f;
   if (p.onSec > 120.0f) p.onSec = 120.0f;
-  if (p.offFaultSec < 0.5f) p.offFaultSec = 0.5f;
-  if (p.offFaultSec > 300.0f) p.offFaultSec = 300.0f;
   if (p.stallFaultSec < 0.5f) p.stallFaultSec = 0.5f;
   if (p.stallFaultSec > 60.0f) p.stallFaultSec = 60.0f;
 }
 
-// --- Steppers: mismo patrón que PreFeeder TCM (feeder + motor2), sin limitar RPM_MAX
-//     y con parada suave setSpeed(0) en ciclo (no Brake).
+// --- Motores vía MotorControl: Puller=A (loop, 10:1), Feeder=B (tarea, 1:1). ---
 
-static StepperRMT* feeder = nullptr;
-static StepperRMT* puller = nullptr;
-static float commandedFeederRpm = 0.0f;
-static float commandedPullerRpm = 0.0f;
-static uint8_t gPullerDir = 1;  // 1 = DIR MOSFET activo
-static bool motorsReady = false;
-
-static void PullerDir(uint8_t on) {
-  static bool ready = false;
-  if (!ready) {
-    pinMode(PIN_PULLER_DIR, OUTPUT);
-    ready = true;
-  }
-  gPullerDir = on ? 1 : 0;
-  digitalWrite(PIN_PULLER_DIR, gPullerDir ? HIGH : LOW);
-}
+static MotorCtrl gPuller;
+static MotorCtrl gFeeder;
 
 static bool FeedMotorMoving() {
-  if (commandedFeederRpm > 0.5f) return true;
-  return feeder && fabsf(feeder->currentRPM()) > 0.5f;
+  return gFeeder.running || fabsf(gFeeder.commandedRpm) > 0.5f;
 }
 
 static bool MotorPullerMoving() {
-  if (commandedPullerRpm > 0.5f) return true;
-  return puller && fabsf(puller->currentRPM()) > 0.5f;
+  return gPuller.running || fabsf(gPuller.commandedRpm) > 0.5f;
 }
 
-// Parada suave en ciclo (requisito Class): no Brake — evita reset RMT.
-static void motorSoftStopIfRunning(StepperRMT* m, float& commanded) {
-  if (!m) return;
-  if (commanded > 0.01f || m->targetRPM() > 0.01f || fabsf(m->currentRPM()) > 0.01f) {
-    m->setSpeed(0.0f);
-    commanded = 0.0f;
-  }
+static void FeedMotor(float rpm) {
+  if (rpm <= 0.5f)
+    motorBRequestStop(&gFeeder);
+  else
+    motorBRequestRpm(&gFeeder, rpm);
 }
 
-// Igual que TCM: solo cambia el target cuando la consigna realmente cambió.
-static void motorApplyRpm(StepperRMT* m, float& commanded, float targetRpm) {
-  if (!m) return;
-  if (targetRpm < RPM_MIN) {
-    motorSoftStopIfRunning(m, commanded);
-    return;
-  }
-  targetRpm = constrain(targetRpm, RPM_MIN, RPM_MAX);
-  // La caché sola no basta: si la librería perdió/reseteó el target, reenviarlo.
-  if (fabsf(commanded - targetRpm) <= 0.5f
-      && fabsf(m->targetRPM() - targetRpm) <= 0.5f)
-    return;
-  if (m->setSpeed(targetRpm, MOTOR_ACCEL)) commanded = targetRpm;
-  // Si falla, motorsCommand se ejecuta otra vez y reintenta sin reiniciar perfil.
+static void MotorPuller(float rpm) {
+  motorARun(&gPuller, rpm <= 0.5f ? 0.0f : rpm);
 }
 
-static void motorsCommand(float feedRpm, float pullRpm) {
-  // Nunca permitir JOG parcial: ambos canales deben estar inicializados.
-  if (!motorsReady || !feeder || !puller) return;
-  motorApplyRpm(feeder, commandedFeederRpm, feedRpm > 0.5f ? feedRpm : 0.0f);
-  motorApplyRpm(puller, commandedPullerRpm, pullRpm > 0.5f ? pullRpm : 0.0f);
-}
+static void motorsBegin() {
+  gPuller.name = "Puller";
+  gPuller.id = 0;
+  gPuller.pinStep = PIN_PULLER_STEP;
+  gPuller.pinDir = -1;
+  gPuller.taskCore = -1;
+  gPuller.gearRatio = PULLER_GEAR_RATIO;
 
-static bool motorsInit() {
-  motorsReady = false;
-  PullerDir(1);
+  gFeeder.name = "Feeder";
+  gFeeder.id = 1;
+  gFeeder.pinStep = PIN_FEEDER_STEP;
+  gFeeder.pinDir = -1;
+  gFeeder.taskCore = 1;
+  gFeeder.gearRatio = FEEDER_GEAR_RATIO;
 
-  // Orden TCM: motor2 (GPIO 32) primero, luego feeder (GPIO 18).
-  StepperRMT::Pins pPull = { PIN_PULLER_STEP, -1, -1, -1, -1, -1, -1 };
-  puller = new StepperRMT(DRIVER_DM556T, pPull);
-  if (!puller->begin()) {
-    Serial.printf("[PF] puller begin FAIL GPIO %d\n", PIN_PULLER_STEP);
-    delete puller;
-    puller = nullptr;
-    return false;
-  }
-  puller->setDefault(MOTOR_MICROSTEP, MOTOR_ACCEL, MOTOR_DECEL);
-  puller->Brake();
-  commandedPullerRpm = 0.0f;
-
-  StepperRMT::Pins pFeed = { PIN_FEEDER_STEP, -1, -1, -1, -1, -1, -1 };
-  feeder = new StepperRMT(DRIVER_DM556T, pFeed);
-  if (!feeder->begin()) {
-    Serial.printf("[PF] feeder begin FAIL GPIO %d\n", PIN_FEEDER_STEP);
-    delete feeder;
-    feeder = nullptr;
-    return false;
-  }
-  feeder->setDefault(MOTOR_MICROSTEP, MOTOR_ACCEL, MOTOR_DECEL);
-  feeder->Brake();
-  commandedFeederRpm = 0.0f;
-
-  motorsReady = true;
-  Serial.printf("[PF] motors OK step F=%d P=%d\n", PIN_FEEDER_STEP, PIN_PULLER_STEP);
-  return true;
+  motorABegin(&gPuller);
+  motorBBegin(&gFeeder, "feeder_task");
 }
 
 // --- SensorMonitor: lectura y filtro. No mueve nada. ---
@@ -222,8 +168,6 @@ static uint32_t holguraSettleEndMs = 0;
 static uint32_t holguraTimedEndMs = 0;
 static bool holguraLastOn = false;
 static bool holguraSawOn = false;
-static bool holguraPostCycleOffWatch = false;
-static uint32_t holguraOffSinceMs = 0;
 static uint32_t holguraStallSinceMs = 0;
 
 static void resetHolguraFeedState() {
@@ -232,8 +176,6 @@ static void resetHolguraFeedState() {
   holguraTimedEndMs = 0;
   holguraLastOn = false;
   holguraSawOn = false;
-  holguraPostCycleOffWatch = false;
-  holguraOffSinceMs = 0;
   holguraStallSinceMs = 0;
 }
 
@@ -242,7 +184,6 @@ static void holguraOnRisingEdge(uint32_t nowMs, const FeedParams& p) {
   holguraPhase = HOLG_SETTLE;
   holguraSettleEndMs = nowMs + p.settleMs;
   holguraTimedEndMs = 0;
-  holguraOffSinceMs = 0;
 }
 
 static void stopFeederDemand() {
@@ -262,7 +203,8 @@ static bool feedMayRun() {
 
 static void applyFeedOutputs(const FeedParams& p) {
   const bool run = feederDemand && feedMayRun();
-  motorsCommand(run ? p.rpm : 0.0f, run ? p.pullerRpm : 0.0f);
+  FeedMotor(run ? p.rpm : 0.0f);
+  MotorPuller(run ? p.pullerRpm : 0.0f);
 }
 
 static void enterFault(SystemFault f) {
@@ -273,7 +215,6 @@ static void enterFault(SystemFault f) {
 
 static void beginHolguraFeed(const SensorSnapshot& s) {
   if (s.holguraOn) return;
-  holguraPostCycleOffWatch = false;
   feederMode = FEED_HOLGURA;
   holguraSawOn = false;
   holguraSettleEndMs = 0;
@@ -283,39 +224,13 @@ static void beginHolguraFeed(const SensorSnapshot& s) {
   feederDemand = true;
 }
 
-static void stopHolguraFeedCycle(uint32_t nowMs, const SensorSnapshot& s) {
+static void stopHolguraFeedCycle(const SensorSnapshot& s) {
   feederDemand = false;
   feederMode = FEED_NONE;
   holguraPhase = HOLG_IDLE;
   holguraTimedEndMs = 0;
   holguraLastOn = s.holguraOn;
-  if (holguraSawOn) {
-    holguraPostCycleOffWatch = true;
-    holguraSawOn = false;
-  }
-  if (!s.holguraOn)
-    holguraOffSinceMs = nowMs;
-  else
-    holguraOffSinceMs = 0;
-}
-
-static bool holguraOffFaultPaused() {
-  return feederMode == FEED_HOLGURA &&
-         (holguraPhase == HOLG_SETTLE || holguraPhase == HOLG_TIMED_FEED);
-}
-
-static void serviceHolguraOffFault(uint32_t nowMs, const SensorSnapshot& s, const FeedParams& p) {
-  if (fault != FAULT_NONE) {
-    holguraOffSinceMs = 0;
-    return;
-  }
-  if (s.holguraOn || holguraOffFaultPaused()) {
-    holguraOffSinceMs = 0;
-    return;
-  }
-  if (!holguraOffSinceMs) holguraOffSinceMs = nowMs;
-  if ((nowMs - holguraOffSinceMs) >= (uint32_t)(p.offFaultSec * 1000.0f))
-    enterFault(FAULT_HOLGURA);
+  holguraSawOn = false;
 }
 
 static void serviceHolguraStallFault(uint32_t nowMs, const SensorSnapshot& s, const FeedParams& p) {
@@ -354,7 +269,7 @@ static void serviceHolguraFeed(uint32_t nowMs, const SensorSnapshot& s, const Fe
   if (holguraPhase == HOLG_TIMED_FEED) {
     feederDemand = true;
     if (holguraTimedEndMs && (int32_t)(nowMs - holguraTimedEndMs) >= 0)
-      stopHolguraFeedCycle(nowMs, s);
+      stopHolguraFeedCycle(s);
     return;
   }
   holguraPhase = HOLG_WAIT_ON;
@@ -389,16 +304,16 @@ static void FeedingMode(uint32_t nowMs) {
 
   // JOG (HMI o boton): fuerza giro ya; sin fallas ni feed_lock.
   if (forceFeedActive()) {
-    holguraOffSinceMs = 0;
     holguraStallSinceMs = 0;
     feederDemand = true;
-    motorsCommand(p.rpm, p.pullerRpm);
+    FeedMotor(p.rpm);
+    MotorPuller(p.pullerRpm);
     return;
   }
 
   if (fault == FAULT_LIMIT && !s.limitActive) fault = FAULT_NONE;
   if (fault == FAULT_CYLINDER && !s.cylinderOpen) fault = FAULT_NONE;
-  // Holgura se limpia con sensor ON o si el operador omitio la vigilancia.
+  // Holgura se limpia con sensor ON o si se omitio alimentacion (IDLE intencional).
   if (fault == FAULT_HOLGURA && (s.holguraOn || gOmitHolgura)) fault = FAULT_NONE;
 
   // Limite / cilindro solo afectan el ciclo automatico.
@@ -413,23 +328,21 @@ static void FeedingMode(uint32_t nowMs) {
     return;
   }
 
+  // Omitir alimentacion: Holgura OFF && omit ON → IDLE, sin secuencia ni stall.
+  if (gOmitHolgura && !s.holguraOn) {
+    stopFeederDemand();
+    holguraStallSinceMs = 0;
+    applyFeedOutputs(p);
+    return;
+  }
+
   if (fault == FAULT_NONE) {
-    if (holguraPostCycleOffWatch && s.holguraOn) {
-      holguraPostCycleOffWatch = false;
-      holguraOffSinceMs = 0;
-    }
     if (!feederDemand && !s.holguraOn)
       beginHolguraFeed(s);
     serviceHolguraFeed(nowMs, s, p);
   }
 
-  if (!gOmitHolgura) {
-    serviceHolguraOffFault(nowMs, s, p);
-    serviceHolguraStallFault(nowMs, s, p);
-  } else {
-    holguraOffSinceMs = 0;
-    holguraStallSinceMs = 0;
-  }
+  serviceHolguraStallFault(nowMs, s, p);
   applyFeedOutputs(p);
 }
 
@@ -545,7 +458,6 @@ static void applyConfigJson(const String& body) {
   if (jsonNum(cfg, "puller_rpm", v)) next.pullerRpm = v;
   if (jsonNum(cfg, "settle_ms", v)) next.settleMs = (uint16_t)v;
   if (jsonNum(cfg, "on_s", v)) next.onSec = v;
-  if (jsonNum(cfg, "off_fault_s", v)) next.offFaultSec = v;
   if (jsonNum(cfg, "stall_fault_s", v)) next.stallFaultSec = v;
   bool bit = false;
   if (jsonBoolCfg(body, "feed_lock", bit)) gFeedLock = bit;
@@ -559,7 +471,7 @@ static void applyConfigJson(const String& body) {
   if (xSemaphoreTake(paramMux, portMAX_DELAY)) {
     const bool changed = next.rpm != gFeed.rpm || next.pullerRpm != gFeed.pullerRpm
       || next.settleMs != gFeed.settleMs || next.onSec != gFeed.onSec
-      || next.offFaultSec != gFeed.offFaultSec || next.stallFaultSec != gFeed.stallFaultSec;
+      || next.stallFaultSec != gFeed.stallFaultSec;
     gFeed = next;
     xSemaphoreGive(paramMux);
     if (changed)
@@ -660,9 +572,9 @@ void setup() {
   Serial.printf("\nPF %s -> %s | JOG - %s GPIO %u\n", PF_SIDE_TAG, PF_MASTER_HOST, PF_SIDE_TAG,
                 (unsigned)PIN_JOG);
   clampFeed(gFeed);
+  motorsBegin();
   paramMux = xSemaphoreCreateMutex();
   statusMux = xSemaphoreCreateMutex();
-  if (!motorsInit()) Serial.println("[PF] motorsInit incomplete");
   wifiStart();
   xTaskCreatePinnedToCore(netTask, "pfnet", 8192, nullptr, 1, nullptr, 0);
 }

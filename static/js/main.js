@@ -2,8 +2,6 @@
   const STORAGE_EVENTS = "dmat_show_events_panel";
   const STORAGE_THEME = "dmat_theme";
   const STORAGE_MODEL = "dmat_modelo";
-  const STORAGE_COMP = "dmat_comp_mm";
-  const LM_PIECE_OFFSET_MM = 55;
 
   const els = {
     statusBanner: document.getElementById("statusBanner"),
@@ -14,7 +12,9 @@
     selectModelo: document.getElementById("selectModelo"),
     metricLongitud: document.getElementById("metricLongitud"),
     metricCantidad: document.getElementById("metricCantidad"),
-    metricCompensacion: document.getElementById("metricCompensacion"),
+    metricCutCompR: document.getElementById("metricCutCompR"),
+    metricCutCompL: document.getElementById("metricCutCompL"),
+    pieceTube: document.getElementById("pieceTube"),
     metricTiempoCiclo: document.getElementById("metricTiempoCiclo"),
     metricPiezasProducidas: document.getElementById("metricPiezasProducidas"),
     metricPiezasTotal: document.getElementById("metricPiezasTotal"),
@@ -44,6 +44,14 @@
     pfBanR: document.getElementById("pfBanR"),
     toggleEventsPanel: document.getElementById("toggleEventsPanel"),
     toggleChecklistBypass: document.getElementById("toggleChecklistBypass"),
+    // === BEGIN TEMP JOINT SIM OFFLINE — DELETE ===
+    jointSimDivider: document.getElementById("jointSimDivider"),
+    jointSimPanel: document.getElementById("jointSimPanel"),
+    jointSimSide: document.getElementById("jointSimSide"),
+    btnJointSimFeed: document.getElementById("btnJointSimFeed"),
+    btnJointSimFabricate: document.getElementById("btnJointSimFabricate"),
+    btnJointSimClear: document.getElementById("btnJointSimClear"),
+    // === END TEMP JOINT SIM OFFLINE — DELETE ===
     settingsModal: document.getElementById("settingsModal"),
     parametrosModal: document.getElementById("parametrosModal"),
     btnAppSettings: document.getElementById("btnAppSettings"),
@@ -66,7 +74,6 @@
     settingsTabPanels: document.querySelectorAll("[data-tab-panel]"),
     cycleStepsList: document.getElementById("cycleStepsList"),
     cycleParamsForm: document.getElementById("cycleParamsForm"),
-    cycleCutMm: document.getElementById("cycleCutMm"),
     cycleStepStart: document.getElementById("cycleStepStart"),
     cycleStepNext: document.getElementById("cycleStepNext"),
     cycleStepStop: document.getElementById("cycleStepStop"),
@@ -94,6 +101,7 @@
     recoveryCode: document.getElementById("recoveryCode"),
     recoveryErrorDesc: document.getElementById("recoveryErrorDesc"),
     recoveryText: document.getElementById("recoveryText"),
+    recoveryJointLegend: document.getElementById("recoveryJointLegend"),
     recoverySensors: document.getElementById("recoverySensors"),
     recoverySensorR: document.getElementById("recoverySensorR"),
     recoverySensorL: document.getElementById("recoverySensorL"),
@@ -156,6 +164,7 @@
     stopped: "status-banner--stopped",
     error: "status-banner--error",
     manual: "status-banner--manual",
+    warning: "status-banner--warning",
   };
 
   function formatTime(date) {
@@ -218,47 +227,37 @@
     }
   }
 
-  function setCompInput(mm) {
-    if (!els.metricCompensacion) return;
-    if (document.activeElement === els.metricCompensacion) return;
+  function setCutCompInput(el, mm) {
+    if (!el) return;
+    if (document.activeElement === el) return;
     const n = Number(mm);
-    els.metricCompensacion.value = Number.isFinite(n) ? String(n) : "0";
+    el.value = Number.isFinite(n) ? String(n) : "0";
   }
 
-  async function saveMeasureComp(mm, quiet) {
+  async function saveCutCompSide(side, mm) {
+    const key = side === "R" ? "cut_comp_r_mm" : "cut_comp_l_mm";
+    const params = {};
+    params[key] = mm;
     try {
-      const res = await fetch("/api/compensacion", {
+      const res = await fetch("/api/cycle", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mm: mm }),
+        body: JSON.stringify({ params: params }),
       });
       const data = await res.json();
       if (!data.ok) {
-        if (!quiet) pushLocalEvent(data.error || "No se guardó la compensación.", "error");
+        pushLocalEvent(data.error || "No se guardó la compensación.", "error");
         return;
       }
-      persistCompLocal(mm);
+      if (data.params) fillCycleParamsForm(data.params);
       if (data.state) applyState(data.state);
     } catch (err) {
-      if (!quiet) pushLocalEvent("No se guardó la compensación.", "error");
-    }
-  }
-
-  function persistCompLocal(mm) {
-    try {
-      localStorage.setItem(STORAGE_COMP, String(mm));
-    } catch (e) {
-      /* ignore */
+      pushLocalEvent("No se guardó la compensación.", "error");
     }
   }
 
   function syncUiFromPersistedState(state) {
     if (!state) return;
-    const comp = Number(state.compensacion_medicion_mm);
-    if (Number.isFinite(comp)) {
-      persistCompLocal(comp);
-      setCompInput(comp);
-    }
     const modelo = state.numero_modelo || "";
     if (modelo) {
       try {
@@ -270,32 +269,21 @@
     }
   }
 
-  function formatCutPreview(state) {
+  function updatePieceVisual(state) {
+    if (!els.pieceTube) return;
     const len = Number(state && state.longitud_modelo_mm);
-    if (!Number.isFinite(len) || len <= 0) return "";
-    const base =
-      state.cut_base_mm != null
-        ? Number(state.cut_base_mm)
-        : len - LM_PIECE_OFFSET_MM;
-    const mode = !!state.cut_comp_mode;
-    if (!mode) {
-      const last =
-        state.cut_mm_last != null
-          ? Number(state.cut_mm_last)
-          : base + (Number(state.compensacion_medicion_mm) || 0);
-      return Number.isFinite(last) ? last.toFixed(2) : "";
+    const hasLen = Number.isFinite(len) && len > 0;
+    let scale = 0.35;
+    if (hasLen) {
+      let maxLen = len;
+      modelosCatalog.forEach(function (item) {
+        const n = Number(item.longitud_mm);
+        if (Number.isFinite(n) && n > maxLen) maxLen = n;
+      });
+      scale = Math.max(0.2, Math.min(1, len / Math.max(maxLen, 1)));
     }
-    const compR = Number(state.cut_comp_r_mm);
-    const compL = Number(state.cut_comp_l_mm);
-    const cutR = base + (Number.isFinite(compR) ? compR : 0);
-    const cutL = base + (Number.isFinite(compL) ? compL : 0);
-    return (
-      base.toFixed(2) +
-      " | R " +
-      cutR.toFixed(2) +
-      " | L " +
-      cutL.toFixed(2)
-    );
+    els.pieceTube.style.setProperty("--piece-scale", String(scale));
+    els.pieceTube.classList.toggle("is-empty", !hasLen);
   }
 
   async function maybeRestoreModelFromLocal() {
@@ -377,16 +365,43 @@
 
     const estado = state.estado || "idle";
     let bannerEstado = estado;
+    const recNow = state.recovery || {};
+    const jointWarn = !!recNow.active && recNow.kind === "joint";
     if (state.rutina_manos) bannerEstado = "stopped";
     else if (state.rutina) bannerEstado = "manual";
+    else if (jointWarn) bannerEstado = "warning";
     els.statusBanner.className =
       "status-banner status-banner--full " +
       (bannerClassByEstado[bannerEstado] || bannerClassByEstado.idle);
-    els.statusBannerLabel.textContent =
-      estado === "error" && state.ciclo_error
-        ? (state.estado_label || "Error") + " · " + state.ciclo_error
-        : state.estado_label || "En espera";
-    els.statusBannerDetail.textContent = state.mensaje || "";
+    if (jointWarn) {
+      const side = String(recNow.side || "");
+      const sideLabel =
+        side === "RL" ? "Right y Left" : side === "L" ? "Left" : side === "R" ? "Right" : "";
+      els.statusBannerLabel.textContent =
+        "Warning Joint" +
+        (sideLabel ? " · Joint " + sideLabel : "") +
+        (recNow.code ? " · " + recNow.code : "");
+      // Banner: solo warning fijo. El paso a paso va en el popup.
+      els.statusBannerDetail.textContent =
+        sideLabel
+          ? "Joint " + sideLabel + ". Abre el aviso para continuar."
+          : "Abre el aviso para continuar.";
+    } else if (recNow.active && recNow.kind !== "joint") {
+      // Error / recuperación: banner solo código; instrucciones en el popup.
+      const errCode = recNow.code || state.ciclo_error || "";
+      els.statusBannerLabel.textContent =
+        (estado === "error" ? "Error" : state.estado_label || "Recuperación") +
+        (errCode ? " · " + errCode : "");
+      els.statusBannerDetail.textContent = errCode
+        ? errCode + ". Abre el aviso para continuar."
+        : "Abre el aviso para continuar.";
+    } else {
+      els.statusBannerLabel.textContent =
+        estado === "error" && state.ciclo_error
+          ? (state.estado_label || "Error") + " · " + state.ciclo_error
+          : state.estado_label || "En espera";
+      els.statusBannerDetail.textContent = state.mensaje || "";
+    }
 
     const pct = Math.min(100, Math.max(0, Number(state.progreso_pct) || 0));
     els.progressPct.textContent = Math.round(pct) + " %";
@@ -394,14 +409,13 @@
 
     syncModelSelect(state.numero_modelo || "");
     els.metricLongitud.textContent = formatMm(state.longitud_modelo_mm);
-    if (els.cycleCutMm) {
-      els.cycleCutMm.value = formatCutPreview(state);
-    }
     setCantidadInput(
       state.cantidad,
       !!state.ciclo_en_curso || !!state.charola_llena || !!state.lote_activo
     );
-    setCompInput(state.compensacion_medicion_mm);
+    setCutCompInput(els.metricCutCompR, state.cut_comp_r_mm);
+    setCutCompInput(els.metricCutCompL, state.cut_comp_l_mm);
+    updatePieceVisual(state);
     els.metricTiempoCiclo.textContent = formatSeconds(state.tiempo_ciclo_s);
     if (els.metricPiezasProducidas) {
       els.metricPiezasProducidas.textContent = formatPiezasCount(state.piezas_producidas);
@@ -420,6 +434,13 @@
     syncCycleStepTestControls(state);
     syncRoutine(state);
     syncRecovery(state);
+    // === BEGIN TEMP JOINT SIM OFFLINE — DELETE ===
+    if (els.jointSimPanel) {
+      const showSim = !!state.joint_sim_offline;
+      els.jointSimPanel.hidden = !showSim;
+      if (els.jointSimDivider) els.jointSimDivider.hidden = !showSim;
+    }
+    // === END TEMP JOINT SIM OFFLINE — DELETE ===
     renderCycleSteps(
       state.ciclo_paso_id || "",
       state.ciclo_paso_indice,
@@ -629,22 +650,25 @@
     if (!els.recoveryModal || els.recoveryModal.hidden) return;
     recoveryPollBusy = true;
     try {
-      let on = true;
-      const res = await fetch("/api/plc/status");
-      const data = await res.json();
-      const st = (data && data.status) || {};
-      on =
-        st.fault_cutter === true ||
-        st.sens_cutter === true ||
-        st.cutter_r === true ||
-        st.cutter_l === true;
-      // Un sensor físico de cortador; se muestra en ambos lados.
-      setRecoverySensorEl(els.recoverySensorR, on);
-      setRecoverySensorEl(els.recoverySensorL, on);
-      const cont = els.recoveryActions
-        ? els.recoveryActions.querySelector('[data-recovery="manguera"]')
-        : null;
-      if (cont) cont.disabled = on;
+      const mode = String(els.recoveryModal.dataset.sensorMode || "");
+      if (mode === "joint" || mode === "laser") {
+        const res = await fetch("/api/motion/status");
+        const data = await res.json();
+        const enc = (data && data.encoder) || {};
+        if (mode === "joint") {
+          setRecoverySensorEl(els.recoverySensorR, !!(enc.R && enc.R.joint === true));
+          setRecoverySensorEl(els.recoverySensorL, !!(enc.L && enc.L.joint === true));
+        } else {
+          const onR = !!(enc.R && enc.R.laser === true);
+          const onL = !!(enc.L && enc.L.laser === true);
+          setRecoverySensorEl(els.recoverySensorR, onR);
+          setRecoverySensorEl(els.recoverySensorL, onL);
+          const cont = els.recoveryActions
+            ? els.recoveryActions.querySelector('[data-recovery="manguera"]')
+            : null;
+          if (cont) cont.disabled = onR || onL;
+        }
+      }
     } catch (e) {
       /* ignore */
     } finally {
@@ -673,9 +697,82 @@
     return btn;
   }
 
-  function renderRecoveryActions(step, cuttersOn) {
+  function recoverySkipAvailable(step, rutina) {
+    if (step === "piezas" || step === "manguera" || step === "purga_error") return true;
+    // Purga: solo en límites (antes de rutina o ya terminada). No mientras rutina=="purga".
+    if (step === "purga" && String(rutina || "") !== "purga") return true;
+    return false;
+  }
+
+  function appendRecoverySkipButton() {
+    if (!els.recoveryActions) return;
+    const skip = recoveryPrimaryButton("SKIP", "btn-secondary btn-skip", "skip");
+    els.recoveryActions.appendChild(skip);
+  }
+
+  function renderRecoveryActions(step, cuttersOn, jointCtx, rutina) {
     if (!els.recoveryActions) return;
     els.recoveryActions.innerHTML = "";
+    const joint = jointCtx || null;
+    if (joint) {
+      if (step === "park" || step === "await_home") {
+        const wait = recoveryPrimaryButton(
+          step === "park"
+            ? "Yendo a Park… espera"
+            : "Terminando pieza del lado correcto… espera",
+          "btn-secondary",
+          "wait"
+        );
+        wait.disabled = true;
+        els.recoveryActions.appendChild(wait);
+        return;
+      }
+      if (step === "operator") {
+        const busy = !!(joint && joint.busy);
+        const alimentar = recoveryPrimaryButton(
+          "Alimentar",
+          "btn-manual",
+          "joint_alimentar"
+        );
+        const liberar = recoveryPrimaryButton(
+          "Liberar",
+          "btn-resume",
+          "joint_liberar"
+        );
+        const continuar = recoveryPrimaryButton(
+          "Continuar",
+          "btn-start",
+          "joint_continuar"
+        );
+        alimentar.disabled = busy;
+        liberar.disabled = busy;
+        continuar.disabled = busy;
+        els.recoveryActions.appendChild(alimentar);
+        els.recoveryActions.appendChild(liberar);
+        els.recoveryActions.appendChild(continuar);
+        return;
+      }
+      if (step === "purga") {
+        const wait = recoveryPrimaryButton(
+          "Purga Joint en curso, espera…",
+          "btn-secondary",
+          "wait"
+        );
+        wait.disabled = true;
+        els.recoveryActions.appendChild(wait);
+        return;
+      }
+      if (step === "listo") {
+        els.recoveryActions.appendChild(
+          recoveryPrimaryButton(
+            "Volver a la pantalla principal",
+            "btn-start",
+            "listo"
+          )
+        );
+      }
+      return;
+    }
     if (step === "error") {
       els.recoveryActions.appendChild(
         recoveryPrimaryButton("Reset", "btn-reset", "reset")
@@ -693,25 +790,49 @@
           "piezas"
         )
       );
+      appendRecoverySkipButton();
       els.recoveryActions.appendChild(
         recoveryPrimaryButton("Salir", "btn-secondary", "salir")
       );
       return;
     }
     if (step === "manguera") {
+      const atPark = !!(els.recoveryModal && els.recoveryModal.dataset.lmAtPark === "1");
+      const busy = !!(els.recoveryModal && els.recoveryModal.dataset.recoveryBusy === "1");
+      const lmBtn = recoveryPrimaryButton(
+        busy
+          ? atPark
+            ? "Yendo a Home… espera"
+            : "Yendo a Park… espera"
+          : atPark
+            ? "LM Guide → Home"
+            : "LM Guide → Park",
+        "btn-manual",
+        "lm_toggle"
+      );
+      lmBtn.disabled = busy;
+      els.recoveryActions.appendChild(lmBtn);
       const cont = recoveryPrimaryButton(
         "Continuar",
         "btn-resume",
         "manguera"
       );
-      cont.disabled = !!cuttersOn;
+      cont.disabled = !!cuttersOn || busy;
       els.recoveryActions.appendChild(cont);
+      appendRecoverySkipButton();
       els.recoveryActions.appendChild(
         recoveryPrimaryButton("Salir", "btn-secondary", "salir")
       );
       return;
     }
     if (step === "purga") {
+      if (recoverySkipAvailable(step, rutina)) {
+        appendRecoverySkipButton();
+        els.recoveryActions.appendChild(
+          recoveryPrimaryButton("Salir", "btn-secondary", "salir")
+        );
+        return;
+      }
       const wait = recoveryPrimaryButton(
         "Proceso de limpieza en curso, espera…",
         "btn-secondary",
@@ -719,6 +840,22 @@
       );
       wait.disabled = true;
       els.recoveryActions.appendChild(wait);
+      els.recoveryActions.appendChild(
+        recoveryPrimaryButton("Cancelar", "btn-secondary", "purga_cancel")
+      );
+      return;
+    }
+    if (step === "purga_error") {
+      els.recoveryActions.appendChild(
+        recoveryPrimaryButton("Retry", "btn-resume", "purga_retry")
+      );
+      els.recoveryActions.appendChild(
+        recoveryPrimaryButton("Cancelar", "btn-secondary", "purga_cancel")
+      );
+      appendRecoverySkipButton();
+      els.recoveryActions.appendChild(
+        recoveryPrimaryButton("Salir", "btn-secondary", "salir")
+      );
       return;
     }
     if (step === "listo") {
@@ -736,13 +873,20 @@
     const rec = state.recovery || {};
     const active = !!rec.active;
     const step = String(rec.step || "");
+    const jointKind = rec.kind === "joint";
     const enError = state.estado === "error" || !!state.ciclo_error;
     const showBtn = active || enError || !!state.post_error_purga;
 
     if (els.btnOpenRecovery) {
       els.btnOpenRecovery.hidden = !showBtn;
       els.btnOpenRecovery.disabled = !showBtn;
-      if (step === "listo") {
+      if (jointKind) {
+        if (step === "listo") {
+          els.btnOpenRecovery.textContent = "Ver Joint";
+        } else {
+          els.btnOpenRecovery.textContent = "Abrir Warning";
+        }
+      } else if (step === "listo") {
         els.btnOpenRecovery.textContent = "Ver recuperación";
       } else if (enError) {
         els.btnOpenRecovery.textContent = "Abrir Error";
@@ -760,9 +904,35 @@
       return;
     }
 
+    // Abrir popup para guiar al operador (Joint o error); el paso a paso no va en el banner.
+    if (active && step && step !== "listo") {
+      recoveryWantOpen = true;
+    }
+
     const viewStep = step || (enError ? "error" : "");
     const code = rec.code || state.ciclo_error || "";
-    const key = viewStep + "|" + code + "|" + (recoveryWantOpen ? "1" : "0");
+    const rutina = String(state.rutina || "");
+    const guideKey = String(rec.guide || "").slice(0, 80);
+    const key =
+      viewStep +
+      "|" +
+      code +
+      "|" +
+      (jointKind ? "j" : "e") +
+      "|" +
+      String(rec.side || "") +
+      "|" +
+      String(rec.origin || "") +
+      "|" +
+      (recoveryWantOpen ? "1" : "0") +
+      "|" +
+      (rec.busy ? "b" : "") +
+      "|" +
+      (rec.lm_at_park ? "p" : "h") +
+      "|" +
+      rutina +
+      "|" +
+      guideKey;
     const modalOpen = els.recoveryModal && !els.recoveryModal.hidden;
     if (!modalOpen && !recoveryWantOpen) {
       setRecoveryPoll(false);
@@ -772,42 +942,109 @@
       openRecoveryModal();
     }
 
+    if (els.recoveryModal) {
+      els.recoveryModal.dataset.jointMode = jointKind ? "1" : "";
+    }
+
     if (els.recoveryModalTitle) {
-      els.recoveryModalTitle.textContent =
-        viewStep === "listo" ? "Listo" : "Recuperación";
+      if (jointKind) {
+        const side = String(rec.side || "");
+        const sideLabel =
+          side === "RL"
+            ? "Right y Left"
+            : side === "L"
+              ? "Left"
+              : side === "R"
+                ? "Right"
+                : "";
+        els.recoveryModalTitle.textContent =
+          viewStep === "listo"
+            ? "Joint listo"
+            : "Warning Joint" + (sideLabel ? " · " + sideLabel : "");
+      } else {
+        els.recoveryModalTitle.textContent =
+          viewStep === "listo" ? "Listo" : "Recuperación";
+      }
     }
 
     const limitErr = code === "E094" || code === "E097";
+    const jointOrigin = String(rec.origin || "");
+    const stepGuide = String(rec.guide || "").trim();
+    const errorFixed = String(rec.mensaje || "").trim();
+    const jointMeta = {
+      park: [
+        "Joint · Park",
+        "Moviendo a Park",
+        stepGuide || "El LM Guide va a Park. Espera sin meter las manos.",
+      ],
+      await_home: [
+        "Joint · Fabricación",
+        "Terminando pieza del lado correcto",
+        stepGuide ||
+          "Se omite el corte del lado afectado. El lado correcto termina y regresa a Home. Luego iré a Park.",
+      ],
+      operator: [
+        "Joint · Intervención",
+        "Elige una acción",
+        stepGuide ||
+          "Revisa las tarjetas de color: Alimentar y Liberar son opcionales. Continuar inicia la purga cuando ya estés listo.",
+      ],
+      purga: [
+        "Joint · Purga",
+        "NO INTRODUCIR MANOS",
+        stepGuide || "Purga Joint en curso, espera.",
+      ],
+      listo: [
+        "Joint · Listo",
+        "Listo",
+        stepGuide ||
+          (jointOrigin === "fabricate"
+            ? "Puedes volver y pulsar Reanudar. La pieza del lado correcto ya quedó contada."
+            : "Puedes volver y pulsar Reanudar. La pieza incompleta se reintenta desde el inicio."),
+      ],
+    };
     const stepMeta = {
       error: [
         "Paso 1 de 5",
-        limitErr ? "Sensor límite PreAlimentador" : "",
-        limitErr
-          ? "Revisa el PreAlimentador y deja holgura adecuada. Usa JOG L/R (HMI o botón) si hace falta. Cuando el límite se libere, pulsa Reset y sigue los pasos."
-          : "Pulsa Reset para soltar el holder y la pieza. Luego sigue los pasos.",
+        limitErr ? "Sensor límite PreAlimentador" : "Error activo",
+        stepGuide ||
+          (limitErr
+            ? "Revisa el PreAlimentador y deja holgura adecuada. Usa JOG L/R si hace falta. Cuando el límite se libere, pulsa Reset."
+            : "Pulsa Reset para soltar el holder y la pieza. Luego sigue los pasos."),
       ],
       piezas: [
         "Paso 2 de 5",
         "Revisa las piezas",
-        "Confirma que las piezas están bien antes de seguir.",
+        stepGuide || "Confirma que las piezas están bien antes de seguir.",
       ],
       manguera: [
         "Paso 3 de 5",
-        "Posiciona la manguera",
-        "Mueve la manguera hacia atrás hasta apagar ambos cortadores. Cuando los dos digan Apagado, pulsa Continuar.",
+        "Sensores láser",
+        stepGuide ||
+          "Retira el material hasta apagar ambos sensores láser. Usa Park/Home del LM Guide si hace falta. Cuando digan Apagado, pulsa Continuar.",
       ],
       purga: [
         "Paso 4 de 5",
         "NO INTRODUCIR MANOS",
-        "Proceso de limpieza en curso, espera.",
+        stepGuide ||
+          "Purga automática: Park, cierra holder/encoder, alimenta y corta. Espera.",
+      ],
+      purga_error: [
+        "Paso 4 de 5",
+        "Error en purga",
+        stepGuide ||
+          "Revisa el sensor láser / material. Retry reintenta la purga. Cancelar vuelve a manguera.",
       ],
       listo: [
         "Paso 5 de 5",
         "Listo",
-        "Ya puedes volver a la pantalla principal y pulsar Reanudar. Esta pieza no suma al contador.",
+        stepGuide ||
+          "Ya puedes volver a la pantalla principal y pulsar Reanudar. Esta pieza no suma al contador.",
       ],
     };
-    const meta = stepMeta[viewStep] || stepMeta.error;
+    const meta = jointKind
+      ? jointMeta[viewStep] || jointMeta.operator
+      : stepMeta[viewStep] || stepMeta.error;
     if (els.recoveryStepLabel) els.recoveryStepLabel.textContent = meta[0];
     if (els.recoveryLead) {
       els.recoveryLead.hidden = !meta[1];
@@ -815,18 +1052,26 @@
       els.recoveryLead.classList.toggle("is-hands-warn", viewStep === "purga");
     }
     if (els.recoveryText) {
+      const detail = stepGuide || meta[2];
       els.recoveryText.innerHTML =
-        '<span class="recovery-text__label">INSTRUCCIONES:</span> ' +
-        meta[2];
-      els.recoveryText.classList.toggle("is-hands-warn", viewStep === "purga");
+        '<span class="recovery-text__label">INSTRUCCIONES:</span> ' + detail;
+      els.recoveryText.classList.toggle(
+        "is-hands-warn",
+        viewStep === "purga" || (jointKind && viewStep === "park")
+      );
     }
     if (els.recoveryModal) {
       const panel = els.recoveryModal.querySelector(".modal--recovery");
       if (panel) panel.classList.toggle("is-hands-warn", viewStep === "purga");
     }
 
-    const showErrorBox = viewStep === "error";
-    const parsed = parseRecoveryError(code, rec.mensaje || state.mensaje || "");
+    // Caja de error: siempre el fallo original fijo (no las instrucciones del paso).
+    const showErrorBox =
+      (!!active && !!code) ||
+      jointKind ||
+      viewStep === "error" ||
+      viewStep === "purga_error";
+    const parsed = parseRecoveryError(code, errorFixed);
     if (els.recoveryErrorBox) {
       els.recoveryErrorBox.hidden = !showErrorBox;
     }
@@ -834,22 +1079,55 @@
       if (els.recoveryCode) {
         els.recoveryCode.textContent = parsed.module
           ? parsed.code + " · " + parsed.module
-          : parsed.code || code || "Error";
+          : parsed.code || code || (jointKind ? "Joint" : viewStep === "purga_error" ? "Purga" : "Error");
       }
       if (els.recoveryErrorDesc) {
-        els.recoveryErrorDesc.textContent = parsed.desc;
+        els.recoveryErrorDesc.textContent =
+          parsed.desc ||
+          (jointKind
+            ? "Joint detectado. Recuperación de unión requerida."
+            : "La máquina se detuvo.");
       }
     }
 
-    if (els.recoverySensors) {
-      els.recoverySensors.hidden = viewStep !== "manguera";
+    const nameR = document.getElementById("recoverySensorNameR");
+    const nameL = document.getElementById("recoverySensorNameL");
+    if (jointKind) {
+      if (nameR) nameR.textContent = "Joint Right";
+      if (nameL) nameL.textContent = "Joint Left";
+    } else {
+      if (nameR) nameR.textContent = "Sensor láser derecho";
+      if (nameL) nameL.textContent = "Sensor láser izquierdo";
     }
-    setRecoveryPoll(viewStep === "manguera" && !!modalOpen);
+
+    const showSensors =
+      (jointKind && (viewStep === "operator" || viewStep === "park" || viewStep === "await_home")) ||
+      (!jointKind && (viewStep === "manguera" || viewStep === "purga_error"));
+    if (els.recoveryJointLegend) {
+      els.recoveryJointLegend.hidden = !(jointKind && viewStep === "operator");
+    }
+    if (els.recoveryModal) {
+      els.recoveryModal.dataset.jointMode = jointKind ? "1" : "";
+      els.recoveryModal.dataset.sensorMode = jointKind ? "joint" : "laser";
+      els.recoveryModal.dataset.lmAtPark = rec.lm_at_park ? "1" : "";
+      els.recoveryModal.dataset.recoveryBusy = rec.busy ? "1" : "";
+    }
+    if (els.recoverySensors) {
+      els.recoverySensors.hidden = !showSensors;
+    }
+    setRecoveryPoll(showSensors && !!modalOpen);
 
     if (key !== recoveryViewKey) {
       recoveryViewKey = key;
-      renderRecoveryActions(viewStep, false);
-      if (viewStep === "manguera") pollRecoverySensors();
+      renderRecoveryActions(
+        viewStep,
+        false,
+        jointKind
+          ? { origin: jointOrigin, side: rec.side, busy: !!rec.busy }
+          : null,
+        rutina
+      );
+      if (showSensors) pollRecoverySensors();
     }
   }
 
@@ -1585,11 +1863,27 @@
       iniciar: "Iniciar (PreAlimentador)",
       alimentar_izquierda: "JOG - L",
       alimentar_derecha: "JOG - R",
-      omitir_holgura_izquierda: "Omitir holgura izquierda",
-      omitir_holgura_derecha: "Omitir holgura derecha",
+      omitir_holgura_izquierda: "Omitir alimentación izquierda",
+      omitir_holgura_derecha: "Omitir alimentación derecha",
       recovery_confirm_piezas: "Piezas bien",
       recovery_confirm_manguera: "Continuar recuperación",
+      recovery_toggle_lm: "LM Guide Park/Home",
+      recovery_retry_purga: "Retry purga",
+      recovery_cancel_purga: "Cancelar purga",
+      recovery_skip: "SKIP recuperación",
       recovery_done: "Volver",
+      joint_alimentar: "Joint Alimentar",
+      joint_liberar: "Joint Liberar",
+      joint_continuar: "Joint Continuar",
+      joint_retry: "Joint Retry",
+      joint_confirm: "Joint Confirm",
+      joint_continue: "Joint Continue",
+      joint_finish: "Joint Finish",
+      // === BEGIN TEMP JOINT SIM OFFLINE — DELETE ===
+      joint_sim_feed: "SIM Joint Feed",
+      joint_sim_fabricate: "SIM Joint Fabricate",
+      joint_sim_clear: "SIM Joint Clear",
+      // === END TEMP JOINT SIM OFFLINE — DELETE ===
     };
     return labels[action] || action;
   }
@@ -2111,9 +2405,61 @@
         openRecoveryModal();
         return;
       }
+      if (op === "lm_toggle") {
+        btn.disabled = true;
+        await sendAction("operacion_manual", "recovery_toggle_lm");
+        recoveryWantOpen = true;
+        openRecoveryModal();
+        fetchState();
+        return;
+      }
+      if (op === "purga_retry") {
+        btn.disabled = true;
+        await sendAction("operacion_manual", "recovery_retry_purga");
+        recoveryWantOpen = true;
+        openRecoveryModal();
+        fetchState();
+        return;
+      }
+      if (op === "purga_cancel") {
+        btn.disabled = true;
+        await sendAction("operacion_manual", "recovery_cancel_purga");
+        recoveryWantOpen = true;
+        openRecoveryModal();
+        fetchState();
+        return;
+      }
+      if (op === "skip") {
+        askEmpleado(function (empleado) {
+          sendAction("operacion_manual", "recovery_skip", { empleado: empleado }).then(
+            function () {
+              recoveryWantOpen = true;
+              openRecoveryModal();
+              fetchState();
+            }
+          );
+        });
+        return;
+      }
       if (op === "listo") {
         await sendAction("operacion_manual", "recovery_done");
         closeRecoveryModal();
+        return;
+      }
+      if (
+        op === "joint_alimentar" ||
+        op === "joint_liberar" ||
+        op === "joint_continuar" ||
+        op === "joint_retry" ||
+        op === "joint_confirm" ||
+        op === "joint_continue" ||
+        op === "joint_finish"
+      ) {
+        btn.disabled = true;
+        await sendAction("operacion_manual", op);
+        recoveryWantOpen = true;
+        openRecoveryModal();
+        fetchState();
         return;
       }
     });
@@ -2177,6 +2523,35 @@
   els.toggleEventsPanel.addEventListener("change", function () {
     setEventsPanelVisible(els.toggleEventsPanel.checked);
   });
+  // === BEGIN TEMP JOINT SIM OFFLINE — DELETE ===
+  async function runJointSim(action) {
+    const side = els.jointSimSide ? els.jointSimSide.value : "R";
+    await sendAction("operacion_manual", action, { side: side });
+    recoveryWantOpen = true;
+    openRecoveryModal();
+    closeSettings();
+    fetchState();
+  }
+  if (els.btnJointSimFeed) {
+    els.btnJointSimFeed.addEventListener("click", function () {
+      runJointSim("joint_sim_feed");
+    });
+  }
+  if (els.btnJointSimFabricate) {
+    els.btnJointSimFabricate.addEventListener("click", function () {
+      runJointSim("joint_sim_fabricate");
+    });
+  }
+  if (els.btnJointSimClear) {
+    els.btnJointSimClear.addEventListener("click", function () {
+      sendAction("operacion_manual", "joint_sim_clear").then(function () {
+        closeRecoveryModal();
+        fetchState();
+      });
+    });
+  }
+  // === END TEMP JOINT SIM OFFLINE — DELETE ===
+
   if (els.toggleChecklistBypass) {
     els.toggleChecklistBypass.addEventListener("change", saveChecklistBypass);
   }
@@ -2544,16 +2919,19 @@
     });
   }
 
-  if (els.metricCompensacion) {
-    els.metricCompensacion.addEventListener("change", function () {
-      const mm = Number(String(els.metricCompensacion.value).trim());
+  function onCutCompChange(side, el) {
+    if (!el) return;
+    el.addEventListener("change", function () {
+      const mm = Number(String(el.value).trim());
       if (!Number.isFinite(mm)) {
-        pushLocalEvent("La compensación de medición tiene que ser un número.", "error");
+        pushLocalEvent("La compensación de corte tiene que ser un número.", "error");
         return;
       }
-      saveMeasureComp(mm, false);
+      saveCutCompSide(side, mm);
     });
   }
+  onCutCompChange("R", els.metricCutCompR);
+  onCutCompChange("L", els.metricCutCompL);
 
   if (els.themeToggle) {
     els.themeToggle.addEventListener("click", toggleTheme);
@@ -2575,7 +2953,9 @@
     const btn = actionButton(action);
     if (!btn) return;
     setButtonOn(btn, on);
-    btn.textContent = on ? "Restaurar holgura " + lado : "Omitir holgura " + lado;
+    btn.textContent = on
+      ? "Restaurar alimentación " + lado
+      : "Omitir alimentación " + lado;
   }
 
   function syncRoutine(state) {
@@ -2872,6 +3252,8 @@
   document.querySelectorAll("[data-block]").forEach(function (container) {
     const block = container.dataset.block;
     container.querySelectorAll("[data-action]").forEach(function (btn) {
+      // Evita doble handler si hay data-block anidados (p. ej. purga dentro de proceso).
+      if (btn.closest("[data-block]") !== container) return;
       btn.addEventListener("click", function () {
         if (btn.hasAttribute("data-pf-hold")) return;
         const action = btn.dataset.action;

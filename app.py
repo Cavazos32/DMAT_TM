@@ -125,6 +125,23 @@ _CYCLE_LATCH = {
 # Ante error se retiene; no se re-cierra si ya estaban abiertas.
 _GRIPPER_HOLDING = False
 
+# Latch operativo Joint (recovery.kind == "joint" es la fuente HMI).
+_JOINT = {
+    "skip_cut": "",  # "", "R", "L", "RL"
+    "finish_piece": False,  # excepción fabricación: terminar pieza del lado bueno
+    "piece_counted": False,  # pieza buena ya contada al entrar a operator
+    "holder_released": False,
+}
+
+# === BEGIN TEMP JOINT SIM OFFLINE — DELETE ===
+# Simula el flujo Joint en HMI sin Motion/PLC. Quitar este bloque y sus usos.
+_JOINT_SIM_OFFLINE = True
+_JOINT_SIM = {
+    "session": False,  # True mientras corre un Joint simulado
+    "side": "R",
+}
+# === END TEMP JOINT SIM OFFLINE — DELETE ===
+
 # Lote en curso. El batch (montón de la charola) se calcula al pulsar Start.
 _LOT = {
     "active": False,
@@ -137,7 +154,7 @@ _LOT = {
     "batch_size": 50,
     "cut_mm": 0.0,
     "cut_offset_mm": 0.0,
-    "cut_comp_mode": False,
+    "cut_comp_mode": True,
     "cut_comp_r_mm": 0.0,
     "cut_comp_l_mm": 0.0,
     "length_mm": 0.0,
@@ -296,7 +313,7 @@ def _prod_log_op(
         f"{_prod_lot_tag()} | {_prod_piece_tag(piece, total)} | {step_no} | {desc} | "
         f"{actor} | {duration_s:.3f} s | {flag}"
     )
-    if detail and flag == "ERROR":
+    if detail and flag in ("ERROR", "WARNING"):
         line += f" | {detail}"
     if step_id == "3" and flag in ("OK", "PARALLEL"):
         line += f" | {_prod_enc_tag(feed)}"
@@ -321,9 +338,8 @@ def _prod_log_summary(done: int, total: int, avg_cadence: float) -> None:
     _prod_write(line)
 
 
-def _prod_log_error(code: str, mensaje: str) -> None:
-    """Registra error de producción; alimentación en paralelo usa pieza/paso del solape."""
-    detail = mensaje or code
+def _prod_log_step_context() -> tuple[int, str, float, bool]:
+    """Pieza / paso / duración / paralelo para una línea de producción."""
     if (
         _OVERLAP.get("on")
         and _OVERLAP.get("feed_sent")
@@ -333,28 +349,50 @@ def _prod_log_error(code: str, mensaje: str) -> None:
         step_id = "3"
         t0 = float(_OVERLAP.get("feed_t0") or time.perf_counter())
         dt = max(0.0, time.perf_counter() - t0)
-        parallel = True
-    elif _cycle_thread_alive():
+        return piece, step_id, dt, True
+    ctx = _PROD_CTX
+    ctx_step = str(ctx.get("step_id") or "").strip()
+    if _cycle_thread_alive():
         piece = int(_LOT["cycles_done"]) + 1 if _LOT.get("active") else 1
-        with _STATE_LOCK:
-            step_id = str(_MACHINE_STATE.get("ciclo_paso_id") or "?")
-        ctx = _PROD_CTX
+        if not ctx_step:
+            with _STATE_LOCK:
+                ctx_step = str(_MACHINE_STATE.get("ciclo_paso_id") or "?")
         t0 = float(ctx.get("t0") or time.perf_counter())
         dt = max(0.0, time.perf_counter() - t0)
-        parallel = bool(ctx.get("parallel"))
-    else:
-        ctx = _PROD_CTX
-        step_id = str(ctx.get("step_id") or "?")
-        t0 = float(ctx.get("t0") or time.perf_counter())
-        dt = max(0.0, time.perf_counter() - t0)
-        piece = int(ctx.get("piece") or 1)
-        parallel = bool(ctx.get("parallel"))
+        return piece, ctx_step or "?", dt, bool(ctx.get("parallel"))
+    step_id = ctx_step or "?"
+    t0 = float(ctx.get("t0") or time.perf_counter())
+    dt = max(0.0, time.perf_counter() - t0)
+    piece = int(ctx.get("piece") or 1)
+    return piece, step_id, dt, bool(ctx.get("parallel"))
+
+
+def _prod_log_error(code: str, mensaje: str) -> None:
+    """Registra error de producción; alimentación en paralelo usa pieza/paso del solape."""
+    piece, step_id, dt, parallel = _prod_log_step_context()
     _prod_log_op(
         step_id,
         dt,
         piece=piece,
         parallel=parallel,
         status="ERROR",
+        detail=mensaje or code,
+    )
+
+
+def _prod_log_joint(side: str, *, origin: str, code: str, mensaje: str) -> None:
+    """Registra detección Joint en el log de producción (WARNING, no ERROR)."""
+    piece, step_id, dt, parallel = _prod_log_step_context()
+    label = _joint_side_label(side)
+    detail = mensaje or code or f"Joint {label}"
+    if origin:
+        detail = f"{detail} ({origin})"
+    _prod_log_op(
+        step_id,
+        dt,
+        piece=piece,
+        parallel=parallel,
+        status="WARNING",
         detail=detail,
     )
 
@@ -369,8 +407,8 @@ _DEFAULT_CYCLE_PARAMS = {
     "ms_blower_delay": 200,
     "ms_at_home_end": 50,
     "tolerance_mm": 2.0,
-    "cut_offset_mm": 0.0,  # compensación general (modo dual apagado)
-    "cut_comp_mode": False,
+    "cut_offset_mm": 0.0,  # legado; ya no interviene en el plan de corte
+    "cut_comp_mode": True,  # dual permanente: compensaciones R/L independientes
     "cut_comp_r_mm": 0.0,
     "cut_comp_l_mm": 0.0,
     "deposit_batch_size": 50,
@@ -401,7 +439,7 @@ _MACHINE_STATE = {
     "numero_modelo": "",
     "cantidad": 1,
     "longitud_modelo_mm": None,
-    "compensacion_medicion_mm": 0.0,  # compensación general; se usa si cut_comp_mode está apagado
+    "compensacion_medicion_mm": 0.0,  # legado; ya no se edita ni interviene en el corte
     "tiempo_ciclo_s": None,
     "tiempo_estimado_s": 0,
     "tiempo_corriendo_s": 0,
@@ -413,11 +451,16 @@ _MACHINE_STATE = {
     # (el lote y cycles_done se conservan; no se cuenta ni se descarta la pieza).
     "post_error_purga": False,
     # Flujo guiado de recuperación (popup): error → reset → piezas → manguera → purga → listo.
+    # kind="joint": WARNING Joint (sin Reset/piezas/manguera).
     "recovery": {
         "active": False,
         "step": "",
         "code": "",
         "mensaje": "",
+        "kind": "",
+        "side": "",
+        "origin": "",
+        "busy": False,
     },
     "omitir_holgura_l": False,
     "omitir_holgura_r": False,
@@ -527,7 +570,6 @@ def _canonical_prefeeder_side(src: dict, side: str) -> dict:
             "puller_rpm": 60.0,
             "settle_ms": 150,
             "on_s": 2.0,
-            "off_fault_s": 5.0,
             "stall_fault_s": 2.0,
         },
         "R": {
@@ -535,7 +577,6 @@ def _canonical_prefeeder_side(src: dict, side: str) -> dict:
             "puller_rpm": 60.0,
             "settle_ms": 150,
             "on_s": 2.0,
-            "off_fault_s": 5.0,
             "stall_fault_s": 2.0,
         },
     }[side]
@@ -545,7 +586,6 @@ def _canonical_prefeeder_side(src: dict, side: str) -> dict:
         "puller_rpm": _as_float(block, ("puller_rpm",), defaults["puller_rpm"]),
         "settle_ms": _as_int(block, ("settle_ms",), defaults["settle_ms"]),
         "on_s": _as_float(block, ("on_s",), defaults["on_s"]),
-        "off_fault_s": _as_float(block, ("off_fault_s",), defaults["off_fault_s"]),
         "stall_fault_s": _as_float(block, ("stall_fault_s",), defaults["stall_fault_s"]),
     }
 
@@ -583,7 +623,6 @@ def _prefeeder_cfg_signature(side_cfg: dict) -> tuple:
         round(c["puller_rpm"], 2),
         c["settle_ms"],
         round(c["on_s"], 3),
-        round(c["off_fault_s"], 3),
         round(c["stall_fault_s"], 3),
     )
 
@@ -645,7 +684,7 @@ def _holgura_omit_effective(
     omit_l: bool | None = None,
     omit_r: bool | None = None,
 ) -> tuple[bool, bool]:
-    """Omit manual + auto: un solo lado activo omite holgura del contrario."""
+    """Omit manual + auto: un solo lado activo omite alimentación del contrario."""
     if omit_l is None or omit_r is None:
         with _STATE_LOCK:
             if omit_l is None:
@@ -690,18 +729,6 @@ def _parse_bool(value, default: bool = False) -> bool:
     return default
 
 
-def _measure_comp_mm() -> float:
-    """Compensación general de corte (pantalla principal). Se usa con modo dual apagado."""
-    # Sin lock: lectura de float; evita deadlock si se llama desde _public_machine_state.
-    return _num(_MACHINE_STATE.get("compensacion_medicion_mm"), 0.0)
-
-
-def _mirror_comp_to_cycle_json(mm: float) -> None:
-    """Mantiene cut_offset_mm en cycle.json alineado con la compensación general."""
-    _ = mm
-    _save_hmi_cycle_extras()
-
-
 def _cut_base_mm(length: float) -> float:
     """Posición base de corte: |largo| − 55 mm (sin compensación)."""
     return abs(length) - LMGUIDE_PIECE_OFFSET_MM
@@ -713,30 +740,23 @@ def _cut_comp_side_mm(params: dict, side: str) -> float:
     return _num(params.get("cut_comp_l_mm"), 0.0)
 
 
-def _general_cut_comp_mm(params: dict | None = None) -> float:
-    """Offset general vivo del HMI. En lote activo se congela con _lot_cut_offset."""
-    if isinstance(params, dict) and params.get("_lot_cut_offset") is not None:
-        return _num(params.get("_lot_cut_offset"), 0.0)
-    return _measure_comp_mm()
-
-
 def _cut_comp_params_of(params: dict | None = None) -> dict:
+    """Compensaciones de corte: modo dual permanente (R/L independientes)."""
     src = params if isinstance(params, dict) else _load_cycle_params()
     return {
-        "cut_comp_mode": _parse_bool(src.get("cut_comp_mode"), False),
+        "cut_comp_mode": True,
         "cut_comp_r_mm": _num(src.get("cut_comp_r_mm"), 0.0),
         "cut_comp_l_mm": _num(src.get("cut_comp_l_mm"), 0.0),
-        "cut_offset_mm": _general_cut_comp_mm(src),
+        "cut_offset_mm": 0.0,
     }
 
 
 def _build_cut_plan(length: float, params: dict | None, sides: str) -> dict:
     """
-    Plan de corte LM Guide.
-    - Modo off: un solo movimiento a base + compensación general.
-    - Modo on + un lado: base + compensación de ese lado (sin general).
-    - Modo on + LR y compensaciones distintas: primero el offset menor, luego el mayor.
-    - Modo on + LR e iguales: un movimiento a base+offset; ambos cortadores.
+    Plan de corte LM Guide (compensación dual permanente).
+    - Un lado: base + compensación de ese lado.
+    - LR y compensaciones distintas: primero el offset menor, luego el mayor.
+    - LR e iguales: un movimiento a base+offset; ambos cortadores.
     last_mm es la última posición de corte (referencia de depósito/despeje).
     """
     base = _cut_base_mm(length)
@@ -744,10 +764,10 @@ def _build_cut_plan(length: float, params: dict | None, sides: str) -> dict:
     if sides not in ("R", "L", "LR"):
         sides = "R"
     comps = _cut_comp_params_of(params)
-    mode = bool(comps["cut_comp_mode"])
-    general = float(comps["cut_offset_mm"]) if not mode else 0.0
-    comp_r = float(comps["cut_comp_r_mm"]) if mode else 0.0
-    comp_l = float(comps["cut_comp_l_mm"]) if mode else 0.0
+    mode = True
+    general = 0.0
+    comp_r = float(comps["cut_comp_r_mm"])
+    comp_l = float(comps["cut_comp_l_mm"])
 
     def side_name(side: str) -> str:
         return {"R": "derecho", "L": "izquierdo", "LR": "L y R"}[side]
@@ -774,16 +794,12 @@ def _build_cut_plan(length: float, params: dict | None, sides: str) -> dict:
             "comp_l_mm": comp_l,
         }
 
-    if not mode:
-        mm = base + general
-        return single(sides if sides in ("R", "L") else "LR", mm)
-
     if sides == "R":
         return single("R", base + comp_r)
     if sides == "L":
         return single("L", base + comp_l)
 
-    # Ambos lados, modo on.
+    # Ambos lados.
     applicable = abs(comp_r - comp_l) >= 0.001
     if not applicable:
         return single("LR", base + comp_r)
@@ -827,8 +843,6 @@ def _active_cut_plan() -> dict | None:
         if length <= 0:
             return None
         params = {
-            "_lot_cut_offset": _LOT.get("cut_offset_mm"),
-            "cut_comp_mode": _LOT.get("cut_comp_mode"),
             "cut_comp_r_mm": _LOT.get("cut_comp_r_mm"),
             "cut_comp_l_mm": _LOT.get("cut_comp_l_mm"),
         }
@@ -1702,7 +1716,7 @@ def _prefeeder_fault_codes_active(
     """Fallas vigentes del PreAlimentador.
 
     - Lado fuera de feed_sides: se ignora por completo (no espera ni bloquea).
-    - E095/E098 se ignoran si ese lado tiene holgura omitida (manual o auto).
+    - E095/E098 se ignoran si ese lado tiene alimentación omitida (manual o auto).
 
     omit_l/omit_r opcionales: si ya se leyeron bajo _STATE_LOCK, pasarlos para
     no reentrar el candado (deadlock en /api/state con falla activa).
@@ -1955,6 +1969,12 @@ def _recovery_blank() -> dict:
         "step": "",
         "code": "",
         "mensaje": "",
+        "guide": "",  # instrucciones Joint (cambian); mensaje = error fijo
+        "kind": "",
+        "side": "",
+        "origin": "",
+        "busy": False,
+        "lm_at_park": False,
     }
 
 
@@ -1974,17 +1994,767 @@ def _recovery_set(**fields) -> None:
 
 
 def _recovery_begin(code: str, msg: str) -> None:
+    """Inicia recuperación: mensaje = error fijo; guide = instrucciones del paso."""
+    code_s = str(code or "").strip()
+    msg_s = str(msg or "").strip()
     _recovery_set(
         active=True,
         step="error",
-        code=str(code or "").strip(),
-        mensaje=str(msg or "").strip(),
+        kind="",
+        side="",
+        origin="",
+        busy=False,
+        code=code_s,
+        mensaje=msg_s,
+        guide=(
+            "Pulsa Reset para soltar holder y pieza. Luego sigue los pasos del aviso."
+            if code_s not in ("E094", "E097")
+            else (
+                "Revisa el PreAlimentador y deja holgura. Usa JOG L/R si hace falta. "
+                "Cuando el límite se libere, pulsa Reset."
+            )
+        ),
     )
+
+
+def _recovery_set_guide(msg: str) -> None:
+    """Instrucciones del paso (popup). No pisa el error fijo (recovery.mensaje)."""
+    _recovery_set(guide=str(msg or "").strip())
 
 
 def _recovery_clear() -> None:
     with _STATE_LOCK:
         _MACHINE_STATE["recovery"] = _recovery_blank()
+    _joint_latch_clear()
+    # === BEGIN TEMP JOINT SIM OFFLINE — DELETE ===
+    _JOINT_SIM["session"] = False
+    # === END TEMP JOINT SIM OFFLINE — DELETE ===
+
+
+def _joint_latch_clear() -> None:
+    _JOINT["skip_cut"] = ""
+    _JOINT["finish_piece"] = False
+    _JOINT["piece_counted"] = False
+    _JOINT["holder_released"] = False
+
+
+def _joint_active() -> bool:
+    rec = _recovery_get()
+    return bool(rec.get("active") and rec.get("kind") == "joint")
+
+
+def _joint_code_for_side(side: str) -> str:
+    if side == "RL":
+        return "E052"
+    if side == "L":
+        return "E051"
+    return "E050"
+
+
+def _joint_side_label(side: str) -> str:
+    return {"R": "Right", "L": "Left", "RL": "Right y Left"}.get(side, side or "?")
+
+
+def _joint_side_from_feed_error(error_name: str) -> str:
+    err = (error_name or "").strip().lower()
+    if err in ("joint_rl", "joint_r_l"):
+        return "RL"
+    if err == "joint_l":
+        return "L"
+    if err == "joint_r":
+        return "R"
+    return ""
+
+
+def _joint_merge_side(a: str, b: str) -> str:
+    sides = set()
+    for s in (a, b):
+        if s == "RL":
+            sides.update(("R", "L"))
+        elif s in ("R", "L"):
+            sides.add(s)
+    if "R" in sides and "L" in sides:
+        return "RL"
+    if "R" in sides:
+        return "R"
+    if "L" in sides:
+        return "L"
+    return ""
+
+
+def _joint_poll_sides_from_status(mst: dict | None) -> str:
+    if not isinstance(mst, dict):
+        return ""
+    r_on = False
+    l_on = False
+    br = mst.get("enc_R")
+    bl = mst.get("enc_L")
+    if isinstance(br, dict) and br.get("joint") is True:
+        r_on = True
+    if isinstance(bl, dict) and bl.get("joint") is True:
+        l_on = True
+    if r_on and l_on:
+        return "RL"
+    if r_on:
+        return "R"
+    if l_on:
+        return "L"
+    return ""
+
+
+def _joint_blocks_next_piece() -> bool:
+    return bool(_JOINT.get("finish_piece") or _joint_active())
+
+
+def _joint_valve_allowed(valve: str) -> str | None:
+    """None = omitir corte. Puede reducir cutters a un solo lado."""
+    skip = str(_JOINT.get("skip_cut") or "")
+    valve = str(valve or "")
+    if not skip:
+        return valve
+    if skip == "RL":
+        return None
+    if valve == "cutters":
+        if skip == "R":
+            return "cutter_l"
+        if skip == "L":
+            return "cutter_r"
+        return valve
+    if valve == "cutter_r" and skip == "R":
+        return None
+    if valve == "cutter_l" and skip == "L":
+        return None
+    return valve
+
+
+def _joint_ui_warning(side: str, msg: str) -> None:
+    """Banner Joint: solo warning fijo (sin paso a paso)."""
+    keep = bool(
+        _MACHINE_STATE.get("ciclo_en_curso")
+        or _LOT.get("active")
+        or _LOT.get("tray_wait")
+    )
+    side_lbl = _joint_side_label(side)
+    _set_machine_ui(
+        estado="paused",
+        estado_label="Warning Joint",
+        mensaje=f"Joint {side_lbl}. Abre el aviso para continuar.",
+        en_curso=keep,
+        ciclo_error="",
+    )
+
+
+def _joint_set_guide(msg: str, *, lead: str | None = None) -> None:
+    """Guía Joint solo en popup (recovery.guide). No pisa el error fijo ni el banner."""
+    text = str(msg or "").strip()
+    _recovery_set(guide=text)
+    keep = bool(
+        _MACHINE_STATE.get("ciclo_en_curso")
+        or _LOT.get("active")
+        or _LOT.get("tray_wait")
+        or _joint_active()
+    )
+    side = str(_recovery_get().get("side") or "")
+    side_lbl = _joint_side_label(side) if side else ""
+    banner = (
+        f"Joint {side_lbl}. Abre el aviso para continuar."
+        if side_lbl
+        else "Joint. Abre el aviso para continuar."
+    )
+    _set_machine_ui(
+        estado="paused",
+        estado_label=lead or "Warning Joint",
+        mensaje=banner,
+        en_curso=keep,
+        ciclo_error="",
+    )
+
+
+def _joint_begin_common(side: str, *, origin: str, step: str) -> None:
+    side = _joint_merge_side(side, side) or "R"
+    code = _joint_code_for_side(side)
+    msg = error_codes.format_message(code)
+    _JOINT["skip_cut"] = side
+    _JOINT["holder_released"] = False
+    if origin == "fabricate" and side != "RL":
+        _JOINT["finish_piece"] = True
+        _JOINT["piece_counted"] = False
+    else:
+        _JOINT["finish_piece"] = False
+        _JOINT["piece_counted"] = False
+    _push_event(
+        f"WARNING Joint {_joint_side_label(side)} ({origin}).",
+        "warn",
+    )
+    try:
+        _prod_log_joint(side, origin=origin, code=code, mensaje=msg)
+    except Exception:
+        pass
+    _recovery_set(
+        active=True,
+        kind="joint",
+        step=step,
+        side=side,
+        origin=origin,
+        code=code,
+        mensaje=msg,  # error fijo (E050/E051/E052)
+        guide="",
+        busy=False,
+    )
+    _joint_ui_warning(side, msg)
+
+
+def _joint_park_run() -> None:
+    """Avisa Park, mueve LM a Park; luego step=operator."""
+    # === BEGIN TEMP JOINT SIM OFFLINE — DELETE ===
+    if _joint_sim_active():
+        _joint_sim_park_run()
+        return
+    # === END TEMP JOINT SIM OFFLINE — DELETE ===
+    _recovery_set(step="park", busy=True, lm_at_park=False)
+    _joint_set_guide(
+        f"Voy a Park ({PURGE_PARK_MM:.0f} mm). Espera sin meter las manos.",
+        lead="Warning Joint · Park",
+    )
+    params = _load_cycle_params()
+    sent = _cycle_plc_send({"op": "valve", "name": "holder_encoder", "on": True})
+    if not sent.get("sent") or _ROUTINE["stop"].is_set():
+        _recovery_set(step="operator", busy=False)
+        _joint_set_guide(
+            "No se pudo preparar holder/encoder. Usa Alimentar, Liberar o Continuar."
+        )
+        return
+    if not _routine_sleep_ms(int(params["ms_holder_enc_stable"])):
+        _recovery_set(step="operator", busy=False)
+        return
+    ok_hw, code = _plc_confirm({"holder": True, "encoder": True})
+    if not ok_hw:
+        if code:
+            _push_event(error_codes.format_message(code), "error")
+        _recovery_set(step="operator", busy=False)
+        _joint_set_guide(
+            "Holder/encoder sin confirmación. Usa Alimentar, Liberar o Continuar."
+        )
+        return
+    _joint_set_guide(
+        f"Moviendo LM Guide a Park ({PURGE_PARK_MM:.0f} mm). Espera.",
+        lead="Warning Joint · Park",
+    )
+    if _ROUTINE["stop"].is_set() or not _routine_move_lm_mm(PURGE_PARK_MM):
+        _recovery_set(step="operator", busy=False)
+        _joint_set_guide("No se alcanzó Park. Usa Alimentar, Liberar o Continuar.")
+        return
+    _recovery_set(step="operator", busy=False, lm_at_park=True)
+    _joint_set_guide(
+        "Estás en Park. Puedes elegir: "
+        "Alimentar (opcional) mueve material del lado afectado y se apaga solo; "
+        "Liberar (opcional) suelta gripper, holder y encoder. "
+        "Cuando quieras seguir, pulsa Continuar para la purga."
+    )
+
+
+def _joint_begin_from_feed(side: str) -> None:
+    """Escenario A: Joint durante FeedStage."""
+    mst = _motion_status_get()
+    side = _joint_merge_side(side, _joint_poll_sides_from_status(mst)) or side
+    if _serial_port("motion"):
+        _send_motion_urgent(['{"op":"feeder_stop"}'])
+    _joint_begin_common(side, origin="feed", step="park")
+    _joint_set_guide(
+        f"Joint {_joint_side_label(side)} detectado en alimentación. Voy a Park.",
+        lead="Warning Joint · Park",
+    )
+    ok, err = _start_routine(_joint_park_run)
+    if not ok:
+        _recovery_set(step="operator", busy=False)
+        _joint_set_guide(
+            (err or "No se pudo iniciar Park.")
+            + " Usa Alimentar, Liberar o Continuar."
+        )
+
+
+def _joint_begin_immediate(side: str, *, origin: str) -> None:
+    """Ambos Joint o salida forzada: Park + operator sin terminar pieza."""
+    if _serial_port("motion"):
+        _send_motion_urgent(['{"op":"feeder_stop"}', '{"op":"lmguide_stop"}'])
+    _joint_begin_common(side, origin=origin, step="park")
+    _JOINT["finish_piece"] = False
+    _joint_set_guide(
+        f"Joint {_joint_side_label(side)}: paro inmediato. Voy a Park.",
+        lead="Warning Joint · Park",
+    )
+    ok, err = _start_routine(_joint_park_run)
+    if not ok:
+        _recovery_set(step="operator", busy=False)
+        _joint_set_guide(
+            (err or "No se pudo iniciar Park.")
+            + " Usa Alimentar, Liberar o Continuar."
+        )
+
+
+def _joint_latch_fabricate(side: str) -> None:
+    """Escenario B: Joint en pasos 4–8; omitir corte y terminar pieza buena."""
+    if _cycle_error_active():
+        return
+    mst_side = side
+    if _joint_active():
+        prev = str(_recovery_get().get("side") or "")
+        merged = _joint_merge_side(prev, mst_side)
+        if merged == prev:
+            return
+        side = merged
+        _JOINT["skip_cut"] = side
+        _recovery_set(side=side, code=_joint_code_for_side(side), mensaje=error_codes.format_message(_joint_code_for_side(side)))
+        if side == "RL":
+            _JOINT["finish_piece"] = False
+            _joint_begin_immediate("RL", origin="fabricate")
+        return
+    if side == "RL":
+        _joint_begin_immediate("RL", origin="fabricate")
+        return
+    _joint_begin_common(side, origin="fabricate", step="await_home")
+    _joint_set_guide(
+        f"Joint {_joint_side_label(side)}: se omite su corte. "
+        "El lado correcto termina la pieza y regresa a Home. Luego iré a Park."
+    )
+
+
+def _joint_check_during_cycle(step_id: str) -> bool:
+    """
+    True = continuar el ciclo.
+    False = detener el worker (Joint RL inmediato u operator pendiente).
+    """
+    if _cycle_error_active():
+        return True
+    if _joint_active():
+        if _JOINT.get("finish_piece") and str(_recovery_get().get("step") or "") == "await_home":
+            return True
+        return False
+    if step_id in ("1", "2", "3"):
+        return True
+    mst = _motion_status_get()
+    side = _joint_poll_sides_from_status(mst)
+    if not side:
+        return True
+    if side == "RL":
+        _joint_begin_immediate("RL", origin="fabricate")
+        return False
+    _joint_latch_fabricate(side)
+    return True
+
+
+def _joint_enter_operator_after_piece() -> None:
+    """Pieza buena terminada → aviso Park → Park → operator."""
+    _JOINT["finish_piece"] = False
+    _JOINT["piece_counted"] = True
+    side = str(_recovery_get().get("side") or "")
+    label = _joint_side_label(side)
+    msg = f"Joint {label}: pieza del lado correcto terminada. Voy a Park."
+    _push_event(msg, "warn")
+    _recovery_set(step="park", busy=True)
+    _joint_set_guide(msg, lead="Warning Joint · Park")
+    ok, err = _start_routine(_joint_park_run)
+    if not ok:
+        _recovery_set(step="operator", busy=False)
+        _joint_set_guide(
+            (err or "No se pudo iniciar Park.")
+            + " Usa Alimentar, Liberar o Continuar."
+        )
+
+
+def _feed_clean_side(side: str | None):
+    """FeedStage clean 3 s; side R/L o ambos si None/RL."""
+    payload = {"op": "feed_stage", "mode": "clean", "timeout_ms": PURGE_CLEAN_MS}
+    if side in ("R", "L"):
+        payload["side"] = side
+    sent = _cycle_motion_send(payload, timeout_s=8.0)
+    found, ok, error_name, feed = _read_feed_stage(sent)
+    _set_machine_ui(feed=feed)
+    if not sent.get("sent"):
+        return False, sent.get("code") or "E043", feed
+    if not found or not ok:
+        err = error_name or "unknown"
+        return False, error_codes.feed_stage_code(err), feed
+    return True, "", feed
+
+
+def _joint_release_holder_encoder() -> tuple[bool, str]:
+    # === BEGIN TEMP JOINT SIM OFFLINE — DELETE ===
+    if _joint_sim_active():
+        _JOINT["holder_released"] = True
+        return True, ""
+    # === END TEMP JOINT SIM OFFLINE — DELETE ===
+    sent = _cycle_plc_send({"op": "valve", "name": "holder_encoder", "on": False})
+    if not sent.get("sent"):
+        return False, sent.get("code") or "E019"
+    ok_hw, code = _plc_confirm({"holder": False, "encoder": False})
+    if not ok_hw:
+        return False, code or "E014"
+    _JOINT["holder_released"] = True
+    return True, ""
+
+
+def _joint_liberar_actuators() -> tuple[bool, str]:
+    """Libera gripper + holder + encoder (feeder queda libre al soltar holder/encoder)."""
+    # === BEGIN TEMP JOINT SIM OFFLINE — DELETE ===
+    if _joint_sim_active():
+        _JOINT["holder_released"] = True
+        _gripper_holding_set(False)
+        return True, ""
+    # === END TEMP JOINT SIM OFFLINE — DELETE ===
+    sent_g = _cycle_plc_send({"op": "valve", "name": "gripper", "on": False})
+    if not sent_g.get("sent"):
+        return False, sent_g.get("code") or "E019"
+    _gripper_holding_set(False)
+    return _joint_release_holder_encoder()
+
+
+def _joint_clean_feed_run() -> None:
+    rec = _recovery_get()
+    side = str(rec.get("side") or "")
+    feed_side = None if side == "RL" else (side if side in ("R", "L") else None)
+    label = _joint_side_label(side)
+    _joint_set_guide(f"Alimentando lado {label} (~3 s). Espera.")
+    if not _purga_close_holder():
+        _recovery_set(busy=False, step="operator")
+        _joint_set_guide("No se cerró holder/encoder. Reintenta Alimentar o usa Liberar.")
+        return
+    _JOINT["holder_released"] = False
+    ok, code, _feed = _feed_clean_side(feed_side)
+    if _ROUTINE["stop"].is_set():
+        _recovery_set(busy=False, step="operator")
+        return
+    if not ok:
+        _push_event(error_codes.format_message(code), "error")
+        _recovery_set(busy=False, step="operator")
+        _joint_set_guide("Falló la alimentación. Reintenta Alimentar o usa Liberar.")
+        return
+    # Apagar al terminar para poder volver a pulsar Alimentar.
+    released, rel_code = _joint_release_holder_encoder()
+    _recovery_set(busy=False, step="operator")
+    if not released:
+        _joint_set_guide(
+            "Alimentación hecha, pero no se apagó holder/encoder. "
+            "Usa Liberar y luego Continuar."
+            + (f" ({error_codes.format_message(rel_code)})" if rel_code else "")
+        )
+        return
+    _joint_set_guide(
+        f"Alimentación {label} terminó y se apagó. "
+        "Puedes Alimentar otra vez, Liberar, o Continuar para la purga."
+    )
+
+
+def _joint_finish_purga_run() -> None:
+    """Purga post-Joint: Park + corte de limpieza (reusa _purge_cut)."""
+    _ROUTINE["from_lote"] = False
+    with _STATE_LOCK:
+        _MACHINE_STATE["post_error_purga"] = True
+    _recovery_set(step="purga", busy=True)
+    _set_routine_ui(
+        rutina="purga",
+        rutina_fase="segura",
+        rutina_manos=True,
+        estado_label="Purga",
+        mensaje="NO INTRODUCIR MANOS. Purga Joint en curso, espera.",
+    )
+    _joint_set_guide("NO INTRODUCIR MANOS. Purga Joint en curso, espera.")
+    if not _routine_sleep_ms(500):
+        _purga_finish(True)
+        _recovery_set(step="operator", busy=False)
+        return
+    if not _routine_try_reset_fault() or _ROUTINE["stop"].is_set():
+        _purga_finish(True)
+        _recovery_set(step="operator", busy=False)
+        return
+    if not _cycle_plc_send({"op": "all_off"}).get("sent"):
+        _purga_finish(True)
+        _recovery_set(step="operator", busy=False)
+        return
+    _gripper_holding_set(False)
+    _JOINT["holder_released"] = True
+    guide_park = f"NO METAS LAS MANOS. Llevando el eje a parque ({PURGE_PARK_MM:.0f} mm)."
+    _set_routine_ui(mensaje=guide_park)
+    _joint_set_guide(guide_park)
+    if _ROUTINE["stop"].is_set() or not _routine_move_lm_mm(PURGE_PARK_MM):
+        _purga_finish(True)
+        _recovery_set(step="operator", busy=False)
+        return
+    ok = False
+    try:
+        ok = _purge_cut()
+    finally:
+        if not ok or _ROUTINE["stop"].is_set():
+            _cycle_plc_send({"op": "all_off"})
+            _purga_finish(True)
+            _recovery_set(step="operator", busy=False)
+        else:
+            _purga_finish(False)
+
+
+def _joint_claim_operator(action: str) -> tuple[bool, str]:
+    rec = _recovery_get()
+    if not _joint_active():
+        return False, "No hay recuperación Joint activa."
+    if rec.get("step") != "operator":
+        return False, "Joint aún no está en intervención de operador."
+    if rec.get("busy"):
+        return False, "Joint ocupado. Espera a que termine la acción."
+    if _MACHINE_STATE.get("estado") == "error" or _MACHINE_STATE.get("ciclo_error"):
+        return False, "Hay un error crítico activo. Atiéndelo primero."
+    if _MACHINE_STATE.get("rutina") == "purga" and action not in ("finish", "continuar"):
+        return False, "Hay una purga en curso."
+    return True, ""
+
+
+def _joint_alimentar_action(_data=None) -> tuple[bool, str]:
+    ok, err = _joint_claim_operator("alimentar")
+    if not ok:
+        return False, err
+    # === BEGIN TEMP JOINT SIM OFFLINE — DELETE ===
+    if _joint_sim_active():
+        _recovery_set(busy=True)
+        started, start_err = _start_routine(_joint_sim_feed_run)
+        if not started:
+            _recovery_set(busy=False)
+            return False, start_err
+        return True, "[SIM] Alimentación Joint."
+    # === END TEMP JOINT SIM OFFLINE — DELETE ===
+    ready, link_err = _require_links()
+    if not ready:
+        return False, link_err
+    _recovery_set(busy=True)
+    _joint_set_guide("Cerrando holder/encoder e iniciando alimentación…")
+    started, start_err = _start_routine(_joint_clean_feed_run)
+    if not started:
+        _recovery_set(busy=False)
+        return False, start_err
+    return True, "Alimentación Joint 3 s."
+
+
+def _joint_liberar_action(_data=None) -> tuple[bool, str]:
+    """Libera gripper + holder + encoder."""
+    ok, err = _joint_claim_operator("liberar")
+    if not ok:
+        return False, err
+    _recovery_set(busy=True)
+    _joint_set_guide("Liberando gripper, holder y encoder…")
+    released, code = _joint_liberar_actuators()
+    _recovery_set(busy=False)
+    if not released:
+        return False, error_codes.format_message(code) if code else "No se liberó gripper/holder/encoder."
+    _joint_set_guide(
+        "Ya liberaste gripper, holder y encoder. "
+        "Si aún hay material puedes Alimentar; si no, pulsa Continuar para la purga."
+    )
+    return True, "Liberados gripper, holder y encoder."
+
+
+def _joint_continuar_action(_data=None) -> tuple[bool, str]:
+    """Continuar = purga Joint (antes Finish)."""
+    ok, err = _joint_claim_operator("continuar")
+    if not ok:
+        return False, err
+    # === BEGIN TEMP JOINT SIM OFFLINE — DELETE ===
+    if _joint_sim_active():
+        _recovery_set(busy=True, step="purga")
+        _joint_set_guide("NO INTRODUCIR MANOS. Purga Joint en curso…")
+        started, start_err = _start_routine(_joint_sim_purga_run)
+        if not started:
+            _recovery_set(busy=False, step="operator")
+            return False, start_err
+        return True, "[SIM] Purga Joint iniciada."
+    # === END TEMP JOINT SIM OFFLINE — DELETE ===
+    ready, link_err = _require_links()
+    if not ready:
+        return False, link_err
+    _recovery_set(busy=True, step="purga")
+    _joint_set_guide("NO INTRODUCIR MANOS. Purga Joint en curso, espera.")
+    started, start_err = _start_routine(_joint_finish_purga_run)
+    if not started:
+        _recovery_set(busy=False, step="operator")
+        return False, start_err
+    return True, "Purga Joint iniciada."
+
+
+# Compat: nombres antiguos → mismos handlers.
+def _joint_retry_action(_data=None) -> tuple[bool, str]:
+    return _joint_alimentar_action(_data)
+
+
+def _joint_confirm_action(_data=None) -> tuple[bool, str]:
+    return _joint_liberar_action(_data)
+
+
+def _joint_continue_action(_data=None) -> tuple[bool, str]:
+    return _joint_liberar_action(_data)
+
+
+def _joint_finish_action(_data=None) -> tuple[bool, str]:
+    return _joint_continuar_action(_data)
+
+
+# === BEGIN TEMP JOINT SIM OFFLINE — DELETE ===
+def _joint_sim_enabled() -> bool:
+    return bool(_JOINT_SIM_OFFLINE)
+
+
+def _joint_sim_active() -> bool:
+    return bool(_JOINT_SIM_OFFLINE and _JOINT_SIM.get("session"))
+
+
+def _joint_sim_side_from_data(data) -> str:
+    side = str((data or {}).get("side") or _JOINT_SIM.get("side") or "R").upper()
+    if side not in ("R", "L", "RL"):
+        side = "R"
+    return side
+
+
+def _joint_sim_encoder_payload() -> dict:
+    """LEDs Joint del modal de recuperación sin Motion."""
+    side = str(_recovery_get().get("side") or _JOINT_SIM.get("side") or "R")
+    return {
+        "R": {"joint": side in ("R", "RL"), "laser": False, "mm": 0.0},
+        "L": {"joint": side in ("L", "RL"), "laser": False, "mm": 0.0},
+    }
+
+
+def _joint_sim_park_run() -> None:
+    _recovery_set(step="park", busy=True, lm_at_park=False)
+    _joint_set_guide(
+        f"[SIM] Voy a Park ({PURGE_PARK_MM:.0f} mm). Espera.",
+        lead="Warning Joint · Park",
+    )
+    if not _routine_sleep_ms(1000):
+        _recovery_set(step="operator", busy=False)
+        return
+    side = str(_recovery_get().get("side") or "")
+    _recovery_set(step="operator", busy=False, lm_at_park=True)
+    _joint_set_guide(
+        "[SIM] En Park. Puedes elegir Alimentar o Liberar (opcionales). "
+        "Continuar inicia la purga."
+    )
+
+
+def _joint_sim_await_home_run() -> None:
+    _recovery_set(step="await_home", busy=True)
+    _joint_set_guide(
+        "[SIM] Omite corte del lado afectado; terminando pieza buena… Luego Park."
+    )
+    if not _routine_sleep_ms(1400):
+        _recovery_set(step="operator", busy=False)
+        return
+    _joint_enter_operator_after_piece()
+
+
+def _joint_sim_feed_run() -> None:
+    rec = _recovery_get()
+    label = _joint_side_label(str(rec.get("side") or ""))
+    _joint_set_guide(f"[SIM] Alimentando lado {label} (~3 s)…")
+    if not _routine_sleep_ms(1200):
+        _recovery_set(busy=False, step="operator")
+        return
+    _JOINT["holder_released"] = True
+    _recovery_set(busy=False, step="operator")
+    _joint_set_guide(
+        f"[SIM] Alimentación {label} terminó y se apagó. "
+        "Puedes Alimentar otra vez, Liberar, o Continuar."
+    )
+
+
+def _joint_sim_purga_run() -> None:
+    _ROUTINE["from_lote"] = False
+    with _STATE_LOCK:
+        _MACHINE_STATE["post_error_purga"] = True
+    _recovery_set(step="purga", busy=True)
+    _set_routine_ui(
+        rutina="purga",
+        rutina_fase="segura",
+        rutina_manos=True,
+        estado_label="Purga",
+        mensaje="[SIM] NO INTRODUCIR MANOS. Purga Joint en curso…",
+    )
+    _joint_set_guide("[SIM] NO INTRODUCIR MANOS. Purga Joint en curso…")
+    if not _routine_sleep_ms(1600):
+        _purga_finish(True)
+        _recovery_set(step="operator", busy=False)
+        return
+    _JOINT["holder_released"] = True
+    _purga_finish(False)
+
+
+def _joint_sim_start_feed(data=None) -> tuple[bool, str]:
+    if not _joint_sim_enabled():
+        return False, "Sim Joint desactivado."
+    if _cycle_thread_alive():
+        return False, "Hay un ciclo en ejecución. Pulsa Stop primero."
+    if _MACHINE_STATE.get("rutina") == "purga":
+        return False, "Hay una purga en curso."
+    side = _joint_sim_side_from_data(data)
+    _JOINT_SIM["session"] = True
+    _JOINT_SIM["side"] = side
+    _joint_begin_common(side, origin="feed", step="park")
+    ok, err = _start_routine(_joint_sim_park_run)
+    if not ok:
+        _JOINT_SIM["session"] = False
+        _recovery_set(step="operator", busy=False)
+        return False, err or "No se pudo iniciar sim Park."
+    return True, f"[SIM] Joint feed {_joint_side_label(side)} iniciado."
+
+
+def _joint_sim_start_fabricate(data=None) -> tuple[bool, str]:
+    if not _joint_sim_enabled():
+        return False, "Sim Joint desactivado."
+    if _cycle_thread_alive():
+        return False, "Hay un ciclo en ejecución. Pulsa Stop primero."
+    if _MACHINE_STATE.get("rutina") == "purga":
+        return False, "Hay una purga en curso."
+    side = _joint_sim_side_from_data(data)
+    if side == "RL":
+        # RL en fabricación va inmediato a Park (mismo que producción).
+        _JOINT_SIM["session"] = True
+        _JOINT_SIM["side"] = side
+        _joint_begin_common(side, origin="fabricate", step="park")
+        _JOINT["finish_piece"] = False
+        ok, err = _start_routine(_joint_sim_park_run)
+        if not ok:
+            _JOINT_SIM["session"] = False
+            _recovery_set(step="operator", busy=False)
+            return False, err or "No se pudo iniciar sim Park."
+        return True, "[SIM] Joint fabricate RL → Park."
+    _JOINT_SIM["session"] = True
+    _JOINT_SIM["side"] = side
+    _joint_begin_common(side, origin="fabricate", step="await_home")
+    ok, err = _start_routine(_joint_sim_await_home_run)
+    if not ok:
+        _JOINT_SIM["session"] = False
+        _recovery_set(step="operator", busy=False)
+        return False, err or "No se pudo iniciar sim fabricate."
+    return True, f"[SIM] Joint fabricate {_joint_side_label(side)} iniciado."
+
+
+def _joint_sim_clear(_data=None) -> tuple[bool, str]:
+    if not _joint_sim_enabled():
+        return False, "Sim Joint desactivado."
+    _ROUTINE["stop"].set()
+    _JOINT_SIM["session"] = False
+    with _STATE_LOCK:
+        _MACHINE_STATE["post_error_purga"] = False
+        _MACHINE_STATE["rutina"] = ""
+        _MACHINE_STATE["rutina_fase"] = ""
+        _MACHINE_STATE["rutina_manos"] = False
+    _recovery_clear()
+    _set_machine_ui(
+        estado="idle",
+        estado_label="En espera",
+        mensaje="[SIM] Joint limpiado. Listo.",
+        en_curso=False,
+        ciclo_error="",
+    )
+    return True, "[SIM] Joint limpiado."
+
+
+# === END TEMP JOINT SIM OFFLINE — DELETE ===
 
 
 def _recovery_cutters_clear_now() -> bool:
@@ -1996,6 +2766,22 @@ def _recovery_cutters_clear_now() -> bool:
         return False
     if st.get("fault_cutter") is True or st.get("sens_cutter") is True:
         return False
+    return True
+
+
+def _recovery_lasers_clear_now() -> bool:
+    """True si los láseres de los lados activos están apagados (sin detección)."""
+    mst = _motion_status_get()
+    if mst is None:
+        return False
+    sides = _run_sides()
+    check = ("R", "L") if sides not in ("R", "L") else (sides,)
+    for side in check:
+        block = mst.get("enc_" + side)
+        if not isinstance(block, dict):
+            return False
+        if block.get("laser") is True:
+            return False
     return True
 
 
@@ -2134,11 +2920,10 @@ def _prefeeder_sides_online(status: dict | None) -> bool:
 def _prefeeder_stabilize_and_lock() -> tuple[bool, str]:
     """Desbloquea, espera condición segura y vuelve a bloquear listo.
 
-    Con holgura omitida y sensor OFF el esclavo puede quedarse en busy
-    alimentando mientras está desbloqueado; en ese caso no hay que esperar
-    stable=true (nunca llega): basta online + sin fallas activas, bloquear
-    (frena la alimentación) y confirmar ready.
-    Solo cuenta el lado de feed_sides (el contrario no bloquea).
+    Con alimentación omitida y holgura OFF el lado queda en IDLE (sin feed).
+    No hay que esperar solo stable=true del maestro (exige L+R): basta
+    online + sin fallas activas de los lados en feed_sides, bloquear y
+    confirmar ready. El lado contrario no bloquea.
     """
     if not _prefeeder_required():
         return True, ""
@@ -2162,7 +2947,7 @@ def _prefeeder_stabilize_and_lock() -> tuple[bool, str]:
             break
         time.sleep(0.3)
     _prefeeder_set_feed_lock(True)
-    # Tras bloquear, el busy por holgura omitida debe pasar a idle/ready.
+    # Tras bloquear, confirmar idle/ready en los lados activos.
     ready_deadline = time.time() + 8.0
     st = None
     while time.time() < ready_deadline:
@@ -2762,14 +3547,14 @@ def _load_cycle_params():
 
 
 def _save_hmi_cycle_extras() -> None:
-    """Cantidad, modelo y compensación general en cycle.json."""
+    """Cantidad, modelo y compensaciones R/L en cycle.json."""
     try:
         params = _load_cycle_params()
         comps = _cut_comp_params_of(params)
-        params["cut_comp_mode"] = comps["cut_comp_mode"]
+        params["cut_comp_mode"] = True
         params["cut_comp_r_mm"] = comps["cut_comp_r_mm"]
         params["cut_comp_l_mm"] = comps["cut_comp_l_mm"]
-        params["cut_offset_mm"] = _measure_comp_mm()
+        params["cut_offset_mm"] = 0.0
         try:
             params["cantidad"] = max(1, int(_MACHINE_STATE.get("cantidad") or 1))
         except (TypeError, ValueError):
@@ -2793,12 +3578,12 @@ def _hydrate_hmi_from_cycle() -> None:
         qty = 1
     _MACHINE_STATE["cantidad"] = max(1, qty)
     comps = _cut_comp_params_of(params)
-    params["cut_comp_mode"] = comps["cut_comp_mode"]
+    params["cut_comp_mode"] = True
     params["cut_comp_r_mm"] = comps["cut_comp_r_mm"]
     params["cut_comp_l_mm"] = comps["cut_comp_l_mm"]
-    comp = _num(params.get("cut_offset_mm"), 0.0)
-    _MACHINE_STATE["compensacion_medicion_mm"] = comp
-    _MOTION_DATA["measure_comp_mm"] = comp
+    params["cut_offset_mm"] = 0.0
+    _MACHINE_STATE["compensacion_medicion_mm"] = 0.0
+    _MOTION_DATA["measure_comp_mm"] = 0.0
     _MOTION_DATA["tolerance_mm"] = _num(params.get("tolerance_mm"), 2.0)
     modelo_id = str(params.get("numero_modelo") or "").strip()
     if not modelo_id:
@@ -2929,6 +3714,10 @@ def _public_machine_state() -> dict:
         state = dict(_MACHINE_STATE)
         state["checklist"] = dict(_MACHINE_STATE.get("checklist") or {})
         state["checklist_bypass"] = _checklist_bypassed()
+        # === BEGIN TEMP JOINT SIM OFFLINE — DELETE ===
+        state["joint_sim_offline"] = bool(_JOINT_SIM_OFFLINE)
+        state["joint_sim_session"] = bool(_JOINT_SIM.get("session"))
+        # === END TEMP JOINT SIM OFFLINE — DELETE ===
         state["eventos"] = list(_MACHINE_STATE.get("eventos") or [])
         state["eventos_rev"] = _EVENTS_REV
         state["ciclo_feed"] = dict(_MACHINE_STATE.get("ciclo_feed") or {})
@@ -2960,27 +3749,18 @@ def _public_machine_state() -> dict:
         if lote_vivo or state.get("ciclo_en_curso"):
             state["tiempo_corriendo_s"] = corriendo_s
         params = _load_cycle_params()
-        # Incluir compensación general actual para el plan (evita leer estado otra vez).
         params = dict(params)
-        params["cut_offset_mm"] = _num(
-            state.get("compensacion_medicion_mm"),
-            _num(params.get("cut_offset_mm"), 0.0),
-        )
         comps = _cut_comp_params_of(params)
         state["feed_sides"] = _feed_sides_of(params)
-        state["cut_comp_mode"] = comps["cut_comp_mode"]
+        state["cut_comp_mode"] = True
         state["cut_comp_r_mm"] = comps["cut_comp_r_mm"]
         state["cut_comp_l_mm"] = comps["cut_comp_l_mm"]
         length = _num(state.get("longitud_modelo_mm"), 0.0)
         if length > 0:
             plan = _build_cut_plan(length, params, state["feed_sides"])
             state["cut_base_mm"] = plan["base_mm"]
-            if comps["cut_comp_mode"]:
-                state["cut_mm_r"] = plan["base_mm"] + comps["cut_comp_r_mm"]
-                state["cut_mm_l"] = plan["base_mm"] + comps["cut_comp_l_mm"]
-            else:
-                state["cut_mm_r"] = plan["last_mm"]
-                state["cut_mm_l"] = plan["last_mm"]
+            state["cut_mm_r"] = plan["base_mm"] + comps["cut_comp_r_mm"]
+            state["cut_mm_l"] = plan["base_mm"] + comps["cut_comp_l_mm"]
             state["cut_mm_last"] = plan["last_mm"]
             state["cut_comp_sequential"] = bool(plan["sequential"])
         else:
@@ -3285,10 +4065,8 @@ def _motion_ready_for_cycle() -> tuple[bool, str]:
         return False, error_codes.format_message("E039")
     if status.get("feeder_r_ready") is not True or status.get("feeder_l_ready") is not True:
         return False, error_codes.format_message("E032")
-    # lm_servo_on es el último On enviado por la HMI, no el estado del drive.
-    # Un home válido ya demuestra que el servo ejecutó el movimiento a cero.
-    if status.get("lm_homed") is not True:
-        return False, "LM Guide sin home. Llévalo a cero antes de Start."
+    # Si el LM Guide no está en home, _run_one_piece lo manda a PUU 0 al arranque
+    # fresco y continúa; no se bloquea Start por posición.
     return True, ""
 
 
@@ -3435,7 +4213,13 @@ def _cycle_fail(code: str, *, mensaje: str | None = None, **fmt) -> None:
         # Si el error quedó sin popup de recuperación, abrirlo.
         if not _recovery_get().get("active"):
             existing = str(_MACHINE_STATE.get("ciclo_error") or code or "").strip()
-            _recovery_begin(existing, str(_MACHINE_STATE.get("mensaje") or msg))
+            fixed = msg
+            try:
+                if existing:
+                    fixed = error_codes.format_message(existing)
+            except Exception:
+                fixed = msg
+            _recovery_begin(existing, fixed)
         return
     if not in_error:
         _push_event(msg, "error")
@@ -3447,10 +4231,11 @@ def _cycle_fail(code: str, *, mensaje: str | None = None, **fmt) -> None:
     with _STATE_LOCK:
         _MACHINE_STATE["post_error_purga"] = True
     _recovery_begin(code, msg)
+    # Banner: solo aviso corto. El detalle del error vive en recovery.mensaje (popup).
     _set_machine_ui(
         estado="error",
         estado_label="Error",
-        mensaje=msg,
+        mensaje=f"{code}. Abre el aviso para continuar." if code else "Abre el aviso para continuar.",
         en_curso=True if keep_lot else was_en_curso,
         ciclo_error=code,
         tiempo_corriendo_s=freeze_s,
@@ -3594,6 +4379,10 @@ def _fail_feed_stage(error_name: str) -> None:
     err = (error_name or "").strip() or "feed_no_reply"
     if err == "ok":
         err = "unknown"
+    joint_side = _joint_side_from_feed_error(err)
+    if joint_side:
+        _joint_begin_from_feed(joint_side)
+        return
     code = error_codes.feed_stage_code(err)
     if code == "E038":
         _cycle_fail("E038", detail=err)
@@ -3731,6 +4520,7 @@ def _cycle_run_step(step_id: str, params: dict) -> bool:
 
     # Step 6. Cortar en la posición actual; si hay compensación dual aplicable,
     # mover a la segunda posición (offset mayor) y cortar el otro lado.
+    # Joint: omitir el corte del lado afectado (skip_cut).
     if step_id == "6":
         plan = _active_cut_plan()
         if plan is None:
@@ -3751,9 +4541,26 @@ def _cycle_run_step(step_id: str, params: dict) -> bool:
                 return False
             return _cycle_sleep_ms(int(params["ms_after_cutter"]))
 
-        if not pulse_cutter(str(plan["first_valve"]), str(plan["first_label"])):
-            return False
+        first_valve = _joint_valve_allowed(str(plan["first_valve"]))
+        if first_valve:
+            if not pulse_cutter(first_valve, str(plan["first_label"])):
+                return False
+        else:
+            _push_event(
+                f"Corte omitido por Joint ({_JOINT.get('skip_cut') or '?'}): "
+                f"{plan['first_label']}.",
+                "warn",
+            )
         if not plan.get("sequential"):
+            return True
+
+        second_valve = _joint_valve_allowed(str(plan["second_valve"]))
+        if not second_valve:
+            _push_event(
+                f"Segundo corte omitido por Joint ({_JOINT.get('skip_cut') or '?'}): "
+                f"{plan['second_label']}.",
+                "warn",
+            )
             return True
 
         second_mm = float(plan["second_mm"])
@@ -3764,7 +4571,7 @@ def _cycle_run_step(step_id: str, params: dict) -> bool:
             return False
         if not _cycle_sleep_ms(int(params["ms_lm_at_cut"])):
             return False
-        return pulse_cutter(str(plan["second_valve"]), str(plan["second_label"]))
+        return pulse_cutter(second_valve, str(plan["second_label"]))
 
     # Step 7. LM Guide al depósito del montón; liberar pinzas; esperar.
     if step_id == "7":
@@ -3924,6 +4731,8 @@ def _cycle_run_step(step_id: str, params: dict) -> bool:
 
 def _next_piece_follows() -> bool:
     """Hay otra pieza del lote después de la que se está cerrando."""
+    if _joint_blocks_next_piece():
+        return False
     if _CYCLE_CTRL.get("step_mode"):
         return False
     if not _LOT["active"] or _LOT["tray_wait"]:
@@ -4474,6 +5283,8 @@ def _run_one_piece(start_index: int, started_at: float | None = None) -> bool:
         }
         if _cycle_should_abort():
             return False
+        if not _joint_check_during_cycle(step_id):
+            return False
         _cycle_enter_step(step_id, idx)
         if not _cycle_assert_preconditions(idx):
             return False
@@ -4483,7 +5294,8 @@ def _run_one_piece(start_index: int, started_at: float | None = None) -> bool:
         step_s = time.perf_counter() - t_step
         if ok:
             _prod_log_op(step_id, step_s, piece=piece_num, parallel=False)
-        elif not _MACHINE_STATE.get("ciclo_error"):
+        elif not _MACHINE_STATE.get("ciclo_error") and not _joint_active():
+            # Joint ya se registró como WARNING en _joint_begin_common.
             detail = str(_MACHINE_STATE.get("mensaje") or "falló")
             _prod_log_op(
                 step_id,
@@ -4569,6 +5381,13 @@ def _cycle_worker(start_index: int = 0, gen: int = 0) -> None:
                 return
             _mant_add_cycle()
             if not lot_mode:
+                if (
+                    _joint_active()
+                    and str(_recovery_get().get("origin") or "") == "fabricate"
+                    and _JOINT.get("finish_piece")
+                ):
+                    _joint_enter_operator_after_piece()
+                    return
                 if _cycle_worker_is_current(gen):
                     _finish_piece_idle("Ciclo completado. Listo para siguiente Start.")
                 return
@@ -4582,6 +5401,13 @@ def _cycle_worker(start_index: int = 0, gen: int = 0) -> None:
                 progreso_pct=_lot_progress_pct(0),
                 tiempo_ciclo_s=round(_LAST_PIECE_S, 1),
             )
+            if (
+                _joint_active()
+                and str(_recovery_get().get("origin") or "") == "fabricate"
+                and _JOINT.get("finish_piece")
+            ):
+                _joint_enter_operator_after_piece()
+                return
             if done >= total:
                 avg_cadence = (
                     sum(_PROD_CADENCE_SAMPLES) / len(_PROD_CADENCE_SAMPLES)
@@ -4665,6 +5491,8 @@ def _cycle_blocked_by_routine() -> str:
         return "Tras un error: Reset y completa la purga antes de Iniciar o Reanudar."
     if _MACHINE_STATE.get("rutina") == "purga":
         return "Hay una purga en curso."
+    if _joint_active() and str(_recovery_get().get("step") or "") != "listo":
+        return "Completa la recuperación Joint antes de Iniciar."
     return _motion_owner_busy()
 
 
@@ -4706,6 +5534,12 @@ def _cycle_start(*, step_mode: bool = False) -> tuple[bool, str]:
             return False, error_codes.format_message("E092")
         if not _prefeeder_status_ready(st):
             return False, error_codes.format_message("E099")
+    # Joint ya resuelto (step=listo) o latch huérfano: no arrastrar skip_cut al lote nuevo.
+    rec0 = _recovery_get()
+    if rec0.get("kind") == "joint" and str(rec0.get("step") or "") == "listo":
+        _recovery_clear()
+    else:
+        _joint_latch_clear()
     if not step_mode:
         _announce_trays(cycles, plan)
     global _LOT_SEQ, _PROD_CADENCE_SAMPLES, _PREV_PIECE_END_T, _PIECE_TICK0, _LOT_T0
@@ -4727,8 +5561,8 @@ def _cycle_start(*, step_mode: bool = False) -> tuple[bool, str]:
         _LOT["batch_size"] = plan["batch_size"]
         _LOT["cut_mm"] = plan["cut_mm"]
         cut_comps = _cut_comp_params_of(params)
-        _LOT["cut_offset_mm"] = _measure_comp_mm()
-        _LOT["cut_comp_mode"] = cut_comps["cut_comp_mode"]
+        _LOT["cut_offset_mm"] = 0.0
+        _LOT["cut_comp_mode"] = True
         _LOT["cut_comp_r_mm"] = cut_comps["cut_comp_r_mm"]
         _LOT["cut_comp_l_mm"] = cut_comps["cut_comp_l_mm"]
         _LOT["length_mm"] = plan["length_mm"]
@@ -4808,6 +5642,8 @@ def _cycle_resume() -> tuple[bool, str]:
         return False, "La charola está llena. Vacía y confirma."
     if _MACHINE_STATE.get("ciclo_error"):
         return False, "Hay un error activo. Usa Reset cuando la condición se haya corregido."
+    if _joint_active() and str(_recovery_get().get("step") or "") != "listo":
+        return False, "Completa la recuperación Joint (Finish / Abrir) antes de Reanudar."
     if _MACHINE_STATE.get("post_error_purga"):
         return False, "Tras un error debes completar la purga antes de Reanudar."
     if _MACHINE_STATE.get("rutina") == "purga":
@@ -4815,6 +5651,12 @@ def _cycle_resume() -> tuple[bool, str]:
     busy = _motion_owner_busy()
     if busy:
         return False, busy
+    # Joint listo / latch huérfano: no reanudar con skip_cut activo.
+    rec_r = _recovery_get()
+    if rec_r.get("kind") == "joint" and str(rec_r.get("step") or "") == "listo":
+        _recovery_clear()
+    else:
+        _joint_latch_clear()
     idx = int(_MACHINE_STATE.get("ciclo_paso_indice") or 0)
     lot_open = bool(_LOT["active"])
     en_curso = bool(_MACHINE_STATE.get("ciclo_en_curso"))
@@ -4945,9 +5787,10 @@ def _cycle_stop_idle(mensaje: str = "Stop — ciclo detenido. Listo para Iniciar
     _LOT_T0 = None
     _overlap_reset()
     _cycle_latch_reset()
+    # Stop cancela lote y Joint: recovery + skip_cut (si no, el próximo corte se omite).
     with _STATE_LOCK:
         _MACHINE_STATE["post_error_purga"] = False
-        _MACHINE_STATE["recovery"] = _recovery_blank()
+    _recovery_clear()
     _set_machine_ui(
         estado="idle",
         estado_label="En espera",
@@ -5055,28 +5898,50 @@ def _cycle_reset_error() -> tuple[bool, str]:
         # Ruta especial: tras Reset la purga es obligatoria antes de Reanudar/Start.
         # El reset PLC apaga válvulas lógicas: libera holder/pinzas (suelta la pieza).
         _gripper_holding_set(False)
+        err_fixed = ""
         with _STATE_LOCK:
             _MACHINE_STATE["post_error_purga"] = True
             rec = dict(_MACHINE_STATE.get("recovery") or _recovery_blank())
-            if rec.get("active"):
-                rec["step"] = "piezas"
-                rec["code"] = str(rec.get("code") or code or "").strip()
-                if not rec.get("mensaje"):
-                    rec["mensaje"] = msg_now
-                _MACHINE_STATE["recovery"] = rec
-            else:
-                prev = dict(_MACHINE_STATE.get("recovery") or _recovery_blank())
-                _MACHINE_STATE["recovery"] = {
-                    "active": True,
-                    "step": "piezas",
-                    "code": str(code or "").strip(),
-                    "mensaje": msg_now or str(prev.get("mensaje") or ""),
-                }
+            prev = dict(_MACHINE_STATE.get("recovery") or _recovery_blank())
+            err_fixed = str(
+                rec.get("mensaje")
+                or msg_now
+                or prev.get("mensaje")
+                or ""
+            ).strip()
+            # Si el banner ya era corto, recuperar descripción del catálogo.
+            if err_fixed.endswith("Abre el aviso para continuar.") or not err_fixed:
+                c = str(rec.get("code") or code or "").strip()
+                if c:
+                    try:
+                        err_fixed = error_codes.format_message(c)
+                    except Exception:
+                        err_fixed = c
+            _MACHINE_STATE["recovery"] = {
+                "active": True,
+                "step": "piezas",
+                "kind": "",
+                "side": "",
+                "origin": "",
+                "busy": False,
+                "lm_at_park": False,
+                "code": str(rec.get("code") or code or "").strip(),
+                "mensaje": err_fixed,
+                "guide": (
+                    "Confirma que las piezas están bien. "
+                    "Si todo está correcto, pulsa el botón verde para seguir."
+                ),
+            }
+        code_show = str(_recovery_get().get("code") or code or "").strip()
         _set_machine_ui(
             estado="paused" if keep else "idle",
             estado_label="Recuperación",
             ciclo_error="",
-            mensaje="Error limpiado. Confirma las piezas y completa la recuperación.",
+            mensaje=(
+                f"{code_show}. Abre el aviso para continuar."
+                if code_show
+                else "Abre el aviso para continuar."
+            ),
             en_curso=keep,
         )
         _push_event("Reset — holder y pieza liberados; sigue la recuperación.")
@@ -5108,7 +5973,7 @@ def _cycle_reset_error() -> tuple[bool, str]:
         return False, _error_reset_blocked_message()
     if _prefeeder_required():
         _prefeeder_stop_now()
-        # Holgura omitida: no exigir estabilización física de ese sensor.
+        # Alimentación omitida: no exigir estabilización física de holgura de ese lado.
         soft_pf = code in _PF_SOFT_ERRORS or _prefeeder_holgura_omitted_for_code(code)
         if not soft_pf:
             ok_pf, msg_pf = _prefeeder_stabilize_and_lock()
@@ -5510,6 +6375,16 @@ def _purga_finish(cancelled: bool) -> None:
         _push_event("Purga cancelada.", "warn")
         msg = "Purga cancelada."
         if recovery:
+            rec = _recovery_get()
+            if rec.get("kind") == "joint":
+                _recovery_set(step="operator", busy=False)
+                _set_machine_ui(
+                    estado="paused" if keep else "idle",
+                    estado_label="Warning Joint",
+                    mensaje="Purga Joint cancelada. Usa Finish para reintentar.",
+                    en_curso=keep,
+                )
+                return
             _set_machine_ui(
                 estado="paused" if keep else "idle",
                 estado_label="Purga pendiente",
@@ -5528,7 +6403,68 @@ def _purga_finish(cancelled: bool) -> None:
                 rec = dict(_MACHINE_STATE.get("recovery") or _recovery_blank())
                 if rec.get("active"):
                     rec["step"] = "listo"
+                    rec["busy"] = False
+                    rec["guide"] = (
+                        "Purga terminada. Vuelve a la pantalla principal y pulsa Reanudar. "
+                        "Esta pieza no suma al contador."
+                    )
                     _MACHINE_STATE["recovery"] = rec
+            joint_rec = _recovery_get()
+            if joint_rec.get("kind") == "joint":
+                # Conservar piece_counted para el mensaje; limpiar skip_cut ya.
+                piece_counted = bool(_JOINT.get("piece_counted"))
+                _joint_latch_clear()
+                if keep:
+                    if _LOT.get("tray_wait"):
+                        deposits = int(_LOT.get("deposits_per_tray") or 0)
+                        _set_machine_ui(
+                            estado="paused",
+                            estado_label="Charola llena",
+                            mensaje=(
+                                f"Purga Joint terminada. Charola llena — {deposits} ciclos. "
+                                "Vacía la charola y confirma."
+                            ),
+                            en_curso=True,
+                            ciclo_error="",
+                        )
+                    elif piece_counted:
+                        # Pieza buena ya contada: preparar siguiente sin rearmar.
+                        _overlap_reset()
+                        _cycle_latch_reset()
+                        _set_machine_ui(
+                            estado="paused",
+                            estado_label="Warning Joint",
+                            mensaje="Joint resuelto. Puedes Reanudar el lote.",
+                            en_curso=True,
+                            ciclo_error="",
+                            step_id="1",
+                            step_index=0,
+                            paralelo_id="",
+                            feed={"R": None, "L": None},
+                            tiempo_corriendo_s=0,
+                        )
+                    else:
+                        if _LOT.get("active"):
+                            piece = int(_LOT.get("cycles_done") or 0) + 1
+                            total = int(_LOT.get("cycles_total") or 0)
+                            rearm_msg = (
+                                f"Joint listo. Pieza {piece} de {total} se reintenta "
+                                "desde el inicio. Puedes Reanudar."
+                            )
+                        else:
+                            rearm_msg = (
+                                "Joint listo. La pieza se reintenta desde el inicio. "
+                                "Puedes Reanudar."
+                            )
+                        _rearm_piece(rearm_msg)
+                else:
+                    _set_machine_ui(
+                        estado="idle",
+                        estado_label="En espera",
+                        mensaje="Joint resuelto. Listo para operar.",
+                        en_curso=False,
+                    )
+                return
             if keep:
                 if _LOT.get("tray_wait"):
                     deposits = int(_LOT.get("deposits_per_tray") or 0)
@@ -5969,12 +6905,12 @@ def _omitir_holgura(side: str, data) -> tuple[bool, str]:
             _PF_ERROR_LATCH = False
     if nxt:
         _push_event(
-            f"Holgura {nombre} omitida. Empleado {empleado}. "
-            f"Pulsa Reset para limpiar el error."
+            f"Alimentación {nombre} omitida. Empleado {empleado}. "
+            f"Pulsa Reset si hay un error pendiente."
         )
-        return True, f"Holgura {nombre} omitida. Pulsa Reset."
-    _push_event(f"Holgura {nombre} restaurada. Empleado {empleado}.")
-    return True, f"Holgura {nombre} restaurada."
+        return True, f"Alimentación {nombre} omitida."
+    _push_event(f"Alimentación {nombre} restaurada. Empleado {empleado}.")
+    return True, f"Alimentación {nombre} restaurada."
 
 
 def _omitir_holgura_izquierda(data):
@@ -6260,18 +7196,55 @@ def _recovery_confirm_piezas(_data=None) -> tuple[bool, str]:
         return False, "Primero limpia el error con Reset."
     if _MACHINE_STATE.get("estado") == "error" or _MACHINE_STATE.get("ciclo_error"):
         return False, "Todavía hay un error activo. Pulsa Reset."
-    _recovery_set(step="manguera")
+    _recovery_set(step="manguera", lm_at_park=False)
+    _recovery_set_guide(
+        "Retira el material hasta apagar ambos sensores láser. "
+        "Usa Park/Home del LM Guide si hace falta. Cuando digan Apagado, pulsa Continuar."
+    )
+    code_show = str(rec.get("code") or "").strip()
     _set_machine_ui(
-        mensaje="Mueve la manguera hacia atrás hasta apagar ambos cortadores.",
+        mensaje=(
+            f"{code_show}. Abre el aviso para continuar."
+            if code_show
+            else "Abre el aviso para continuar."
+        ),
         estado_label="Recuperación",
     )
-    return True, "Confirma la manguera."
+    return True, "Confirma sensores láser."
+
+
+def _recovery_banner_hint() -> str:
+    code = str(_recovery_get().get("code") or "").strip()
+    return f"{code}. Abre el aviso para continuar." if code else "Abre el aviso para continuar."
+
+
+def _recovery_auto_purga_fail(msg: str = "") -> None:
+    """Fallo o cancelación de purga automática."""
+    user_cancel = bool(_ROUTINE.pop("purga_user_cancel", False))
+    _cycle_plc_send({"op": "all_off"})
+    _purga_finish(True)
+    if user_cancel:
+        _recovery_set(step="manguera", busy=False)
+        _recovery_set_guide("Purga cancelada. Puedes Continuar para reintentar.")
+        _set_machine_ui(
+            estado_label="Recuperación",
+            mensaje=_recovery_banner_hint(),
+        )
+        return
+    text = (msg or "Purga automática falló. Corrige y pulsa Retry, o Cancelar.").strip()
+    # No pisar recovery.mensaje (error original); la guía explica el fallo de purga.
+    _recovery_set(step="purga_error", busy=False)
+    _recovery_set_guide(text)
+    _set_machine_ui(
+        estado_label="Purga — error",
+        mensaje=_recovery_banner_hint(),
+    )
 
 
 def _recovery_auto_purga_run() -> None:
-    """Purga automática post-error: parque + corte (reusa _purge_cut / _purga_finish)."""
+    """Purga automática post-error: park + holder/encoder + feed + corte."""
     _ROUTINE["from_lote"] = False
-    _recovery_set(step="purga")
+    _recovery_set(step="purga", busy=True)
     _set_routine_ui(
         rutina="purga",
         rutina_fase="segura",
@@ -6279,38 +7252,86 @@ def _recovery_auto_purga_run() -> None:
         estado_label="Purga",
         mensaje="NO INTRODUCIR MANOS. Proceso de limpieza en curso, espera.",
     )
-    _set_machine_ui(mensaje="NO INTRODUCIR MANOS. Proceso de limpieza en curso, espera.")
+    _recovery_set_guide("NO INTRODUCIR MANOS. Proceso de limpieza en curso, espera.")
+    _set_machine_ui(mensaje=_recovery_banner_hint())
+
     # Tiempo para leer el aviso antes de mover.
     if not _routine_sleep_ms(500):
-        _purga_finish(True)
-        _recovery_set(step="manguera")
+        _recovery_auto_purga_fail("Purga cancelada.")
         return
     if not _routine_try_reset_fault() or _ROUTINE["stop"].is_set():
-        _purga_finish(True)
-        _recovery_set(step="manguera")
+        _recovery_auto_purga_fail("Purga cancelada o falla de reset.")
         return
     if not _cycle_plc_send({"op": "all_off"}).get("sent"):
-        _purga_finish(True)
-        _recovery_set(step="manguera")
+        _recovery_auto_purga_fail("No se pudo apagar salidas PLC para la purga.")
         return
     _gripper_holding_set(False)
-    _set_routine_ui(
-        mensaje=f"NO METAS LAS MANOS. Llevando el eje a parque ({PURGE_PARK_MM:.0f} mm).",
-    )
+    park_msg = f"NO METAS LAS MANOS. Llevando el eje a parque ({PURGE_PARK_MM:.0f} mm)."
+    _set_routine_ui(mensaje=park_msg)
+    _recovery_set_guide(park_msg)
     if _ROUTINE["stop"].is_set() or not _routine_move_lm_mm(PURGE_PARK_MM):
-        _purga_finish(True)
-        _recovery_set(step="manguera")
+        _recovery_auto_purga_fail("No se alcanzó Park en la purga.")
         return
+
+    # Misma secuencia que Alimentar + Continuar de la purga manual.
+    close_msg = "NO METAS LAS MANOS. Cerrando holder y encoder."
+    _set_routine_ui(rutina_fase="alimentar", mensaje=close_msg)
+    _recovery_set_guide(close_msg)
+    if not _purga_close_holder() or _ROUTINE["stop"].is_set():
+        _recovery_auto_purga_fail("No se cerró holder/encoder. Revisa y pulsa Retry.")
+        return
+    side = _purge_feed_side()
+    side_name = {"R": "derecho", "L": "izquierdo"}.get(side or "", "ambos lados")
+    feed_msg = f"NO METAS LAS MANOS. Alimentación: {side_name} hasta el láser."
+    _set_routine_ui(mensaje=feed_msg)
+    _recovery_set_guide(feed_msg)
+    ok_feed, code, _feed = _feed_laser()
+    if _ROUTINE["stop"].is_set():
+        _recovery_auto_purga_fail("Purga cancelada durante la alimentación.")
+        return
+    if not ok_feed:
+        msg = error_codes.format_message(code) if code else "Falló la alimentación hasta el láser."
+        _push_event(msg, "error")
+        _recovery_auto_purga_fail(msg + " Revisa el sensor láser y pulsa Retry.")
+        return
+
     ok = False
     try:
         ok = _purge_cut()
     finally:
         if not ok or _ROUTINE["stop"].is_set():
-            _cycle_plc_send({"op": "all_off"})
-            _purga_finish(True)
-            _recovery_set(step="manguera")
+            _recovery_auto_purga_fail("Falló el corte de purga. Revisa y pulsa Retry.")
         else:
             _purga_finish(False)
+
+
+def _recovery_start_auto_purga() -> tuple[bool, str]:
+    """Arranca la purga automática post-error (desde manguera o Retry)."""
+    if _MACHINE_STATE.get("estado") == "error" or _MACHINE_STATE.get("ciclo_error"):
+        return False, "Todavía hay un error activo."
+    if _MACHINE_STATE.get("rutina") == "purga":
+        return False, "Ya hay una purga en curso."
+    ready, err = _require_links()
+    if not ready:
+        return False, err
+    _ROUTINE.pop("purga_user_cancel", None)
+    _recovery_set(step="purga", busy=True)
+    _set_routine_ui(
+        rutina="purga",
+        rutina_fase="segura",
+        rutina_manos=True,
+        estado_label="Purga",
+        mensaje="NO INTRODUCIR MANOS. Proceso de limpieza en curso, espera.",
+    )
+    _recovery_set_guide("NO INTRODUCIR MANOS. Proceso de limpieza en curso, espera.")
+    _set_machine_ui(mensaje=_recovery_banner_hint())
+    ok, start_err = _start_routine(_recovery_auto_purga_run)
+    if not ok:
+        _set_routine_ui(rutina="", rutina_fase="", rutina_manos=False)
+        _recovery_set(step="purga_error", busy=False)
+        _recovery_set_guide(start_err or "No se pudo iniciar la purga. Revisa y pulsa Retry.")
+        return False, start_err
+    return True, "Purga automática iniciada."
 
 
 def _recovery_confirm_manguera(_data=None) -> tuple[bool, str]:
@@ -6319,31 +7340,171 @@ def _recovery_confirm_manguera(_data=None) -> tuple[bool, str]:
         return False, "No hay una recuperación en curso."
     if rec.get("step") != "manguera":
         return False, "Primero confirma que las piezas están bien."
-    if _MACHINE_STATE.get("estado") == "error" or _MACHINE_STATE.get("ciclo_error"):
-        return False, "Todavía hay un error activo."
-    if _MACHINE_STATE.get("rutina") == "purga":
-        return False, "Ya hay una purga en curso."
-    if not _recovery_cutters_clear_now():
-        return False, "Los cortadores aún no están apagados. Mueve la manguera hacia atrás."
+    if not _recovery_lasers_clear_now():
+        return False, "Los sensores láser aún detectan material. Retíralo hasta Apagado."
+    return _recovery_start_auto_purga()
+
+
+def _recovery_toggle_lm_run() -> None:
+    """Mismo botón: Park ↔ Home durante el paso de sensores láser."""
+    rec = _recovery_get()
+    go_park = not bool(rec.get("lm_at_park"))
+    if go_park:
+        _recovery_set_guide(f"LM Guide a Park ({PURGE_PARK_MM:.0f} mm). Espera.")
+        _set_machine_ui(mensaje=_recovery_banner_hint())
+        ok = (not _ROUTINE["stop"].is_set()) and _routine_move_lm_mm(PURGE_PARK_MM)
+        _recovery_set(busy=False, lm_at_park=True if ok else bool(rec.get("lm_at_park")))
+        if ok:
+            _recovery_set_guide(
+                "LM Guide en Park. Retira material hasta Apagado en ambos láseres, "
+                "luego Continuar. O pulsa de nuevo para Home."
+            )
+        else:
+            _recovery_set_guide("No se alcanzó Park. Reintenta el botón naranja.")
+        _set_machine_ui(mensaje=_recovery_banner_hint())
+        return
+    _recovery_set_guide("LM Guide a Home. Espera.")
+    _set_machine_ui(mensaje=_recovery_banner_hint())
+    home = _cycle_motion_send({"op": "lmguide_move", "target": "home"}, timeout_s=40.0)
+    ok = _motion_cmd_ok(home, "lmguide_move") and not _ROUTINE["stop"].is_set()
+    _recovery_set(busy=False, lm_at_park=False if ok else True)
+    if ok:
+        _recovery_set_guide(
+            "LM Guide en Home. Retira material hasta Apagado, luego Continuar. "
+            "O pulsa de nuevo para Park."
+        )
+    else:
+        _recovery_set_guide("No se alcanzó Home. Reintenta el botón naranja.")
+    _set_machine_ui(mensaje=_recovery_banner_hint())
+
+
+def _recovery_toggle_lm(_data=None) -> tuple[bool, str]:
+    rec = _recovery_get()
+    if not rec.get("active"):
+        return False, "No hay una recuperación en curso."
+    if rec.get("step") != "manguera":
+        return False, "El botón Park/Home aplica en el paso de sensores láser."
+    if rec.get("busy"):
+        return False, "Espera a que termine el movimiento."
+    if _MACHINE_STATE.get("rutina"):
+        return False, "Hay una rutina en curso."
     ready, err = _require_links()
     if not ready:
         return False, err
-    # Mostrar el aviso en el popup de inmediato; la rutina espera 500 ms para leer.
-    _recovery_set(step="purga")
-    _set_routine_ui(
-        rutina="purga",
-        rutina_fase="segura",
-        rutina_manos=True,
-        estado_label="Purga",
-        mensaje="NO INTRODUCIR MANOS. Proceso de limpieza en curso, espera.",
-    )
-    _set_machine_ui(mensaje="NO INTRODUCIR MANOS. Proceso de limpieza en curso, espera.")
-    ok, err = _start_routine(_recovery_auto_purga_run)
+    go_park = not bool(rec.get("lm_at_park"))
+    _recovery_set(busy=True)
+    ok, start_err = _start_routine(_recovery_toggle_lm_run)
     if not ok:
-        _set_routine_ui(rutina="", rutina_fase="", rutina_manos=False)
-        _recovery_set(step="manguera")
-        return False, err
-    return True, "Purga automática iniciada."
+        _recovery_set(busy=False)
+        return False, start_err
+    return True, "Yendo a Park…" if go_park else "Yendo a Home…"
+
+
+def _recovery_retry_purga(_data=None) -> tuple[bool, str]:
+    rec = _recovery_get()
+    if not rec.get("active"):
+        return False, "No hay una recuperación en curso."
+    if rec.get("step") != "purga_error":
+        return False, "Retry aplica cuando la purga automática falló."
+    return _recovery_start_auto_purga()
+
+
+def _recovery_cancel_purga(_data=None) -> tuple[bool, str]:
+    rec = _recovery_get()
+    if not rec.get("active"):
+        return False, "No hay una recuperación en curso."
+    if rec.get("step") not in ("purga_error", "purga"):
+        return False, "Cancelar aplica durante la purga de recuperación."
+    if _MACHINE_STATE.get("rutina") == "purga":
+        _ROUTINE["purga_user_cancel"] = True
+        _ROUTINE["stop"].set()
+        return True, "Cancelando purga…"
+    _cycle_plc_send({"op": "all_off"})
+    _recovery_set(step="manguera", busy=False)
+    _set_machine_ui(
+        estado_label="Recuperación",
+        mensaje="Purga cancelada. Puedes Continuar para reintentar.",
+    )
+    return True, "Purga cancelada."
+
+
+def _recovery_skip_allowed(rec: dict | None = None) -> tuple[bool, str]:
+    """SKIP solo en piezas/manguera/purga/purga_error (límites). No durante purga en curso ni Joint."""
+    rec = rec if rec is not None else _recovery_get()
+    if not rec.get("active"):
+        return False, "No hay una recuperación en curso."
+    if rec.get("kind") == "joint":
+        return False, "SKIP no aplica a la recuperación Joint."
+    step = str(rec.get("step") or "")
+    if step not in ("piezas", "manguera", "purga", "purga_error"):
+        return False, "SKIP no está disponible en este paso."
+    if _MACHINE_STATE.get("estado") == "error" or _MACHINE_STATE.get("ciclo_error"):
+        return False, "Todavía hay un error activo. Pulsa Reset."
+    # Límite de purga: rutina=="purga" marca inicio hasta _purga_finish (limpia rutina).
+    if _MACHINE_STATE.get("rutina") == "purga":
+        return False, "SKIP no está disponible durante la purga."
+    return True, step
+
+
+def _recovery_skip(data=None) -> tuple[bool, str]:
+    data = data or {}
+    empleado = _empleado(data.get("empleado"))
+    if not empleado:
+        return False, "Hace falta el número de empleado, cinco dígitos."
+    rec = _recovery_get()
+    ok, detail = _recovery_skip_allowed(rec)
+    if not ok:
+        return False, detail
+    step = detail
+    code = str(rec.get("code") or "").strip() or "—"
+    _push_event(
+        f"SKIP recuperación. Empleado {empleado}. Error {code}. Paso {step}.",
+        "warn",
+    )
+    with _STATE_LOCK:
+        _MACHINE_STATE["post_error_purga"] = False
+        rec2 = dict(_MACHINE_STATE.get("recovery") or _recovery_blank())
+        if rec2.get("active"):
+            rec2["step"] = "listo"
+            rec2["busy"] = False
+            _MACHINE_STATE["recovery"] = rec2
+    keep = bool(
+        _MACHINE_STATE.get("ciclo_en_curso")
+        or _LOT.get("active")
+        or _LOT.get("tray_wait")
+    )
+    if keep:
+        if _LOT.get("tray_wait"):
+            deposits = int(_LOT.get("deposits_per_tray") or 0)
+            _set_machine_ui(
+                estado="paused",
+                estado_label="Charola llena",
+                mensaje=(
+                    f"SKIP. Charola llena — {deposits} ciclos. "
+                    "Vacía la charola y confirma."
+                ),
+                en_curso=True,
+                ciclo_error="",
+            )
+        elif _LOT.get("active"):
+            piece = int(_LOT.get("cycles_done") or 0) + 1
+            total = int(_LOT.get("cycles_total") or 0)
+            _rearm_piece(
+                f"SKIP. Pieza {piece} de {total} se reintenta desde el inicio. "
+                "Puedes Reanudar."
+            )
+        else:
+            _rearm_piece(
+                "SKIP. La pieza se reintenta desde el inicio. Puedes Reanudar."
+            )
+    else:
+        _set_machine_ui(
+            estado="idle",
+            estado_label="En espera",
+            mensaje="SKIP. Listo para operar.",
+            en_curso=False,
+        )
+    return True, "Recuperación omitida. Listo."
 
 
 def _recovery_done(_data=None) -> tuple[bool, str]:
@@ -6352,7 +7513,13 @@ def _recovery_done(_data=None) -> tuple[bool, str]:
         return True, ""
     if rec.get("step") == "purga" or _MACHINE_STATE.get("rutina") == "purga":
         return False, "Espera a que termine la purga."
-    if rec.get("step") not in ("listo", "piezas", "manguera", "error"):
+    if rec.get("kind") == "joint":
+        if rec.get("step") == "listo":
+            _recovery_clear()
+            return True, "Listo."
+        # Salir del popup; el WARNING Joint permanece hasta Finish.
+        return True, "Puedes volver cuando quieras."
+    if rec.get("step") not in ("listo", "piezas", "manguera", "purga_error", "error"):
         return False, "La recuperación aún no termina."
     if rec.get("step") != "listo":
         # Salir del popup está permitido; no borra la recuperación pendiente.
@@ -6387,7 +7554,23 @@ _ROUTINE_ACTIONS = {
     "charola_vacia": _charola_vacia,
     "recovery_confirm_piezas": _recovery_confirm_piezas,
     "recovery_confirm_manguera": _recovery_confirm_manguera,
+    "recovery_toggle_lm": _recovery_toggle_lm,
+    "recovery_retry_purga": _recovery_retry_purga,
+    "recovery_cancel_purga": _recovery_cancel_purga,
+    "recovery_skip": _recovery_skip,
     "recovery_done": _recovery_done,
+    "joint_alimentar": _joint_alimentar_action,
+    "joint_liberar": _joint_liberar_action,
+    "joint_continuar": _joint_continuar_action,
+    "joint_retry": _joint_retry_action,
+    "joint_confirm": _joint_confirm_action,
+    "joint_continue": _joint_continue_action,
+    "joint_finish": _joint_finish_action,
+    # === BEGIN TEMP JOINT SIM OFFLINE — DELETE ===
+    "joint_sim_feed": _joint_sim_start_feed,
+    "joint_sim_fabricate": _joint_sim_start_fabricate,
+    "joint_sim_clear": _joint_sim_clear,
+    # === END TEMP JOINT SIM OFFLINE — DELETE ===
 }
 
 _mant_load()
@@ -6431,29 +7614,6 @@ def set_modelo():
     return jsonify({"ok": True, "state": _public_machine_state(), "motion_data": dict(_MOTION_DATA)})
 
 
-@app.route("/api/compensacion", methods=["POST"])
-def set_compensacion():
-    data = request.get_json(silent=True) or {}
-    try:
-        mm = float(data.get("mm"))
-    except (TypeError, ValueError):
-        return jsonify({"ok": False, "error": "Compensación inválida"}), 400
-    _MACHINE_STATE["compensacion_medicion_mm"] = mm
-    _MOTION_DATA["measure_comp_mm"] = mm
-    _mirror_comp_to_cycle_json(mm)
-    flat = _motion_data_flat(_MOTION_DATA)
-    sent = _send_motion_serial([_compact(flat)])
-    return jsonify(
-        {
-            "ok": True,
-            "state": _public_machine_state(),
-            "motion_data": dict(_MOTION_DATA),
-            "esp32_line": flat,
-            **sent,
-        }
-    )
-
-
 @app.route("/api/cantidad", methods=["POST"])
 def set_cantidad():
     data = request.get_json(silent=True) or {}
@@ -6492,10 +7652,10 @@ def cycle_config():
     if request.method == "GET":
         params = _load_cycle_params()
         comps = _cut_comp_params_of(params)
-        params["cut_comp_mode"] = comps["cut_comp_mode"]
+        params["cut_comp_mode"] = True
         params["cut_comp_r_mm"] = comps["cut_comp_r_mm"]
         params["cut_comp_l_mm"] = comps["cut_comp_l_mm"]
-        params["cut_offset_mm"] = _measure_comp_mm()
+        params["cut_offset_mm"] = 0.0
         return jsonify(
             {
                 "ok": True,
@@ -6511,20 +7671,17 @@ def cycle_config():
         return jsonify({"ok": False, "error": "JSON inválido"}), 400
     params = _load_cycle_params()
     for key in _DEFAULT_CYCLE_PARAMS:
-        if key in patch and patch[key] is not None:
+        if key in patch and patch[key] is not None and key != "cut_comp_mode":
             params[key] = patch[key]
     params["feed_sides"] = _feed_sides_of(params)
-    if "cut_comp_mode" in patch:
-        params["cut_comp_mode"] = _parse_bool(patch.get("cut_comp_mode"), False)
     for key in ("cut_comp_r_mm", "cut_comp_l_mm"):
         if key in patch and patch[key] is not None:
             params[key] = _num(patch.get(key), 0.0)
     comps = _cut_comp_params_of(params)
-    params["cut_comp_mode"] = comps["cut_comp_mode"]
+    params["cut_comp_mode"] = True
     params["cut_comp_r_mm"] = comps["cut_comp_r_mm"]
     params["cut_comp_l_mm"] = comps["cut_comp_l_mm"]
-    # La compensación general se edita en pantalla principal; no se pisa aquí.
-    params["cut_offset_mm"] = _measure_comp_mm()
+    params["cut_offset_mm"] = 0.0
     for key in (
         "deposit_stack_gap_mm",
         "deposit_max_travel_mm",
@@ -6651,11 +7808,16 @@ def motion_status():
             feeder_ready["L"] = status_reply.get("feeder_l_ready")
             safety = status_reply.get("safety")
             break
+    encoder = _encoder_from_status(sent.get("replies"))
+    # === BEGIN TEMP JOINT SIM OFFLINE — DELETE ===
+    if _joint_sim_active():
+        encoder = _joint_sim_encoder_payload()
+    # === END TEMP JOINT SIM OFFLINE — DELETE ===
     return jsonify(
         {
             "ok": True,
             "sent": bool(sent.get("sent")),
-            "encoder": _encoder_from_status(sent.get("replies")),
+            "encoder": encoder,
             "lm_servo_on": lm_servo_on,
             "lm_homed": lm_homed,
             "feeder_ready": feeder_ready,
@@ -6758,13 +7920,13 @@ def motion_data():
         if key in patch:
             _MOTION_DATA[key] = patch[key]
     if "measure_comp_mm" in patch:
+        # Campo legado del protocolo Motion; ya no alimenta el plan de corte HMI.
         try:
             comp = float(patch["measure_comp_mm"])
         except (TypeError, ValueError):
             comp = 0.0
-        _MACHINE_STATE["compensacion_medicion_mm"] = comp
         _MOTION_DATA["measure_comp_mm"] = comp
-        _mirror_comp_to_cycle_json(comp)
+        _MACHINE_STATE["compensacion_medicion_mm"] = 0.0
     flat = _motion_data_flat(_MOTION_DATA)
     return jsonify({"ok": True, "data": dict(_MOTION_DATA), "esp32_line": flat})
 

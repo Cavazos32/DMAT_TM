@@ -13,7 +13,7 @@
   },
   "lmguide": {
     "pr_speed_rpm": 1500.0,
-    "pos_puu": -17111
+    "pos_puu": -4278
   },
   "feed_stage": {
     "validate_encoder": false

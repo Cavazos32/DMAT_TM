@@ -5893,3 +5893,90 @@ LOTE 005 | PIEZA 004/005 | STEP 03 | Alimentación L/R | MOTION | 4.144 s | ERRO
 LOTE 005 | PIEZA 004/005 | STEP 01 | Configuración inicial | MOTION | 0.019 s | OK
 LOTE 005 | PIEZA 004/005 | STEP 02 | Holder + encoder | PLC | 0.281 s | OK
 LOTE 005 | PIEZA 004/005 | STEP 03 | Alimentación L/R | MOTION | 4.150 s | ERROR | E033 Motion: Timeout de láser lado R (laser_timeout_r).
+LOTE 001 | PIEZA 001/001 | STEP 01 | Configuración inicial | MOTION | 0.024 s | OK
+LOTE 001 | PIEZA 001/001 | STEP 02 | Holder + encoder | PLC | 0.276 s | OK
+LOTE 001 | PIEZA 001/001 | STEP 03 | Alimentación L/R | MOTION | 3.390 s | OK | ENC R=53.00 mm L=54.50 mm
+LOTE 001 | PIEZA 001/001 | STEP 04 | Pinzas — liberar holder | PLC | 0.522 s | OK
+LOTE 001 | PIEZA 001/001 | STEP 05 | LM Guide — corte | MOTION | 1.028 s | OK
+LOTE 001 | PIEZA 001/001 | STEP 06 | Corte R/L | PLC | 1.202 s | OK
+LOTE 001 | PIEZA 001/001 | STEP 07 | Descarga de pieza | PLC+MOTION | 1.013 s | OK
+LOTE 001 | PIEZA 001/001 | STEP 08 | Regreso Home + blower | PLC+MOTION | 1.644 s | OK
+LOTE 001 | PIEZA 001/001 | COMPLETE | 9.433 s | FIRST | ENC R=53.00 mm L=54.50 mm
+LOTE 001 | SUMMARY | 1/1 | AVG CADENCE: 0.000 s
+LOTE 001 | PIEZA 001/001 | STEP 01 | Configuración inicial | MOTION | 0.020 s | OK
+LOTE 001 | PIEZA 001/001 | STEP 02 | Holder + encoder | PLC | 0.276 s | OK
+LOTE 001 | PIEZA 001/001 | STEP 03 | Alimentación L/R | MOTION | 4.161 s | ERROR | E033 Motion: Timeout de láser lado R (laser_timeout_r).
+LOTE 001 | PIEZA 001/001 | STEP 01 | Configuración inicial | MOTION | 0.020 s | OK
+LOTE 001 | PIEZA 001/001 | STEP 02 | Holder + encoder | PLC | 0.278 s | OK
+LOTE 001 | PIEZA 001/001 | STEP 03 | Alimentación L/R | MOTION | 4.160 s | ERROR | E033 Motion: Timeout de láser lado R (laser_timeout_r).
+LOTE 001 | PIEZA 001/001 | STEP 01 | Configuración inicial | MOTION | 0.020 s | OK
+LOTE 001 | PIEZA 001/001 | STEP 02 | Holder + encoder | PLC | 0.282 s | OK
+LOTE 001 | PIEZA 001/001 | STEP 03 | Alimentación L/R | MOTION | 1.947 s | OK | ENC R=54.00 mm L=55.50 mm
+LOTE 001 | PIEZA 001/001 | STEP 04 | Pinzas — liberar holder | PLC | 0.523 s | OK
+LOTE 001 | PIEZA 001/001 | STEP 05 | LM Guide — corte | MOTION | 1.027 s | OK
+LOTE 001 | PIEZA 001/001 | STEP 06 | Corte R/L | PLC | 1.201 s | OK
+LOTE 001 | PIEZA 001/001 | STEP 07 | Descarga de pieza | PLC+MOTION | 1.012 s | OK
+LOTE 001 | PIEZA 001/001 | STEP 08 | Regreso Home + blower | PLC+MOTION | 1.641 s | OK
+LOTE 001 | PIEZA 001/001 | COMPLETE | 8.518 s | FIRST | ENC R=54.00 mm L=55.50 mm
+LOTE 001 | SUMMARY | 1/1 | AVG CADENCE: 0.000 s
+LOTE 001 | PIEZA 001/001 | STEP 01 | Configuración inicial | MOTION | 0.020 s | OK
+LOTE 001 | PIEZA 001/001 | STEP 02 | Holder + encoder | PLC | 0.278 s | OK
+LOTE 001 | PIEZA 001/001 | STEP 03 | Alimentación L/R | MOTION | 4.161 s | ERROR | E034 Motion: Timeout de láser lado L (laser_timeout_l).
+LOTE 001 | PIEZA 001/001 | STEP 01 | Configuración inicial | MOTION | 0.052 s | OK
+LOTE 001 | PIEZA 001/001 | STEP 02 | Holder + encoder | PLC | 0.276 s | OK
+LOTE 001 | PIEZA 001/001 | STEP 03 | Alimentación L/R | MOTION | 4.160 s | ERROR | E033 Motion: Timeout de láser lado R (laser_timeout_r).
+LOTE 001 | PIEZA 001/001 | STEP 01 | Configuración inicial | MOTION | 0.021 s | OK
+LOTE 001 | PIEZA 001/001 | STEP 02 | Holder + encoder | PLC | 0.282 s | OK
+LOTE 001 | PIEZA 001/001 | STEP 03 | Alimentación L/R | MOTION | 2.182 s | OK | ENC R=53.50 mm L=55.50 mm
+LOTE 001 | PIEZA 001/001 | STEP 04 | Pinzas — liberar holder | PLC | 0.535 s | OK
+LOTE 001 | PIEZA 001/001 | STEP 05 | LM Guide — corte | MOTION | 1.039 s | OK
+LOTE 001 | PIEZA 001/001 | STEP 06 | Corte R/L | PLC | 1.216 s | OK
+LOTE 001 | PIEZA 001/001 | STEP 07 | Descarga de pieza | PLC+MOTION | 1.016 s | OK
+LOTE 001 | PIEZA 001/001 | STEP 08 | Regreso Home + blower | PLC+MOTION | 1.650 s | OK
+LOTE 001 | PIEZA 001/001 | COMPLETE | 8.319 s | FIRST | ENC R=53.50 mm L=55.50 mm
+LOTE 001 | SUMMARY | 1/1 | AVG CADENCE: 0.000 s
+LOTE 001 | PIEZA 001/001 | STEP 01 | Configuración inicial | MOTION | 0.021 s | OK
+LOTE 001 | PIEZA 001/001 | STEP 02 | Holder + encoder | PLC | 0.283 s | OK
+LOTE 001 | PIEZA 001/001 | STEP 03 | Alimentación L/R | MOTION | 3.261 s | OK | ENC R=56.00 mm L=56.00 mm
+LOTE 001 | PIEZA 001/001 | STEP 04 | Pinzas — liberar holder | PLC | 0.535 s | OK
+LOTE 001 | PIEZA 001/001 | STEP 05 | LM Guide — corte | MOTION | 1.044 s | OK
+LOTE 001 | PIEZA 001/001 | STEP 06 | Corte R/L | PLC | 1.232 s | OK
+LOTE 001 | PIEZA 001/001 | STEP 07 | Descarga de pieza | PLC+MOTION | 1.028 s | OK
+LOTE 001 | PIEZA 001/001 | STEP 08 | Regreso Home + blower | PLC+MOTION | 1.659 s | OK
+LOTE 001 | PIEZA 001/001 | COMPLETE | 9.432 s | FIRST | ENC R=56.00 mm L=56.00 mm
+LOTE 001 | SUMMARY | 1/1 | AVG CADENCE: 0.000 s
+LOTE 001 | PIEZA 001/001 | STEP 01 | Configuración inicial | MOTION | 0.021 s | OK
+LOTE 001 | PIEZA 001/001 | STEP 02 | Holder + encoder | PLC | 0.285 s | OK
+LOTE 001 | PIEZA 001/001 | STEP 03 | Alimentación L/R | MOTION | 1.908 s | OK | ENC R=56.50 mm L=55.50 mm
+LOTE 001 | PIEZA 001/001 | STEP 04 | Pinzas — liberar holder | PLC | 0.534 s | OK
+LOTE 001 | PIEZA 001/001 | STEP 05 | LM Guide — corte | MOTION | 1.036 s | OK
+LOTE 001 | PIEZA 001/001 | STEP 06 | Corte R/L | PLC | 1.222 s | OK
+LOTE 001 | PIEZA 001/001 | STEP 07 | Descarga de pieza | PLC+MOTION | 1.031 s | OK
+LOTE 001 | PIEZA 001/001 | STEP 08 | Regreso Home + blower | PLC+MOTION | 1.658 s | OK
+LOTE 001 | PIEZA 001/001 | COMPLETE | 8.070 s | FIRST | ENC R=56.50 mm L=55.50 mm
+LOTE 001 | SUMMARY | 1/1 | AVG CADENCE: 0.000 s
+LOTE 001 | PIEZA 001/001 | STEP 01 | Configuración inicial | MOTION | 0.023 s | OK
+LOTE 001 | PIEZA 001/001 | STEP 02 | Holder + encoder | PLC | 0.286 s | OK
+LOTE 001 | PIEZA 001/001 | STEP 03 | Alimentación L/R | MOTION | 1.751 s | OK | ENC R=55.50 mm L=55.50 mm
+LOTE 001 | PIEZA 001/001 | STEP 04 | Pinzas — liberar holder | PLC | 0.550 s | OK
+LOTE 001 | PIEZA 001/001 | STEP 05 | LM Guide — corte | MOTION | 1.033 s | OK
+LOTE 001 | PIEZA 001/001 | STEP 06 | Corte R/L | PLC | 1.229 s | OK
+LOTE 001 | PIEZA 001/001 | STEP 07 | Descarga de pieza | PLC+MOTION | 1.019 s | OK
+LOTE 001 | PIEZA 001/001 | STEP 08 | Regreso Home + blower | PLC+MOTION | 1.613 s | OK
+LOTE 001 | PIEZA 001/001 | COMPLETE | 7.866 s | FIRST | ENC R=55.50 mm L=55.50 mm
+LOTE 001 | PIEZA 001/001 | STEP 01 | Configuración inicial | MOTION | 0.022 s | OK
+LOTE 001 | PIEZA 001/001 | STEP 02 | Holder + encoder | PLC | 0.287 s | OK
+LOTE 001 | PIEZA 001/001 | STEP 03 | Alimentación L/R | MOTION | 2.273 s | OK | ENC R=56.00 mm L=55.50 mm
+LOTE 001 | PIEZA 001/001 | STEP 04 | Pinzas — liberar holder | PLC | 0.536 s | OK
+LOTE 001 | PIEZA 001/001 | STEP 05 | LM Guide — corte | MOTION | 1.039 s | OK
+LOTE 001 | PIEZA 001/001 | STEP 06 | Corte R/L | PLC | 0.387 s | OK
+LOTE 001 | PIEZA 001/001 | STEP 07 | Descarga de pieza | PLC+MOTION | 1.022 s | OK
+LOTE 001 | PIEZA 001/001 | STEP 08 | Regreso Home + blower | PLC+MOTION | 1.671 s | OK
+LOTE 001 | PIEZA 001/001 | COMPLETE | 7.596 s | FIRST | ENC R=56.00 mm L=55.50 mm
+LOTE 001 | SUMMARY | 1/1 | AVG CADENCE: 0.000 s
+LOTE 002 | PIEZA 001/001 | STEP 01 | Configuración inicial | MOTION | 0.000 s | WARNING | E050 Motion: Joint Right detectado. Recuperación de unión requerida. (fabricate)
+LOTE 002 | PIEZA 001/001 | STEP 01 | Configuración inicial | MOTION | 0.000 s | WARNING | E050 Motion: Joint Right detectado. Recuperación de unión requerida. (feed)
+LOTE 002 | PIEZA 001/001 | STEP 01 | Configuración inicial | MOTION | 0.000 s | WARNING | E050 Motion: Joint Right detectado. Recuperación de unión requerida. (fabricate)
+LOTE 002 | PIEZA 001/001 | STEP 01 | Configuración inicial | MOTION | 0.000 s | WARNING | E050 Motion: Joint Right detectado. Recuperación de unión requerida. (fabricate)
+LOTE 002 | PIEZA 001/001 | STEP 01 | Configuración inicial | MOTION | 0.000 s | WARNING | E050 Motion: Joint Right detectado. Recuperación de unión requerida. (fabricate)
+LOTE 002 | PIEZA 001/001 | STEP 01 | Configuración inicial | MOTION | 0.000 s | WARNING | E050 Motion: Joint Right detectado. Recuperación de unión requerida. (fabricate)

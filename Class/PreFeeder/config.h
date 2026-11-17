@@ -3,7 +3,7 @@
 #include <Arduino.h>
 
 // Lado: comentar la línea siguiente para L, descomentar para R (misma base de firmware).
-//#define PF_SIDE_RIGHT
+#define PF_SIDE_RIGHT
 
 #ifndef PF_CONFIG_SIDE
 #if defined(PF_SIDE_RIGHT)
@@ -45,8 +45,7 @@ static const char* const WIFI_PASS = "TCM2026!r&d";
 // GPIO. Buffer y DeReeler quedan fuera de este firmware.
 constexpr uint8_t PIN_CYLINDER = 25;
 constexpr int PIN_FEEDER_STEP = 18;
-constexpr int PIN_PULLER_STEP = 32;      // MotorPuller (distinto de FeedMotor)
-constexpr uint8_t PIN_PULLER_DIR = 33;   // MOSFET DIR puller: activo por defecto; 0=apagado
+constexpr int PIN_PULLER_STEP = 32;      // MotorA (loop); distinto de Feeder MotorB
 constexpr uint8_t PIN_HOLGURA = 22;       // HIGH = holgura OK (ON)
 constexpr uint8_t HOLGURA_ON_LEVEL = HIGH;
 constexpr uint8_t PIN_LIMIT = 34;
@@ -58,12 +57,11 @@ constexpr uint8_t PIN_JOG = 23;
 constexpr uint8_t JOG_ACTIVE_LEVEL = HIGH;
 constexpr uint32_t JOG_STABLE_MS = 20;
 
-// FeedMotor / MotorPuller. El maestro puede reemplazar FEED_RPM / PULLER_RPM en marcha.
-constexpr uint16_t MOTOR_MICROSTEP = 4;
-constexpr float MOTOR_ACCEL = 3000.0f;
-constexpr float MOTOR_DECEL = 3000.0f;
-constexpr float RPM_MIN = 1.0f;
-constexpr float RPM_MAX = 3000.0f;
+// RPM de SALIDA (después del reductor). El maestro puede reemplazarlas en marcha.
+// Microstep/accel/decel/límites de eje viven solo en MotorControl.h.
+// Puller: reductor 10:1 → eje = salida × 10. Feeder: sin reductor.
+constexpr float PULLER_GEAR_RATIO = 10.0f;
+constexpr float FEEDER_GEAR_RATIO = 1.0f;
 constexpr float FEED_RPM = 60.0f;
 constexpr float PULLER_RPM = 60.0f;
 
@@ -78,5 +76,4 @@ constexpr uint16_t HOLGURA_SETTLE_MS = 150;
 constexpr uint16_t HOLGURA_SETTLE_MS_MIN = 10;
 constexpr uint16_t HOLGURA_SETTLE_MS_MAX = 500;
 constexpr float HOLGURA_ON_FEED_SEC = 2.0f;
-constexpr float HOLGURA_OFF_FAULT_SEC = 5.0f;
 constexpr float HOLGURA_STALL_FAULT_SEC = 2.0f;
