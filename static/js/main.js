@@ -28,10 +28,12 @@
     selectAndonPort: document.getElementById("selectAndonPort"),
     selectPrefeederPort: document.getElementById("selectPrefeederPort"),
     btnRefreshPorts: document.getElementById("btnRefreshPorts"),
+    btnAutoDetectPorts: document.getElementById("btnAutoDetectPorts"),
     btnMotionTest: document.getElementById("btnMotionTest"),
     btnPlcTest: document.getElementById("btnPlcTest"),
     btnAndonTest: document.getElementById("btnAndonTest"),
     btnPrefeederTest: document.getElementById("btnPrefeederTest"),
+    serialAutoDetectStatus: document.getElementById("serialAutoDetectStatus"),
     serialMotionStatus: document.getElementById("serialMotionStatus"),
     serialPlcStatus: document.getElementById("serialPlcStatus"),
     serialAndonStatus: document.getElementById("serialAndonStatus"),
@@ -2252,32 +2254,93 @@
     });
   }
 
+  function applySerialPayload(data) {
+    if (!data) return;
+    if (data.andon_none_value) andonNoneToken = data.andon_none_value;
+    if (Array.isArray(data.ports)) serialUi.ports = data.ports;
+    serialUi.assign.motion = data.motion || "";
+    serialUi.assign.plc = data.plc || "";
+    serialUi.assign.prefeeder = data.prefeeder || "";
+    serialAndonSkipped = !!data.andon_skipped;
+    if (data.andon_disabled && data.andon_none_value) {
+      serialUi.assign.andon = data.andon_none_value;
+    } else {
+      serialUi.assign.andon = data.andon || "";
+    }
+    if (data.online) applyOnlineMap(data.online);
+    rebuildAllPortSelects();
+    paintAllModuleStatus();
+  }
+
   async function loadSerialPorts() {
     if (!els.selectMotionPort || !els.selectPlcPort || !els.selectAndonPort) return;
     serialSyncing = true;
     try {
       const res = await fetch("/api/serial");
       const data = await res.json();
-      if (data.andon_none_value) andonNoneToken = data.andon_none_value;
-      serialUi.ports = data.ports || [];
-      serialUi.assign.motion = data.motion || "";
-      serialUi.assign.plc = data.plc || "";
-      serialUi.assign.prefeeder = data.prefeeder || "";
-      serialAndonSkipped = !!data.andon_skipped;
-      if (data.andon_disabled && data.andon_none_value) {
-        serialUi.assign.andon = data.andon_none_value;
-      } else {
-        serialUi.assign.andon = data.andon || "";
+      applySerialPayload(data);
+      if (els.serialAutoDetectStatus && !(serialUi.ports && serialUi.ports.length)) {
+        setLinkStatus(
+          els.serialAutoDetectStatus,
+          "Sin puertos USB. En RPi deben aparecer /dev/ttyUSB* o /dev/ttyACM*.",
+          false
+        );
       }
-      applyOnlineMap(data.online);
-      rebuildAllPortSelects();
-      paintAllModuleStatus();
     } catch (err) {
       if (els.serialMotionStatus) {
         setLinkStatus(els.serialMotionStatus, "No se pudo leer la lista de puertos.", false);
       }
     } finally {
       serialSyncing = false;
+    }
+  }
+
+  async function autoDetectSerialPorts() {
+    if (!els.btnAutoDetectPorts) return;
+    if (serialTesting.autodetect) return;
+    serialTesting.autodetect = true;
+    els.btnAutoDetectPorts.disabled = true;
+    setLinkStatus(els.serialAutoDetectStatus, "Detectando módulos USB… (unos segundos)", null);
+    const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+    const timer = controller
+      ? setTimeout(function () { controller.abort(); }, 60000)
+      : null;
+    try {
+      const res = await fetch("/api/serial/autodetect", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+        signal: controller ? controller.signal : undefined,
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        setLinkStatus(
+          els.serialAutoDetectStatus,
+          data.error || "No se pudo detectar.",
+          false
+        );
+        showComErrorInBanner(data.error || "No se pudo detectar.");
+        return;
+      }
+      applySerialPayload(data);
+      const msg = data.message || ("Detectados " + (data.found || 0) + " módulos.");
+      setLinkStatus(els.serialAutoDetectStatus, msg, data.found > 0);
+      if (!data.found) {
+        showComErrorInBanner(msg);
+      } else {
+        fetchState();
+      }
+    } catch (err) {
+      const aborted = err && err.name === "AbortError";
+      const msg = aborted
+        ? "Tiempo agotado al detectar puertos."
+        : "Sin conexión con el servidor.";
+      setLinkStatus(els.serialAutoDetectStatus, msg, false);
+      showComErrorInBanner(msg);
+    } finally {
+      if (timer) clearTimeout(timer);
+      serialTesting.autodetect = false;
+      els.btnAutoDetectPorts.disabled = false;
     }
   }
 
@@ -2411,7 +2474,7 @@
     setLinkStatus(statusEl, "Probando…", null);
     const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
     const timer = controller
-      ? setTimeout(function () { controller.abort(); }, 20000)
+      ? setTimeout(function () { controller.abort(); }, 12000)
       : null;
     try {
       const res = await fetch("/api/serial/test", {
@@ -2461,6 +2524,9 @@
   }
 
   if (els.btnRefreshPorts) els.btnRefreshPorts.addEventListener("click", loadSerialPorts);
+  if (els.btnAutoDetectPorts) {
+    els.btnAutoDetectPorts.addEventListener("click", autoDetectSerialPorts);
+  }
   if (els.btnMotionTest) {
     els.btnMotionTest.addEventListener("click", function () {
       testModuleCom("motion");

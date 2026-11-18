@@ -1149,16 +1149,22 @@ def _load_serial_cfg() -> None:
             andon_disabled = bool(saved.get("andon_disabled"))
             checklist_bypass = bool(saved.get("checklist_bypass"))
             online_raw = saved.get("online") or {}
-    # En RPi/Linux ignorar COMx guardados desde Windows (no existen /dev/COM*).
+    # En RPi/Linux: ignorar COMx de Windows y UART internos (ttyAMA*/ttyS*).
     if sys.platform != "win32":
-        if _is_windows_com_name(motion):
-            motion = ""
-        if _is_windows_com_name(plc):
-            plc = ""
-        if _is_windows_com_name(andon):
-            andon = ""
-        if _is_windows_com_name(prefeeder):
-            prefeeder = ""
+        def _keep_linux_port(value: str) -> str:
+            text = str(value or "").strip()
+            if not text:
+                return ""
+            if _is_windows_com_name(text):
+                return ""
+            if not _is_usable_serial_device(text):
+                return ""
+            return text
+
+        motion = _keep_linux_port(motion)
+        plc = _keep_linux_port(plc)
+        andon = _keep_linux_port(andon)
+        prefeeder = _keep_linux_port(prefeeder)
     if andon_disabled:
         andon = ""
     online = _normalize_online_map(online_raw, motion, plc, andon, prefeeder)
@@ -1259,34 +1265,55 @@ def _is_windows_com_name(device: str) -> bool:
     return text.startswith("COM") and text[3:].isdigit()
 
 
+def _is_usable_serial_device(device: str) -> bool:
+    """Puertos útiles para MCU. En RPi se excluyen UART internos (ttyAMA*, ttyS*)."""
+    text = str(device or "").strip()
+    if not text:
+        return False
+    if sys.platform == "win32":
+        return _is_windows_com_name(text)
+    base = os.path.basename(text)
+    return base.startswith("ttyUSB") or base.startswith("ttyACM")
+
+
 def _list_com_ports() -> list[dict]:
-    """Lista puertos serie. En Windows: COMx. En Linux/RPi: /dev/ttyUSB*, /dev/ttyACM*, etc."""
-    try:
-        from serial.tools import list_ports
-    except ImportError:
-        return []
-    found = []
-    seen = set()
-    for port in list_ports.comports():
-        device = str(port.device or "").strip()
-        if not device:
-            continue
+    """Lista puertos serie reales de MCU.
+
+    En Linux/RPi: /dev/ttyUSB* y /dev/ttyACM* desde el filesystem (aunque falte pyserial).
+    No incluye ttyAMA* (UART interno de la Pi).
+    """
+    found: list[dict] = []
+    seen: set[str] = set()
+
+    def _add(device: str, description: str) -> None:
+        device = str(device or "").strip()
+        if not device or not _is_usable_serial_device(device):
+            return
         key = _port_compare_key(device)
         if key in seen:
-            continue
+            return
         seen.add(key)
-        found.append({"device": device, "description": str(port.description or "").strip()})
-    # Fallback Linux/RPi: pyserial a veces no lista nodos USB-UART recién conectados.
+        found.append({"device": device, "description": str(description or "").strip()})
+
+    # Linux/RPi: el filesystem es la fuente fiable (pyserial a veces no lista nada).
     if sys.platform != "win32":
         import glob
 
-        for pattern in ("/dev/ttyUSB*", "/dev/ttyACM*"):
-            for device in sorted(glob.glob(pattern)):
-                key = _port_compare_key(device)
-                if key in seen:
-                    continue
-                seen.add(key)
-                found.append({"device": device, "description": "USB serial"})
+        for device in sorted(glob.glob("/dev/ttyUSB*")):
+            _add(device, "USB-UART")
+        for device in sorted(glob.glob("/dev/ttyACM*")):
+            _add(device, "USB-CDC")
+
+    try:
+        from serial.tools import list_ports
+    except ImportError:
+        list_ports = None
+    if list_ports is not None:
+        for port in list_ports.comports():
+            device = str(port.device or "").strip()
+            desc = str(port.description or "").strip() or "serial"
+            _add(device, desc)
+
     found.sort(key=lambda item: item["device"])
     return found
 
@@ -1302,6 +1329,9 @@ def _match_listed_port(value: str, ports: list[dict]) -> str:
     for port in ports:
         if _port_compare_key(port["device"]) == want:
             return port["device"]
+    # Nodo USB presente aunque no haya entrado al listado todavía.
+    if sys.platform != "win32" and _is_usable_serial_device(text) and os.path.exists(text):
+        return text
     return ""
 
 
@@ -1359,6 +1389,8 @@ def _ports_for_ui() -> list[dict]:
         device = _serial_port(which)
         if not device:
             continue
+        if not _is_usable_serial_device(device):
+            continue
         key = _port_compare_key(device)
         if key in seen:
             continue
@@ -1379,7 +1411,139 @@ def _accept_assigned_port(raw: str, listed: list[dict], previous: str) -> str:
     prev = str(previous or "").strip()
     if prev and _port_compare_key(text) == _port_compare_key(prev):
         return prev
+    if sys.platform != "win32" and _is_usable_serial_device(text) and os.path.exists(text):
+        return text
     return ""
+
+
+def _close_all_module_serials() -> None:
+    _close_motion_serial()
+    _close_plc_serial()
+    _close_andon_serial()
+    _close_prefeeder_serial()
+
+
+def _probe_serial_device(device: str, timeout_s: float = 3.0) -> str:
+    """Abre un puerto un instante, pide status y devuelve motion|plc|andon|prefeeder|''."""
+    device = str(device or "").strip()
+    if not device:
+        return ""
+    try:
+        import serial
+    except ImportError:
+        return ""
+    ser = None
+    try:
+        ser = serial.Serial()
+        ser.port = device
+        ser.baudrate = 115200
+        ser.timeout = 0.05
+        ser.write_timeout = 1.5
+        ser.dtr = False
+        ser.rts = False
+        ser.open()
+        # Algunos USB-UART resetean el ESP32 al abrir; dar margen corto.
+        time.sleep(0.35)
+        _serial_rx_flush(ser)
+        ser.write(b'{"op":"status"}\n')
+        ser.flush()
+        replies = _read_lines_until_op(ser, "status", max(1.0, float(timeout_s)))
+        found = _status_module(replies)
+        if found:
+            return found
+        # Reintento: boot aún en curso.
+        time.sleep(0.8)
+        _serial_rx_flush(ser)
+        ser.write(b'{"op":"status"}\n')
+        ser.flush()
+        replies = _read_lines_until_op(ser, "status", max(1.5, float(timeout_s)))
+        return _status_module(replies)
+    except Exception:
+        return ""
+    finally:
+        if ser is not None:
+            try:
+                ser.close()
+            except Exception:
+                pass
+
+
+def _autodetect_serial_modules() -> dict:
+    """Escanea ttyUSB/ttyACM (o COM), identifica cada MCU y guarda la asignación."""
+    ports = _list_com_ports()
+    devices = [p["device"] for p in ports]
+    _close_all_module_serials()
+    time.sleep(0.15)
+
+    detected: dict[str, str] = {}
+    probe_log: list[dict] = []
+    for device in devices:
+        which = _probe_serial_device(device, timeout_s=3.0)
+        probe_log.append({"device": device, "module": which or ""})
+        if which and which not in detected:
+            detected[which] = device
+
+    motion = detected.get("motion", "")
+    plc = detected.get("plc", "")
+    andon = detected.get("andon", "")
+    prefeeder = detected.get("prefeeder", "")
+
+    with _serial_cfg_lock:
+        andon_disabled = bool(_serial_cfg.get("andon_disabled"))
+        checklist_bypass = bool(_serial_cfg.get("checklist_bypass"))
+        if _andon_skipped_effective() and not andon:
+            andon_disabled = True
+        elif andon:
+            andon_disabled = False
+
+    _save_serial_cfg(motion, plc, andon, andon_disabled, checklist_bypass, prefeeder)
+
+    online = {}
+    for which, port in (
+        ("motion", motion),
+        ("plc", plc),
+        ("andon", andon),
+        ("prefeeder", prefeeder),
+    ):
+        if not port:
+            continue
+        msg = f"{which.upper()} en {port} en línea."
+        try:
+            _set_module_online(which, ok=True, message=msg)
+        except OSError:
+            pass
+        online[which] = {"port": port, "ok": True, "message": msg}
+
+    if andon_disabled and not andon:
+        try:
+            _set_module_online(
+                "andon",
+                ok=True,
+                message="Andon no usado (Conexión o HMI_ANDON_SKIP=1).",
+            )
+        except OSError:
+            pass
+
+    return {
+        "ok": True,
+        "ports": _ports_for_ui(),
+        "motion": motion,
+        "plc": plc,
+        "andon": andon,
+        "prefeeder": prefeeder,
+        "online": _online_snapshot(),
+        "andon_disabled": andon_disabled,
+        "andon_skipped": _andon_skipped_effective(),
+        "andon_none_value": _ANDON_NONE_TOKEN,
+        "probe": probe_log,
+        "found": len(detected),
+        "scanned": len(devices),
+        "message": (
+            f"Detectados {len(detected)} de {len(devices)} puertos USB."
+            if devices
+            else "No hay puertos USB (ttyUSB/ttyACM). Revisa cables o reinicia la Raspberry."
+        ),
+    }
 
 
 def _save_serial_cfg(
@@ -8364,6 +8528,18 @@ def checklist_bypass_setting():
     return jsonify({"ok": True, "enabled": _checklist_bypassed()})
 
 
+@app.route("/api/serial/autodetect", methods=["POST"])
+def serial_autodetect():
+    """Escanea USB y asigna Motion/PLC/Andon/PreFeeder según su status."""
+    try:
+        result = _autodetect_serial_modules()
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+    if result.get("prefeeder"):
+        _prefeeder_adopt_live_config()
+    return jsonify(result)
+
+
 @app.route("/api/serial/test", methods=["POST"])
 def serial_module_test():
     """Comprueba que el puerto elegido responde y es el MCU pedido. Andon incluido."""
@@ -8388,10 +8564,33 @@ def serial_module_test():
             }
         )
     # ---
-    # UI Probar: no esperar 90 s del init CAN; el ciclo sigue usando el timeout largo.
-    ok, code = _check_module_link(which, status_timeout_s=15.0)
-    if not ok:
-        err = error_codes.format_message(code)
+    port = _serial_port(which)
+    if not port:
+        missing = {"motion": "E041", "plc": "E017", "andon": "E070", "prefeeder": "E090"}[which]
+        err = error_codes.format_message(missing)
+        return jsonify({"ok": False, "module": which, "code": missing, "error": err}), 400
+
+    # Probar rápido por sonda directa (evita esperas largas del enlace de ciclo).
+    _close_all_module_serials()
+    found = _probe_serial_device(port, timeout_s=3.5)
+    if found == which:
+        msg = f"{which.upper()} en {port} en línea."
+        try:
+            _set_module_online(which, ok=True, message=msg)
+        except OSError:
+            pass
+        return jsonify(
+            {
+                "ok": True,
+                "module": which,
+                "port": port,
+                "message": msg,
+                "online": _online_snapshot(),
+            }
+        )
+    if found:
+        wrong = {"motion": "E042", "plc": "E018", "andon": "E071", "prefeeder": "E091"}[which]
+        err = error_codes.format_message(wrong)
         try:
             _set_module_online(which, ok=False, message=err)
         except OSError:
@@ -8400,23 +8599,23 @@ def serial_module_test():
             {
                 "ok": False,
                 "module": which,
-                "code": code,
+                "code": wrong,
                 "error": err,
                 "online": _online_snapshot(),
             }
         )
-    port = _serial_port(which)
-    msg = f"{which.upper()} en {port} en línea."
+    silent = {"motion": "E043", "plc": "E019", "andon": "E072", "prefeeder": "E092"}[which]
+    err = error_codes.format_message(silent)
     try:
-        _set_module_online(which, ok=True, message=msg)
+        _set_module_online(which, ok=False, message=err)
     except OSError:
         pass
     return jsonify(
         {
-            "ok": True,
+            "ok": False,
             "module": which,
-            "port": port,
-            "message": msg,
+            "code": silent,
+            "error": err,
             "online": _online_snapshot(),
         }
     )

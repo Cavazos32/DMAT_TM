@@ -614,7 +614,12 @@
           </form>
         </section>
         <section class="tab-panel" role="tabpanel" id="tabPanelConexion" aria-labelledby="tabBtnConexion" data-tab-panel="conexion" hidden>
-          <p class="modal__hint">Elige un puerto por módulo y pulsa Probar. Al asignarlo desaparece de los demás; si responde, queda marcado en línea.</p>
+          <p class="modal__hint">Conecta los MCU por USB y pulsa <strong>Detectar automáticamente</strong>. En Raspberry solo se listan ttyUSB/ttyACM (no ttyAMA).</p>
+          <div class="conexion-actions" style="display:flex;gap:0.75rem;flex-wrap:wrap;margin-bottom:1rem;">
+            <button type="button" class="btn btn-config" id="btnAutoDetectPorts">Detectar automáticamente</button>
+            <button type="button" class="btn btn-config conexion-refresh" id="btnRefreshPorts">Actualizar lista</button>
+          </div>
+          <p class="conexion-module__status" id="serialAutoDetectStatus" role="status"></p>
           <div class="conexion-grid">
             <article class="conexion-module">
               <h3 class="conexion-module__title">Motion</h3>
@@ -649,7 +654,6 @@
               <button type="button" class="btn btn-config" id="btnPrefeederTest">Probar</button>
             </article>
           </div>
-          <button type="button" class="btn btn-config conexion-refresh" id="btnRefreshPorts">Actualizar puertos</button>
         </section>
       </div>
     </div>
