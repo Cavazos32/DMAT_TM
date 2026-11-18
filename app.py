@@ -1120,6 +1120,16 @@ def _load_serial_cfg() -> None:
             prefeeder = str(saved.get("prefeeder") or "").strip()
             andon_disabled = bool(saved.get("andon_disabled"))
             checklist_bypass = bool(saved.get("checklist_bypass"))
+    # En RPi/Linux ignorar COMx guardados desde Windows (no existen /dev/COM*).
+    if sys.platform != "win32":
+        if _is_windows_com_name(motion):
+            motion = ""
+        if _is_windows_com_name(plc):
+            plc = ""
+        if _is_windows_com_name(andon):
+            andon = ""
+        if _is_windows_com_name(prefeeder):
+            prefeeder = ""
     if andon_disabled:
         andon = ""
     with _serial_cfg_lock:
@@ -1205,17 +1215,47 @@ def _invalidate_serial_handle(ser) -> None:
         pass
 
 
+def _port_compare_key(device: str) -> str:
+    """Clave de comparación: en Windows COM es case-insensitive; en Linux /dev es exacto."""
+    text = str(device or "").strip()
+    if sys.platform == "win32":
+        return text.upper()
+    return text
+
+
+def _is_windows_com_name(device: str) -> bool:
+    text = str(device or "").strip().upper()
+    return text.startswith("COM") and text[3:].isdigit()
+
+
 def _list_com_ports() -> list[dict]:
+    """Lista puertos serie. En Windows: COMx. En Linux/RPi: /dev/ttyUSB*, /dev/ttyACM*, etc."""
     try:
         from serial.tools import list_ports
     except ImportError:
         return []
     found = []
+    seen = set()
     for port in list_ports.comports():
         device = str(port.device or "").strip()
         if not device:
             continue
+        key = _port_compare_key(device)
+        if key in seen:
+            continue
+        seen.add(key)
         found.append({"device": device, "description": str(port.description or "").strip()})
+    # Fallback Linux/RPi: pyserial a veces no lista nodos USB-UART recién conectados.
+    if sys.platform != "win32":
+        import glob
+
+        for pattern in ("/dev/ttyUSB*", "/dev/ttyACM*"):
+            for device in sorted(glob.glob(pattern)):
+                key = _port_compare_key(device)
+                if key in seen:
+                    continue
+                seen.add(key)
+                found.append({"device": device, "description": "USB serial"})
     found.sort(key=lambda item: item["device"])
     return found
 
@@ -1224,8 +1264,12 @@ def _match_listed_port(value: str, ports: list[dict]) -> str:
     text = str(value or "").strip()
     if not text:
         return ""
+    # En Linux, un COM guardado desde Windows no existe: no emparejar.
+    if sys.platform != "win32" and _is_windows_com_name(text):
+        return ""
+    want = _port_compare_key(text)
     for port in ports:
-        if port["device"].upper() == text.upper():
+        if _port_compare_key(port["device"]) == want:
             return port["device"]
     return ""
 
@@ -3052,7 +3096,7 @@ def _prefeeder_public_summary(
             "ready": None,
             "stable": None,
             "feed_lock": None,
-            "label": "Sin puerto COM",
+            "label": "Sin puerto",
             "tone": "muted",
         }
     st = _PF_CACHED_STATUS
@@ -8155,8 +8199,8 @@ def serial_ports():
     if prefeeder_raw and not prefeeder:
         return jsonify({"ok": False, "error": "El puerto del PreAlimentador no está conectado."}), 400
     chosen = [port for port in (motion, plc, andon, prefeeder) if port]
-    if len(chosen) != len({port.upper() for port in chosen}):
-        return jsonify({"ok": False, "error": "Cada módulo tiene que usar un COM distinto."}), 400
+    if len(chosen) != len({_port_compare_key(port) for port in chosen}):
+        return jsonify({"ok": False, "error": "Cada módulo tiene que usar un puerto distinto."}), 400
 
     with _serial_cfg_lock:
         checklist_bypass = bool(_serial_cfg.get("checklist_bypass"))

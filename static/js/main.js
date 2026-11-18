@@ -2092,7 +2092,7 @@
 
   function serialLinkText(name, port) {
     if (!port) return name + ": sin puerto. El ciclo no arranca.";
-    return name + ": " + port + " guardado. Pulsa Probar COM.";
+    return name + ": " + port + " guardado. Pulsa Probar.";
   }
 
   function andonConnectionStatusText(data) {
