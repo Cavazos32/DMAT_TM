@@ -64,6 +64,10 @@
           <div class="btn-grid btn-grid--process-reset">
             <button type="button" class="btn btn-reset" data-action="reset">Reset</button>
           </div>
+          <div class="btn-grid btn-grid--process-bypass">
+            <button type="button" class="btn btn-bypass" id="btnSideBypass" data-action="side_bypass" disabled aria-pressed="false" title="ByPass bloqueado">ByPass</button>
+          </div>
+          <p class="process-hint" id="sideBypassHint" hidden></p>
           <div class="panel-divider" aria-hidden="true"></div>
           <div class="btn-grid" data-block="operacion_manual">
             <button type="button" class="btn btn-manual" data-action="purga">Purga</button>
@@ -138,7 +142,7 @@
             <span class="metric-value" id="metricTiempoCiclo">—</span>
           </article>
           <article class="metric-card">
-            <span class="metric-label">Piezas producidas / total</span>
+            <span class="metric-label">Piezas R/L / total</span>
             <div class="metric-dual">
               <span class="metric-value" id="metricPiezasProducidas">—</span>
               <span class="metric-sep">/</span>
@@ -213,26 +217,6 @@
             <small>Permite iniciar el ciclo sin completar la revisión</small>
           </span>
         </label>
-
-        <!-- === BEGIN TEMP JOINT SIM OFFLINE — DELETE === -->
-        <div class="settings-divider" role="separator" id="jointSimDivider" hidden></div>
-        <div id="jointSimPanel" hidden>
-          <p class="modal__hint"><strong>DEBUG Joint offline</strong> — simula el flujo HMI sin Motion/PLC. Borrar al terminar.</p>
-          <label class="field">
-            <span class="field__label">Lado Joint</span>
-            <select id="jointSimSide">
-              <option value="R">Right</option>
-              <option value="L">Left</option>
-              <option value="RL">Right + Left</option>
-            </select>
-          </label>
-          <div class="btn-grid" style="margin-top:0.75rem">
-            <button type="button" class="btn btn-manual" id="btnJointSimFeed">Sim Joint · Feed</button>
-            <button type="button" class="btn btn-manual" id="btnJointSimFabricate">Sim Joint · Fabricate</button>
-            <button type="button" class="btn btn-secondary" id="btnJointSimClear">Limpiar Sim Joint</button>
-          </div>
-        </div>
-        <!-- === END TEMP JOINT SIM OFFLINE — DELETE === -->
 
       </div>
     </div>
@@ -614,12 +598,7 @@
           </form>
         </section>
         <section class="tab-panel" role="tabpanel" id="tabPanelConexion" aria-labelledby="tabBtnConexion" data-tab-panel="conexion" hidden>
-          <p class="modal__hint">Conecta los MCU por USB y pulsa <strong>Detectar automáticamente</strong>. En Raspberry solo se listan ttyUSB/ttyACM (no ttyAMA).</p>
-          <div class="conexion-actions" style="display:flex;gap:0.75rem;flex-wrap:wrap;margin-bottom:1rem;">
-            <button type="button" class="btn btn-config" id="btnAutoDetectPorts">Detectar automáticamente</button>
-            <button type="button" class="btn btn-config conexion-refresh" id="btnRefreshPorts">Actualizar lista</button>
-          </div>
-          <p class="conexion-module__status" id="serialAutoDetectStatus" role="status"></p>
+          <p class="modal__hint">Elige el puerto COM de cada módulo. Sin conexión, la máquina no arranca el ciclo.</p>
           <div class="conexion-grid">
             <article class="conexion-module">
               <h3 class="conexion-module__title">Motion</h3>
@@ -654,6 +633,7 @@
               <button type="button" class="btn btn-config" id="btnPrefeederTest">Probar</button>
             </article>
           </div>
+          <button type="button" class="btn btn-config conexion-refresh" id="btnRefreshPorts">Actualizar puertos</button>
         </section>
       </div>
     </div>
@@ -702,6 +682,29 @@
     </div>
   </div>
 
+  <div class="modal-overlay" id="sideBypassModal" hidden role="dialog" aria-modal="true" aria-labelledby="sideBypassModalTitle">
+    <div class="modal">
+      <header class="modal__header">
+        <h2 id="sideBypassModalTitle">ByPass de lado</h2>
+        <button type="button" class="modal__close" id="sideBypassModalClose" aria-label="Cerrar">×</button>
+      </header>
+      <div class="modal__body">
+        <p class="modal__hint" id="sideBypassModalHint">Cinco dígitos. Luego elige el lado con el que continuar.</p>
+        <label class="modal-field" for="sideBypassEmpleado">Empleado
+          <input id="sideBypassEmpleado" inputmode="numeric" maxlength="5" autocomplete="off">
+        </label>
+        <div class="side-bypass-sides" id="sideBypassSideRow">
+          <p class="side-bypass-sides__label">Continuar trabajando con</p>
+          <div class="btn-grid btn-grid--side-bypass">
+            <button type="button" class="btn btn-bypass" id="sideBypassPickR" data-work-side="R">Right</button>
+            <button type="button" class="btn btn-bypass" id="sideBypassPickL" data-work-side="L">Left</button>
+          </div>
+        </div>
+        <button type="button" class="btn btn-stop" id="sideBypassTurnOff" hidden>Apagar ByPass</button>
+      </div>
+    </div>
+  </div>
+
   <div class="modal-overlay" id="recoveryModal" hidden role="dialog" aria-modal="true" aria-labelledby="recoveryModalTitle">
     <div class="modal modal--recovery">
       <header class="modal__header">
@@ -709,32 +712,34 @@
         <button type="button" class="modal__close" id="recoveryModalClose" aria-label="Salir">×</button>
       </header>
       <div class="modal__body recovery-body">
-        <p class="recovery-step" id="recoveryStepLabel">Paso 1 de 5</p>
+        <div class="recovery-step-row">
+          <p class="recovery-step" id="recoveryStepLabel">Paso 1 de 5</p>
+          <button type="button" class="recovery-skip-link" id="recoverySkipLink" data-recovery="skip" hidden>Skip</button>
+        </div>
         <p class="recovery-lead" id="recoveryLead" hidden></p>
         <div class="recovery-error-box" id="recoveryErrorBox" hidden>
           <p class="recovery-error-box__code" id="recoveryCode"></p>
           <p class="recovery-error-box__desc" id="recoveryErrorDesc"></p>
         </div>
         <div class="recovery-joint-legend" id="recoveryJointLegend" hidden>
-          <p class="recovery-joint-legend__title">Qué hace cada botón</p>
+          <p class="recovery-joint-legend__title">Funciones Extras</p>
           <div class="recovery-joint-cards">
             <article class="recovery-joint-card recovery-joint-card--alimentar">
               <header class="recovery-joint-card__head">
                 <span class="recovery-joint-card__name">Alimentar</span>
-                <span class="recovery-joint-card__tag">Opcional</span>
+                <span class="recovery-joint-card__tag">Extra</span>
               </header>
               <p class="recovery-joint-card__desc">
-                Cierra holder y encoder, mueve material del lado afectado (~3&nbsp;s) y al terminar los apaga.
-                Puedes repetirlo las veces que necesites.
+                Avanza un poco el material del lado afectado. Puedes repetirlo.
               </p>
             </article>
             <article class="recovery-joint-card recovery-joint-card--liberar">
               <header class="recovery-joint-card__head">
                 <span class="recovery-joint-card__name">Liberar</span>
-                <span class="recovery-joint-card__tag">Opcional</span>
+                <span class="recovery-joint-card__tag">Extra</span>
               </header>
               <p class="recovery-joint-card__desc">
-                Suelta gripper, holder y encoder para que puedas retirar o acomodar material a mano con seguridad.
+                Suelta las sujeciones para retirar o acomodar material a mano.
               </p>
             </article>
             <article class="recovery-joint-card recovery-joint-card--continuar">
@@ -743,7 +748,7 @@
                 <span class="recovery-joint-card__tag">Siguiente</span>
               </header>
               <p class="recovery-joint-card__desc">
-                Cuando ya no necesites Alimentar ni Liberar, inicia la purga automática. No metas las manos.
+                Inicia la limpieza automática. No metas las manos.
               </p>
             </article>
           </div>

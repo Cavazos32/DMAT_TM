@@ -28,12 +28,10 @@
     selectAndonPort: document.getElementById("selectAndonPort"),
     selectPrefeederPort: document.getElementById("selectPrefeederPort"),
     btnRefreshPorts: document.getElementById("btnRefreshPorts"),
-    btnAutoDetectPorts: document.getElementById("btnAutoDetectPorts"),
     btnMotionTest: document.getElementById("btnMotionTest"),
     btnPlcTest: document.getElementById("btnPlcTest"),
     btnAndonTest: document.getElementById("btnAndonTest"),
     btnPrefeederTest: document.getElementById("btnPrefeederTest"),
-    serialAutoDetectStatus: document.getElementById("serialAutoDetectStatus"),
     serialMotionStatus: document.getElementById("serialMotionStatus"),
     serialPlcStatus: document.getElementById("serialPlcStatus"),
     serialAndonStatus: document.getElementById("serialAndonStatus"),
@@ -46,14 +44,6 @@
     pfBanR: document.getElementById("pfBanR"),
     toggleEventsPanel: document.getElementById("toggleEventsPanel"),
     toggleChecklistBypass: document.getElementById("toggleChecklistBypass"),
-    // === BEGIN TEMP JOINT SIM OFFLINE — DELETE ===
-    jointSimDivider: document.getElementById("jointSimDivider"),
-    jointSimPanel: document.getElementById("jointSimPanel"),
-    jointSimSide: document.getElementById("jointSimSide"),
-    btnJointSimFeed: document.getElementById("btnJointSimFeed"),
-    btnJointSimFabricate: document.getElementById("btnJointSimFabricate"),
-    btnJointSimClear: document.getElementById("btnJointSimClear"),
-    // === END TEMP JOINT SIM OFFLINE — DELETE ===
     settingsModal: document.getElementById("settingsModal"),
     parametrosModal: document.getElementById("parametrosModal"),
     btnAppSettings: document.getElementById("btnAppSettings"),
@@ -93,11 +83,23 @@
     empleadoModalClose: document.getElementById("empleadoModalClose"),
     empleadoInput: document.getElementById("empleadoInput"),
     empleadoConfirm: document.getElementById("empleadoConfirm"),
+    btnSideBypass: document.getElementById("btnSideBypass"),
+    sideBypassHint: document.getElementById("sideBypassHint"),
+    sideBypassModal: document.getElementById("sideBypassModal"),
+    sideBypassModalClose: document.getElementById("sideBypassModalClose"),
+    sideBypassModalTitle: document.getElementById("sideBypassModalTitle"),
+    sideBypassModalHint: document.getElementById("sideBypassModalHint"),
+    sideBypassEmpleado: document.getElementById("sideBypassEmpleado"),
+    sideBypassSideRow: document.getElementById("sideBypassSideRow"),
+    sideBypassPickR: document.getElementById("sideBypassPickR"),
+    sideBypassPickL: document.getElementById("sideBypassPickL"),
+    sideBypassTurnOff: document.getElementById("sideBypassTurnOff"),
     btnOpenRecovery: document.getElementById("btnOpenRecovery"),
     recoveryModal: document.getElementById("recoveryModal"),
     recoveryModalClose: document.getElementById("recoveryModalClose"),
     recoveryModalTitle: document.getElementById("recoveryModalTitle"),
     recoveryStepLabel: document.getElementById("recoveryStepLabel"),
+    recoverySkipLink: document.getElementById("recoverySkipLink"),
     recoveryLead: document.getElementById("recoveryLead"),
     recoveryErrorBox: document.getElementById("recoveryErrorBox"),
     recoveryCode: document.getElementById("recoveryCode"),
@@ -129,6 +131,8 @@
   let pfPollTimer = null;
   let checklistViewKey = "";
   let empleadoWait = null;
+  let lastPlcFaultEncoder = false;
+  let lastSideBypassState = null;
   let recoveryPollTimer = null;
   let recoveryPollBusy = false;
   let recoveryViewKey = "";
@@ -196,6 +200,23 @@
     const v = Number(n);
     if (!Number.isFinite(v) || v < 0) return "—";
     return String(Math.floor(v));
+  }
+
+  function formatPiezasRL(state) {
+    const r = Number(state.piezas_r);
+    const l = Number(state.piezas_l);
+    const tr = Number(state.piezas_target_r);
+    const tl = Number(state.piezas_target_l);
+    const dual =
+      (state.lote_activo || state.lote_lados === "LR" || state.feed_sides === "LR") &&
+      Number.isFinite(tr) &&
+      Number.isFinite(tl) &&
+      tr > 0 &&
+      tl > 0;
+    if (dual && Number.isFinite(r) && Number.isFinite(l)) {
+      return `${Math.floor(r)}/${Math.floor(l)}`;
+    }
+    return formatPiezasCount(state.piezas_producidas);
   }
 
   function formatMm(value) {
@@ -421,7 +442,7 @@
     updatePieceVisual(state);
     els.metricTiempoCiclo.textContent = formatSeconds(state.tiempo_ciclo_s);
     if (els.metricPiezasProducidas) {
-      els.metricPiezasProducidas.textContent = formatPiezasCount(state.piezas_producidas);
+      els.metricPiezasProducidas.textContent = formatPiezasRL(state);
     }
     if (els.metricPiezasTotal) {
       const totalPiezas =
@@ -437,13 +458,6 @@
     syncCycleStepTestControls(state);
     syncRoutine(state);
     syncRecovery(state);
-    // === BEGIN TEMP JOINT SIM OFFLINE — DELETE ===
-    if (els.jointSimPanel) {
-      const showSim = !!state.joint_sim_offline;
-      els.jointSimPanel.hidden = !showSim;
-      if (els.jointSimDivider) els.jointSimDivider.hidden = !showSim;
-    }
-    // === END TEMP JOINT SIM OFFLINE — DELETE ===
     renderCycleSteps(
       state.ciclo_paso_id || "",
       state.ciclo_paso_indice,
@@ -620,18 +634,67 @@
 
   function parseRecoveryError(code, mensaje) {
     const raw = String(mensaje || "").trim();
-    const m = raw.match(/^([A-Z]?\d+)\s+([^:]+):\s*(.*)$/i);
-    if (m) {
-      return {
+    const fallbackCode = String(code || "").trim();
+    const items = [];
+    // Varios format_message unidos por " · " o por espacio: "E043 Motion: … E019 PLC: …"
+    const re = /([A-Z]?\d+)\s+([^:]+):\s*/gi;
+    const starts = [];
+    let m;
+    while ((m = re.exec(raw)) !== null) {
+      starts.push({
+        index: m.index,
+        end: m.index + m[0].length,
         code: m[1],
-        module: m[2].trim(),
-        desc: m[3].trim(),
-      };
+        module: String(m[2] || "").trim(),
+      });
     }
-    return {
-      code: String(code || "").trim(),
+    if (starts.length) {
+      for (let i = 0; i < starts.length; i++) {
+        const cur = starts[i];
+        const next = starts[i + 1];
+        let desc = raw.slice(cur.end, next ? next.index : raw.length).trim();
+        desc = desc.replace(/\s·\s*$/, "").trim();
+        items.push({ code: cur.code, module: cur.module, desc: desc });
+      }
+    } else if (raw) {
+      items.push({ code: fallbackCode, module: "", desc: raw });
+    }
+
+    const primary = items[0] || {
+      code: fallbackCode,
       module: "",
-      desc: raw || "La máquina se detuvo.",
+      desc: "La máquina se detuvo.",
+    };
+    if (fallbackCode && !primary.code) primary.code = fallbackCode;
+
+    const uniqueDescs = [];
+    items.forEach(function (it) {
+      if (it.desc && uniqueDescs.indexOf(it.desc) < 0) uniqueDescs.push(it.desc);
+    });
+
+    let header = "";
+    if (items.length > 1) {
+      header = items
+        .map(function (it) {
+          return it.module ? it.code + " · " + it.module : it.code;
+        })
+        .filter(Boolean)
+        .join(" · ");
+    } else if (primary.module) {
+      header = primary.code + " · " + primary.module;
+    } else {
+      header = primary.code || fallbackCode;
+    }
+
+    return {
+      code: primary.code || fallbackCode,
+      module: primary.module,
+      header: header,
+      desc:
+        uniqueDescs.length > 1
+          ? uniqueDescs.join(" ")
+          : uniqueDescs[0] || primary.desc || "La máquina se detuvo.",
+      items: items,
     };
   }
 
@@ -707,16 +770,36 @@
     return false;
   }
 
-  function appendRecoverySkipButton() {
-    if (!els.recoveryActions) return;
-    const skip = recoveryPrimaryButton("SKIP", "btn-secondary btn-skip", "skip");
-    els.recoveryActions.appendChild(skip);
+  function syncRecoverySkipLink(step, rutina, jointKind) {
+    if (!els.recoverySkipLink) return;
+    const show = !jointKind && recoverySkipAvailable(step, rutina);
+    els.recoverySkipLink.hidden = !show;
+  }
+
+  function recoveryActionsGroup(kind, label) {
+    const group = document.createElement("div");
+    group.className = "recovery-actions__group recovery-actions__group--" + kind;
+    if (label) {
+      const title = document.createElement("p");
+      title.className = "recovery-actions__label";
+      title.textContent = label;
+      group.appendChild(title);
+    }
+    return group;
+  }
+
+  function recoveryHelperDesc(text) {
+    const p = document.createElement("p");
+    p.className = "recovery-helper-desc";
+    p.textContent = text;
+    return p;
   }
 
   function renderRecoveryActions(step, cuttersOn, jointCtx, rutina) {
     if (!els.recoveryActions) return;
     els.recoveryActions.innerHTML = "";
     const joint = jointCtx || null;
+    syncRecoverySkipLink(step, rutina, !!joint);
     if (joint) {
       if (step === "park" || step === "await_home") {
         const wait = recoveryPrimaryButton(
@@ -732,27 +815,37 @@
       }
       if (step === "operator") {
         const busy = !!(joint && joint.busy);
-        const alimentar = recoveryPrimaryButton(
-          "Alimentar",
-          "btn-manual",
-          "joint_alimentar"
-        );
-        const liberar = recoveryPrimaryButton(
-          "Liberar",
-          "btn-resume",
-          "joint_liberar"
-        );
+        const required = recoveryActionsGroup("required", "Siguiente");
+        const helpers = recoveryActionsGroup("helpers", "Funciones Extras");
         const continuar = recoveryPrimaryButton(
           "Continuar",
           "btn-start",
           "joint_continuar"
         );
+        const alimentar = recoveryPrimaryButton(
+          "Alimentar",
+          "btn-secondary recovery-helper-btn",
+          "joint_alimentar"
+        );
+        const liberar = recoveryPrimaryButton(
+          "Liberar",
+          "btn-secondary recovery-helper-btn",
+          "joint_liberar"
+        );
         alimentar.disabled = busy;
         liberar.disabled = busy;
         continuar.disabled = busy;
-        els.recoveryActions.appendChild(alimentar);
-        els.recoveryActions.appendChild(liberar);
-        els.recoveryActions.appendChild(continuar);
+        required.appendChild(continuar);
+        helpers.appendChild(
+          recoveryHelperDesc("Alimentar: avanza un poco el material del lado afectado.")
+        );
+        helpers.appendChild(alimentar);
+        helpers.appendChild(
+          recoveryHelperDesc("Liberar: suelta las sujeciones para trabajar a mano.")
+        );
+        helpers.appendChild(liberar);
+        els.recoveryActions.appendChild(required);
+        els.recoveryActions.appendChild(helpers);
         return;
       }
       if (step === "purga") {
@@ -786,54 +879,57 @@
       return;
     }
     if (step === "piezas") {
-      els.recoveryActions.appendChild(
-        recoveryPrimaryButton(
-          "Las piezas están bien",
-          "btn-start",
-          "piezas"
-        )
+      const required = recoveryActionsGroup("required");
+      const meta = recoveryActionsGroup("meta");
+      required.appendChild(
+        recoveryPrimaryButton("Confirmar", "btn-start", "piezas")
       );
-      appendRecoverySkipButton();
-      els.recoveryActions.appendChild(
+      meta.appendChild(
         recoveryPrimaryButton("Salir", "btn-secondary", "salir")
       );
+      els.recoveryActions.appendChild(required);
+      els.recoveryActions.appendChild(meta);
       return;
     }
     if (step === "manguera") {
-      const atPark = !!(els.recoveryModal && els.recoveryModal.dataset.lmAtPark === "1");
       const busy = !!(els.recoveryModal && els.recoveryModal.dataset.recoveryBusy === "1");
-      const lmBtn = recoveryPrimaryButton(
-        busy
-          ? atPark
-            ? "Yendo a Home… espera"
-            : "Yendo a Park… espera"
-          : atPark
-            ? "LM Guide → Home"
-            : "LM Guide → Park",
-        "btn-manual",
-        "lm_toggle"
-      );
-      lmBtn.disabled = busy;
-      els.recoveryActions.appendChild(lmBtn);
+      const required = recoveryActionsGroup("required", "Siguiente");
+      const meta = recoveryActionsGroup("meta");
+      const helpers = recoveryActionsGroup("helpers", "Funciones Extras");
       const cont = recoveryPrimaryButton(
-        "Continuar",
-        "btn-resume",
+        "Confirmar",
+        "btn-start",
         "manguera"
       );
       cont.disabled = !!cuttersOn || busy;
-      els.recoveryActions.appendChild(cont);
-      appendRecoverySkipButton();
-      els.recoveryActions.appendChild(
+      required.appendChild(cont);
+      meta.appendChild(
         recoveryPrimaryButton("Salir", "btn-secondary", "salir")
       );
+      const safe = recoveryPrimaryButton(
+        busy ? "Zona segura… espera" : "Zona segura",
+        "btn-secondary recovery-helper-btn",
+        "safe_zone"
+      );
+      safe.disabled = busy;
+      helpers.appendChild(
+        recoveryHelperDesc(
+          "Zona segura: lleva el eje a posición segura y abre las sujeciones para retirar material."
+        )
+      );
+      helpers.appendChild(safe);
+      els.recoveryActions.appendChild(required);
+      els.recoveryActions.appendChild(meta);
+      els.recoveryActions.appendChild(helpers);
       return;
     }
     if (step === "purga") {
       if (recoverySkipAvailable(step, rutina)) {
-        appendRecoverySkipButton();
-        els.recoveryActions.appendChild(
+        const meta = recoveryActionsGroup("meta");
+        meta.appendChild(
           recoveryPrimaryButton("Salir", "btn-secondary", "salir")
         );
+        els.recoveryActions.appendChild(meta);
         return;
       }
       const wait = recoveryPrimaryButton(
@@ -849,16 +945,19 @@
       return;
     }
     if (step === "purga_error") {
-      els.recoveryActions.appendChild(
-        recoveryPrimaryButton("Retry", "btn-resume", "purga_retry")
+      const required = recoveryActionsGroup("required", "Siguiente");
+      const meta = recoveryActionsGroup("meta");
+      required.appendChild(
+        recoveryPrimaryButton("Retry", "btn-start", "purga_retry")
       );
-      els.recoveryActions.appendChild(
+      meta.appendChild(
         recoveryPrimaryButton("Cancelar", "btn-secondary", "purga_cancel")
       );
-      appendRecoverySkipButton();
-      els.recoveryActions.appendChild(
+      meta.appendChild(
         recoveryPrimaryButton("Salir", "btn-secondary", "salir")
       );
+      els.recoveryActions.appendChild(required);
+      els.recoveryActions.appendChild(meta);
       return;
     }
     if (step === "listo") {
@@ -900,6 +999,7 @@
 
     if (!active && !enError) {
       setRecoveryPoll(false);
+      if (els.recoverySkipLink) els.recoverySkipLink.hidden = true;
       if (els.recoveryModal && !els.recoveryModal.hidden) {
         closeRecoveryModal();
       }
@@ -991,32 +1091,31 @@
       park: [
         "Joint · Park",
         "Moviendo a Park",
-        stepGuide || "El LM Guide va a Park. Espera sin meter las manos.",
+        stepGuide || "El eje va a posición segura. Espera sin meter las manos.",
       ],
       await_home: [
         "Joint · Fabricación",
         "Terminando pieza del lado correcto",
         stepGuide ||
-          "Se omite el corte del lado afectado. El lado correcto termina y regresa a Home. Luego iré a Park.",
+          "El lado correcto termina la pieza y regresa. Luego irá a posición segura.",
       ],
       operator: [
         "Joint · Intervención",
         "Elige una acción",
-        stepGuide ||
-          "Revisa las tarjetas de color: Alimentar y Liberar son opcionales. Continuar inicia la purga cuando ya estés listo.",
+        stepGuide || "Pulsa Continuar para iniciar la limpieza.",
       ],
       purga: [
         "Joint · Purga",
         "NO INTRODUCIR MANOS",
-        stepGuide || "Purga Joint en curso, espera.",
+        stepGuide || "Limpieza en curso, espera.",
       ],
       listo: [
         "Joint · Listo",
         "Listo",
         stepGuide ||
           (jointOrigin === "fabricate"
-            ? "Puedes volver y pulsar Reanudar. La pieza del lado correcto ya quedó contada."
-            : "Puedes volver y pulsar Reanudar. La pieza incompleta se reintenta desde el inicio."),
+            ? "Vuelve y pulsa Reanudar. La pieza del lado correcto ya quedó contada."
+            : "Vuelve y pulsa Reanudar. La pieza incompleta se reintenta desde el inicio."),
       ],
     };
     const stepMeta = {
@@ -1025,37 +1124,36 @@
         limitErr ? "Sensor límite PreAlimentador" : "Error activo",
         stepGuide ||
           (limitErr
-            ? "Revisa el PreAlimentador y deja holgura adecuada. Usa JOG L/R si hace falta. Cuando el límite se libere, pulsa Reset."
-            : "Pulsa Reset para soltar el holder y la pieza. Luego sigue los pasos."),
+            ? "Revisa el PreAlimentador y deja holgura. Cuando el límite se libere, pulsa Reset."
+            : "Pulsa Reset para soltar la pieza. Luego sigue los pasos."),
       ],
       piezas: [
         "Paso 2 de 5",
         "Revisa las piezas",
-        stepGuide || "Confirma que las piezas están bien antes de seguir.",
+        stepGuide || "Confirma que las piezas están bien.",
       ],
       manguera: [
         "Paso 3 de 5",
         "Sensores láser",
         stepGuide ||
-          "Retira el material hasta apagar ambos sensores láser. Usa Park/Home del LM Guide si hace falta. Cuando digan Apagado, pulsa Continuar.",
+          "Retira el material hasta apagar ambos sensores láser. Cuando digan Apagado, pulsa Confirmar.",
       ],
       purga: [
         "Paso 4 de 5",
         "NO INTRODUCIR MANOS",
-        stepGuide ||
-          "Purga automática: Park, cierra holder/encoder, alimenta y corta. Espera.",
+        stepGuide || "Limpieza automática en curso. Espera.",
       ],
       purga_error: [
         "Paso 4 de 5",
         "Error en purga",
         stepGuide ||
-          "Revisa el sensor láser / material. Retry reintenta la purga. Cancelar vuelve a manguera.",
+          "Revisa el material. Retry reintenta la limpieza. Cancelar vuelve al paso anterior.",
       ],
       listo: [
         "Paso 5 de 5",
         "Listo",
         stepGuide ||
-          "Ya puedes volver a la pantalla principal y pulsar Reanudar. Esta pieza no suma al contador.",
+          "Vuelve a la pantalla principal y pulsa Reanudar. Esta pieza no suma al contador.",
       ],
     };
     const meta = jointKind
@@ -1093,9 +1191,11 @@
     }
     if (showErrorBox) {
       if (els.recoveryCode) {
-        els.recoveryCode.textContent = parsed.module
-          ? parsed.code + " · " + parsed.module
-          : parsed.code || code || (jointKind ? "Joint" : viewStep === "purga_error" ? "Purga" : "Error");
+        els.recoveryCode.textContent =
+          parsed.header ||
+          parsed.code ||
+          code ||
+          (jointKind ? "Joint" : viewStep === "purga_error" ? "Purga" : "Error");
       }
       if (els.recoveryErrorDesc) {
         els.recoveryErrorDesc.textContent =
@@ -1120,7 +1220,8 @@
       (jointKind && (viewStep === "operator" || viewStep === "park" || viewStep === "await_home")) ||
       (!jointKind && (viewStep === "manguera" || viewStep === "purga_error"));
     if (els.recoveryJointLegend) {
-      els.recoveryJointLegend.hidden = !(jointKind && viewStep === "operator");
+      // Las descripciones breves van en «Funciones Extras» de las acciones.
+      els.recoveryJointLegend.hidden = true;
     }
     if (els.recoveryModal) {
       els.recoveryModal.dataset.jointMode = jointKind ? "1" : "";
@@ -1144,7 +1245,157 @@
         rutina
       );
       if (showSensors) pollRecoverySensors();
+    } else {
+      syncRecoverySkipLink(viewStep, rutina, jointKind);
     }
+  }
+
+  function sideBypassClientUnlock(state) {
+    const sb = (state && state.side_bypass) || {};
+    if (sb.active) {
+      return {
+        unlock: true,
+        reason: "active",
+        suggest: String(sb.work_side || ""),
+      };
+    }
+    if (sb.unlock) {
+      return {
+        unlock: true,
+        reason: String(sb.unlock_reason || ""),
+        suggest: String(sb.suggest_side || ""),
+      };
+    }
+    const rec = (state && state.recovery) || {};
+    if (rec.active && rec.kind === "joint") {
+      const side = String(rec.side || "").toUpperCase();
+      if (side === "RL" || side === "LR") {
+        return { unlock: false, reason: "joint_rl", suggest: "" };
+      }
+      if (side === "R" || side === "L") {
+        return {
+          unlock: true,
+          reason: "joint",
+          suggest: side === "R" ? "L" : "R",
+        };
+      }
+    }
+    const code = String(
+      (rec.active && rec.code) || (state && state.ciclo_error) || ""
+    ).toUpperCase();
+    if (code === "E021" || lastPlcFaultEncoder) {
+      return { unlock: true, reason: "E021", suggest: "" };
+    }
+    return { unlock: false, reason: "", suggest: "" };
+  }
+
+  function syncSideBypassControl(state) {
+    lastSideBypassState = state || lastSideBypassState;
+    const btn = els.btnSideBypass;
+    if (!btn) return;
+    const sb = (state && state.side_bypass) || {};
+    const info = sideBypassClientUnlock(state);
+    const active = !!sb.active;
+    const work = String(sb.work_side || "").toUpperCase();
+    const workLabel = work === "L" ? "Left" : work === "R" ? "Right" : "";
+    btn.disabled = !(active || info.unlock);
+    btn.classList.toggle("is-active", active);
+    btn.setAttribute("aria-pressed", active ? "true" : "false");
+    if (active) {
+      btn.textContent = workLabel ? "ByPass ON · " + workLabel : "ByPass ON";
+      btn.title = "Apagar ByPass (requiere empleado).";
+    } else if (info.unlock) {
+      btn.textContent = "ByPass";
+      btn.title =
+        info.reason === "joint"
+          ? "Disponible por Warning Joint. Requiere empleado y elegir lado."
+          : "Disponible por E021. Requiere empleado y elegir lado.";
+    } else if (info.reason === "joint_rl") {
+      btn.textContent = "ByPass";
+      btn.title = "ByPass bloqueado: Joint en ambos lados.";
+    } else {
+      btn.textContent = "ByPass";
+      btn.title = "ByPass bloqueado. Solo con E021 o Warning Joint de un lado.";
+    }
+    if (els.sideBypassHint) {
+      if (active) {
+        els.sideBypassHint.hidden = false;
+        els.sideBypassHint.className = "process-hint process-hint--bypass";
+        els.sideBypassHint.textContent =
+          "ByPass activo: solo " +
+          (workLabel || "un lado") +
+          ". Purga/láser/prefeeder en ese lado. Completa la recuperación si aplica.";
+      } else if (info.unlock) {
+        els.sideBypassHint.hidden = false;
+        els.sideBypassHint.className = "process-hint";
+        els.sideBypassHint.textContent =
+          info.reason === "joint"
+            ? "ByPass disponible. La recuperación Joint sigue siendo obligatoria."
+            : "ByPass disponible por E021 (vía especial PLC en el lado elegido).";
+      } else {
+        els.sideBypassHint.hidden = true;
+        els.sideBypassHint.textContent = "";
+      }
+    }
+  }
+
+  function closeSideBypassModal() {
+    if (els.sideBypassModal) els.sideBypassModal.hidden = true;
+  }
+
+  function openSideBypassModal() {
+    const state = lastSideBypassState || {};
+    const sb = state.side_bypass || {};
+    const active = !!sb.active;
+    const info = sideBypassClientUnlock(state);
+    if (!active && !info.unlock) {
+      pushLocalEvent("ByPass bloqueado en este momento.", "error");
+      return;
+    }
+    if (!els.sideBypassModal) return;
+    if (els.sideBypassEmpleado) els.sideBypassEmpleado.value = "";
+    if (els.sideBypassModalTitle) {
+      els.sideBypassModalTitle.textContent = active
+        ? "Apagar ByPass"
+        : "Activar ByPass";
+    }
+    if (els.sideBypassModalHint) {
+      els.sideBypassModalHint.textContent = active
+        ? "Cinco dígitos para registrar quién apaga el ByPass."
+        : "Cinco dígitos. Luego elige el lado con el que continuar trabajando.";
+    }
+    if (els.sideBypassSideRow) els.sideBypassSideRow.hidden = active;
+    if (els.sideBypassTurnOff) els.sideBypassTurnOff.hidden = !active;
+    if (!active && info.suggest) {
+      const suggest = String(info.suggest).toUpperCase();
+      if (els.sideBypassPickR) {
+        els.sideBypassPickR.classList.toggle("is-active", suggest === "R");
+      }
+      if (els.sideBypassPickL) {
+        els.sideBypassPickL.classList.toggle("is-active", suggest === "L");
+      }
+    } else {
+      if (els.sideBypassPickR) els.sideBypassPickR.classList.remove("is-active");
+      if (els.sideBypassPickL) els.sideBypassPickL.classList.remove("is-active");
+    }
+    els.sideBypassModal.hidden = false;
+    if (els.sideBypassEmpleado) els.sideBypassEmpleado.focus();
+  }
+
+  function sideBypassEmpleadoValue() {
+    return els.sideBypassEmpleado ? els.sideBypassEmpleado.value.trim() : "";
+  }
+
+  function submitSideBypass(on, workSide) {
+    const empleado = sideBypassEmpleadoValue();
+    if (!/^\d{5}$/.test(empleado)) {
+      pushLocalEvent("El número de empleado son cinco dígitos.", "error");
+      return;
+    }
+    const payload = { empleado: empleado, on: !!on };
+    if (on) payload.work_side = workSide;
+    closeSideBypassModal();
+    sendAction("proceso", "side_bypass", payload);
   }
 
   function syncProcessControls(state) {
@@ -1257,6 +1508,8 @@
         ? "Abre el error y pulsa Reset ahí, o pulsa Reset para soltar holder y pieza."
         : "Solo aplica cuando hay un error activo.";
     }
+
+    syncSideBypassControl(state);
 
     if (enError && reset && !reset.disabled) {
       reset.classList.add("is-active");
@@ -1780,8 +2033,12 @@
       const jointLed = document.getElementById(side === "R" ? "jointLedR" : "jointLedL");
       const sideData = encoder && encoder[side];
       if (el) {
-        const mm = sideData && sideData.mm;
-        el.textContent = mm == null || !Number.isFinite(Number(mm)) ? "—" : Number(mm).toFixed(2) + " mm";
+        const counts = sideData && sideData.counts;
+        // Solo counts enteros del MCU. No mostrar mm: decimales = ruta con fórmula.
+        el.textContent =
+          counts != null && Number.isFinite(Number(counts))
+            ? String(Math.round(Number(counts)))
+            : "—";
       }
       motionShowSensorLed(laserLed, side, "Láser", !!(sideData && sideData.laser === true));
       motionShowSensorLed(jointLed, side, "Joint", !!(sideData && sideData.joint === true));
@@ -1883,7 +2140,7 @@
       omitir_holgura_derecha: "Omitir alimentación derecha",
       recovery_confirm_piezas: "Piezas bien",
       recovery_confirm_manguera: "Continuar recuperación",
-      recovery_toggle_lm: "LM Guide Park/Home",
+      recovery_safe_zone: "Safe zone",
       recovery_retry_purga: "Retry purga",
       recovery_cancel_purga: "Cancelar purga",
       recovery_skip: "SKIP recuperación",
@@ -1895,11 +2152,7 @@
       joint_confirm: "Joint Confirm",
       joint_continue: "Joint Continue",
       joint_finish: "Joint Finish",
-      // === BEGIN TEMP JOINT SIM OFFLINE — DELETE ===
-      joint_sim_feed: "SIM Joint Feed",
-      joint_sim_fabricate: "SIM Joint Fabricate",
-      joint_sim_clear: "SIM Joint Clear",
-      // === END TEMP JOINT SIM OFFLINE — DELETE ===
+      side_bypass: "ByPass de lado",
     };
     return labels[action] || action;
   }
@@ -2279,68 +2532,12 @@
       const res = await fetch("/api/serial");
       const data = await res.json();
       applySerialPayload(data);
-      if (els.serialAutoDetectStatus && !(serialUi.ports && serialUi.ports.length)) {
-        setLinkStatus(
-          els.serialAutoDetectStatus,
-          "Sin puertos USB. En RPi deben aparecer /dev/ttyUSB* o /dev/ttyACM*.",
-          false
-        );
-      }
     } catch (err) {
       if (els.serialMotionStatus) {
         setLinkStatus(els.serialMotionStatus, "No se pudo leer la lista de puertos.", false);
       }
     } finally {
       serialSyncing = false;
-    }
-  }
-
-  async function autoDetectSerialPorts() {
-    if (!els.btnAutoDetectPorts) return;
-    if (serialTesting.autodetect) return;
-    serialTesting.autodetect = true;
-    els.btnAutoDetectPorts.disabled = true;
-    setLinkStatus(els.serialAutoDetectStatus, "Detectando módulos USB… (unos segundos)", null);
-    const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
-    const timer = controller
-      ? setTimeout(function () { controller.abort(); }, 60000)
-      : null;
-    try {
-      const res = await fetch("/api/serial/autodetect", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: "{}",
-        signal: controller ? controller.signal : undefined,
-      });
-      const data = await res.json();
-      if (!data.ok) {
-        setLinkStatus(
-          els.serialAutoDetectStatus,
-          data.error || "No se pudo detectar.",
-          false
-        );
-        showComErrorInBanner(data.error || "No se pudo detectar.");
-        return;
-      }
-      applySerialPayload(data);
-      const msg = data.message || ("Detectados " + (data.found || 0) + " módulos.");
-      setLinkStatus(els.serialAutoDetectStatus, msg, data.found > 0);
-      if (!data.found) {
-        showComErrorInBanner(msg);
-      } else {
-        fetchState();
-      }
-    } catch (err) {
-      const aborted = err && err.name === "AbortError";
-      const msg = aborted
-        ? "Tiempo agotado al detectar puertos."
-        : "Sin conexión con el servidor.";
-      setLinkStatus(els.serialAutoDetectStatus, msg, false);
-      showComErrorInBanner(msg);
-    } finally {
-      if (timer) clearTimeout(timer);
-      serialTesting.autodetect = false;
-      els.btnAutoDetectPorts.disabled = false;
     }
   }
 
@@ -2524,9 +2721,6 @@
   }
 
   if (els.btnRefreshPorts) els.btnRefreshPorts.addEventListener("click", loadSerialPorts);
-  if (els.btnAutoDetectPorts) {
-    els.btnAutoDetectPorts.addEventListener("click", autoDetectSerialPorts);
-  }
   if (els.btnMotionTest) {
     els.btnMotionTest.addEventListener("click", function () {
       testModuleCom("motion");
@@ -2617,90 +2811,99 @@
       if (e.target === els.recoveryModal) closeRecoveryModal();
     });
   }
+  async function onRecoveryAction(op, btn) {
+    if (op === "salir") {
+      closeRecoveryModal();
+      return;
+    }
+    if (op === "reset") {
+      await sendAction("proceso", "reset");
+      recoveryWantOpen = true;
+      openRecoveryModal();
+      return;
+    }
+    if (op === "piezas") {
+      await sendAction("operacion_manual", "recovery_confirm_piezas");
+      recoveryWantOpen = true;
+      openRecoveryModal();
+      return;
+    }
+    if (op === "manguera") {
+      await sendAction("operacion_manual", "recovery_confirm_manguera");
+      recoveryWantOpen = true;
+      openRecoveryModal();
+      return;
+    }
+    if (op === "safe_zone") {
+      if (btn) btn.disabled = true;
+      await sendAction("operacion_manual", "recovery_safe_zone");
+      recoveryWantOpen = true;
+      openRecoveryModal();
+      fetchState();
+      return;
+    }
+    if (op === "purga_retry") {
+      if (btn) btn.disabled = true;
+      await sendAction("operacion_manual", "recovery_retry_purga");
+      recoveryWantOpen = true;
+      openRecoveryModal();
+      fetchState();
+      return;
+    }
+    if (op === "purga_cancel") {
+      if (btn) btn.disabled = true;
+      await sendAction("operacion_manual", "recovery_cancel_purga");
+      recoveryWantOpen = true;
+      openRecoveryModal();
+      fetchState();
+      return;
+    }
+    if (op === "skip") {
+      askEmpleado(function (empleado) {
+        sendAction("operacion_manual", "recovery_skip", { empleado: empleado }).then(
+          function () {
+            recoveryWantOpen = true;
+            openRecoveryModal();
+            fetchState();
+          }
+        );
+      });
+      return;
+    }
+    if (op === "listo") {
+      await sendAction("operacion_manual", "recovery_done");
+      closeRecoveryModal();
+      return;
+    }
+    if (
+      op === "joint_alimentar" ||
+      op === "joint_liberar" ||
+      op === "joint_continuar" ||
+      op === "joint_retry" ||
+      op === "joint_confirm" ||
+      op === "joint_continue" ||
+      op === "joint_finish"
+    ) {
+      if (btn) btn.disabled = true;
+      await sendAction("operacion_manual", op);
+      recoveryWantOpen = true;
+      openRecoveryModal();
+      fetchState();
+    }
+  }
+
+  if (els.recoverySkipLink) {
+    els.recoverySkipLink.addEventListener("click", function () {
+      if (els.recoverySkipLink.hidden) return;
+      onRecoveryAction("skip", els.recoverySkipLink);
+    });
+  }
   if (els.recoveryActions) {
-    els.recoveryActions.addEventListener("click", async function (e) {
+    els.recoveryActions.addEventListener("click", function (e) {
       const btn = e.target.closest("[data-recovery]");
       if (!btn || btn.disabled) return;
       const op = btn.getAttribute("data-recovery");
-      if (op === "salir") {
-        closeRecoveryModal();
-        return;
-      }
-      if (op === "reset") {
-        await sendAction("proceso", "reset");
-        recoveryWantOpen = true;
-        openRecoveryModal();
-        return;
-      }
-      if (op === "piezas") {
-        await sendAction("operacion_manual", "recovery_confirm_piezas");
-        recoveryWantOpen = true;
-        openRecoveryModal();
-        return;
-      }
-      if (op === "manguera") {
-        await sendAction("operacion_manual", "recovery_confirm_manguera");
-        recoveryWantOpen = true;
-        openRecoveryModal();
-        return;
-      }
-      if (op === "lm_toggle") {
-        btn.disabled = true;
-        await sendAction("operacion_manual", "recovery_toggle_lm");
-        recoveryWantOpen = true;
-        openRecoveryModal();
-        fetchState();
-        return;
-      }
-      if (op === "purga_retry") {
-        btn.disabled = true;
-        await sendAction("operacion_manual", "recovery_retry_purga");
-        recoveryWantOpen = true;
-        openRecoveryModal();
-        fetchState();
-        return;
-      }
-      if (op === "purga_cancel") {
-        btn.disabled = true;
-        await sendAction("operacion_manual", "recovery_cancel_purga");
-        recoveryWantOpen = true;
-        openRecoveryModal();
-        fetchState();
-        return;
-      }
-      if (op === "skip") {
-        askEmpleado(function (empleado) {
-          sendAction("operacion_manual", "recovery_skip", { empleado: empleado }).then(
-            function () {
-              recoveryWantOpen = true;
-              openRecoveryModal();
-              fetchState();
-            }
-          );
-        });
-        return;
-      }
-      if (op === "listo") {
-        await sendAction("operacion_manual", "recovery_done");
-        closeRecoveryModal();
-        return;
-      }
-      if (
-        op === "joint_alimentar" ||
-        op === "joint_liberar" ||
-        op === "joint_continuar" ||
-        op === "joint_retry" ||
-        op === "joint_confirm" ||
-        op === "joint_continue" ||
-        op === "joint_finish"
-      ) {
-        btn.disabled = true;
-        await sendAction("operacion_manual", op);
-        recoveryWantOpen = true;
-        openRecoveryModal();
-        fetchState();
-        return;
-      }
+      onRecoveryAction(op, btn);
     });
   }
 
@@ -2757,39 +2960,43 @@
     });
   }
 
+  if (els.sideBypassModalClose) {
+    els.sideBypassModalClose.addEventListener("click", closeSideBypassModal);
+  }
+  if (els.sideBypassModal) {
+    els.sideBypassModal.addEventListener("click", function (e) {
+      if (e.target === els.sideBypassModal) closeSideBypassModal();
+    });
+  }
+  if (els.sideBypassPickR) {
+    els.sideBypassPickR.addEventListener("click", function () {
+      submitSideBypass(true, "R");
+    });
+  }
+  if (els.sideBypassPickL) {
+    els.sideBypassPickL.addEventListener("click", function () {
+      submitSideBypass(true, "L");
+    });
+  }
+  if (els.sideBypassTurnOff) {
+    els.sideBypassTurnOff.addEventListener("click", function () {
+      submitSideBypass(false);
+    });
+  }
+  if (els.sideBypassEmpleado) {
+    els.sideBypassEmpleado.addEventListener("keydown", function (e) {
+      if (e.key !== "Enter") return;
+      e.preventDefault();
+      const sb = (lastSideBypassState && lastSideBypassState.side_bypass) || {};
+      if (sb.active) submitSideBypass(false);
+    });
+  }
+
   if (els.btnClearEvents) els.btnClearEvents.addEventListener("click", clearEventsLog);
 
   els.toggleEventsPanel.addEventListener("change", function () {
     setEventsPanelVisible(els.toggleEventsPanel.checked);
   });
-  // === BEGIN TEMP JOINT SIM OFFLINE — DELETE ===
-  async function runJointSim(action) {
-    const side = els.jointSimSide ? els.jointSimSide.value : "R";
-    await sendAction("operacion_manual", action, { side: side });
-    recoveryWantOpen = true;
-    openRecoveryModal();
-    closeSettings();
-    fetchState();
-  }
-  if (els.btnJointSimFeed) {
-    els.btnJointSimFeed.addEventListener("click", function () {
-      runJointSim("joint_sim_feed");
-    });
-  }
-  if (els.btnJointSimFabricate) {
-    els.btnJointSimFabricate.addEventListener("click", function () {
-      runJointSim("joint_sim_fabricate");
-    });
-  }
-  if (els.btnJointSimClear) {
-    els.btnJointSimClear.addEventListener("click", function () {
-      sendAction("operacion_manual", "joint_sim_clear").then(function () {
-        closeRecoveryModal();
-        fetchState();
-      });
-    });
-  }
-  // === END TEMP JOINT SIM OFFLINE — DELETE ===
 
   if (els.toggleChecklistBypass) {
     els.toggleChecklistBypass.addEventListener("change", saveChecklistBypass);
@@ -2863,10 +3070,12 @@
 
   function applyPlcStatus(status) {
     if (!status) return;
+    lastPlcFaultEncoder = status.fault_encoder === true;
     PLC_FAULTS.forEach(function (pair) {
       const el = document.getElementById(pair[0]);
       if (el) el.classList.toggle("is-on", status[pair[1]] === true);
     });
+    if (lastSideBypassState) syncSideBypassControl(lastSideBypassState);
     if (els.plcGraceNote) els.plcGraceNote.hidden = status.boot_grace !== true;
     const blowerBtn = els.plcManualForm
       ? els.plcManualForm.querySelector('[data-plc-op="blower"]')
@@ -3517,6 +3726,10 @@
           askEmpleado(function (empleado) {
             sendAction(block, action, { empleado: empleado });
           });
+          return;
+        }
+        if (action === "side_bypass") {
+          openSideBypassModal();
           return;
         }
 

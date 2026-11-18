@@ -26,14 +26,13 @@ struct EncoderSideRuntime {
   int32_t pcntOverflow;
   int32_t lastCount;
   int32_t settledCount;
+  int32_t countsLive;  // relativo a zeroRef (con signo)
   volatile uint32_t zCount;
   uint32_t lastPollMs;
   uint32_t settleStartMs;
   bool settled;
   bool wasMoving;
-  float mmPerSec;
-  float mmLive;
-  float mmOfficial;
+  float countsPerSec;
 };
 
 struct MotionRuntime {
@@ -74,7 +73,7 @@ enum FeedStageError {
 struct FeedStageSideResult {
   bool laserOn;
   bool encOk;
-  float mmMeasured;
+  int32_t countsMeasured;
 };
 
 struct FeedStageResult {
@@ -212,21 +211,17 @@ static SideHw kSideHw[MOTION_SIDE_COUNT] = {
     {PCNT_UNIT_1, ENC_OM_PIN_A_L, ENC_OM_PIN_B_L, ENC_OM_PIN_Z_L},
 };
 
-static float omRoundMm(float mmAbs) {
-  float whole = floorf(mmAbs);
-  float frac = mmAbs - whole;
-  int tenths = (int)floorf(frac * 10.0f + 0.5f);
-  if (tenths <= 2) return whole;
-  if (tenths <= 7) return whole + 0.5f;
-  return whole + 1.0f;
-}
-
 static void IRAM_ATTR onZR() {
   gRt.encoder[MOTION_SIDE_R].zCount++;
 }
 
 static void IRAM_ATTR onZL() {
   gRt.encoder[MOTION_SIDE_L].zCount++;
+}
+
+// Umbral de movimiento en counts/s (equivale a ENC_OM_MOVE_MMS con la escala calibrada).
+static float encoderMoveCps() {
+  return ENC_OM_MOVE_MMS * ((float)ENC_OM_COUNTS_PER_100MM / 100.0f);
 }
 
 static void pcntSetupSide(MotionSide side) {
@@ -311,32 +306,27 @@ static void encoderResetHw(MotionSide side) {
   st->settleStartMs = 0;
   st->settledCount = 0;
   st->zCount = 0;
-  st->mmLive = 0;
-  st->mmOfficial = 0;
-  st->mmPerSec = 0;
+  st->countsLive = 0;
+  st->countsPerSec = 0;
   st->lastPollMs = 0;
 }
 
 static void updateEncoderSide(MotionSide side, uint32_t nowMs) {
   EncoderSideRuntime* st = &gRt.encoder[side];
   int32_t countAbs = encoderReadCountAbs(side);
-  int32_t countRel = countAbs - st->zeroRef;
-  st->mmLive = ENC_OM_COUNTS_TO_MM(countRel);
-
-  float mmAbs = fabsf(st->mmLive);
-  st->mmOfficial = omRoundMm(mmAbs) + PARAM_ENC_OFFSET_MM;
+  st->countsLive = countAbs - st->zeroRef;
 
   if (st->lastPollMs != 0) {
     uint32_t dtMs = nowMs - st->lastPollMs;
     if (dtMs > 0) {
       int32_t delta = countAbs - st->lastCount;
-      st->mmPerSec = (ENC_OM_COUNTS_TO_MM(delta) * 1000.0f) / (float)dtMs;
+      st->countsPerSec = ((float)delta * 1000.0f) / (float)dtMs;
     }
   }
   st->lastCount = countAbs;
   st->lastPollMs = nowMs;
 
-  if (fabsf(st->mmPerSec) >= ENC_OM_MOVE_MMS) {
+  if (fabsf(st->countsPerSec) >= encoderMoveCps()) {
     st->wasMoving = true;
     st->settled = false;
     st->settleStartMs = 0;
@@ -351,20 +341,25 @@ static void updateEncoderSide(MotionSide side, uint32_t nowMs) {
   }
 }
 
-static float encoderMmOfficial(MotionSide side) {
+// Lectura oficial = counts relativos absolutos. Sin mm ni redondeo.
+static int32_t encoderCountsOfficial(MotionSide side) {
   EncoderSideRuntime* st = &gRt.encoder[side];
-  if (st->settled) {
-    int32_t countRel = st->settledCount - st->zeroRef;
-    float mmAbs = fabsf(ENC_OM_COUNTS_TO_MM(countRel));
-    return omRoundMm(mmAbs) + PARAM_ENC_OFFSET_MM;
-  }
-  return st->mmOfficial;
+  int32_t countAbs = st->settled ? st->settledCount : encoderReadCountAbs(side);
+  int32_t countRel = countAbs - st->zeroRef;
+  return countRel < 0 ? -countRel : countRel;
 }
 
 static bool encoderWithinTolerance(MotionSide side) {
   if (gData.targetLengthMm <= 0.0f) return false;
-  float mm = encoderMmOfficial(side);
-  return fabsf(mm - gData.targetLengthMm) <= gData.toleranceMm;
+  int32_t counts = encoderCountsOfficial(side);
+  int32_t targetCounts =
+      (int32_t)lroundf(gData.targetLengthMm * ((float)ENC_OM_COUNTS_PER_100MM / 100.0f));
+  int32_t tolCounts =
+      (int32_t)lroundf(gData.toleranceMm * ((float)ENC_OM_COUNTS_PER_100MM / 100.0f));
+  if (tolCounts < 0) tolCounts = -tolCounts;
+  int32_t err = counts - targetCounts;
+  if (err < 0) err = -err;
+  return err <= tolCounts;
 }
 
 // ── CAN feeder ──────────────────────────────────────────────────────────────
@@ -940,13 +935,13 @@ static FeedStageResult FeedStage(FeedStageRequest req) {
 
   if (sideAtLaser[MOTION_SIDE_R]) {
     out.side[MOTION_SIDE_R].laserOn = true;
-    out.side[MOTION_SIDE_R].mmMeasured = encoderMmOfficial(MOTION_SIDE_R);
+    out.side[MOTION_SIDE_R].countsMeasured = encoderCountsOfficial(MOTION_SIDE_R);
     out.side[MOTION_SIDE_R].encOk = true;
     sideValidated[MOTION_SIDE_R] = true;
   }
   if (sideAtLaser[MOTION_SIDE_L]) {
     out.side[MOTION_SIDE_L].laserOn = true;
-    out.side[MOTION_SIDE_L].mmMeasured = encoderMmOfficial(MOTION_SIDE_L);
+    out.side[MOTION_SIDE_L].countsMeasured = encoderCountsOfficial(MOTION_SIDE_L);
     out.side[MOTION_SIDE_L].encOk = true;
     sideValidated[MOTION_SIDE_L] = true;
   }
@@ -1033,12 +1028,13 @@ static FeedStageResult FeedStage(FeedStageRequest req) {
       }
 
       if (sideFeedStopped[i] && !sideValidated[i]) {
+        // Siempre se captura counts al detener (validación on/off).
         if (!req.checkEncoder) {
-          out.side[i].mmMeasured = encoderMmOfficial(side);
+          out.side[i].countsMeasured = encoderCountsOfficial(side);
           out.side[i].encOk = true;
           sideValidated[i] = true;
         } else if (gRt.encoder[side].settled) {
-          out.side[i].mmMeasured = encoderMmOfficial(side);
+          out.side[i].countsMeasured = encoderCountsOfficial(side);
           out.side[i].encOk = encoderWithinTolerance(side);
           sideValidated[i] = true;
           if (!out.side[i].encOk) {
@@ -1070,7 +1066,7 @@ static FeedStageResult FeedStage(FeedStageRequest req) {
   if (fail != FEED_STAGE_OK) {
     out.error = fail;
   } else if (req.checkEncoder) {
-    // mmMeasured ya quedó congelado con el encoder quieto. La compensación
+    // countsMeasured ya quedó congelado con el encoder quieto. La compensación
     // mueve el material después; no se vuelve a leer ni a validar.
     bool compOk = true;
     if (req.useR) compOk = feedApplyOffsetOnce(MOTION_SIDE_R);
@@ -1092,16 +1088,16 @@ static void printFeedStageResultJson(const FeedStageResult& r) {
   Serial.print(r.side[MOTION_SIDE_R].laserOn ? "true" : "false");
   Serial.print(F(",\"enc_ok\":"));
   Serial.print(r.side[MOTION_SIDE_R].encOk ? "true" : "false");
-  Serial.print(F(",\"mm\":"));
-  Serial.print(r.side[MOTION_SIDE_R].mmMeasured, 2);
+  Serial.print(F(",\"counts\":"));
+  Serial.print(r.side[MOTION_SIDE_R].countsMeasured);
   Serial.print(F(",\"comp_mm\":"));
   Serial.print(gTune.feeder[MOTION_SIDE_R].compensationMm, 2);
   Serial.print(F("},\"L\":{\"laser\":"));
   Serial.print(r.side[MOTION_SIDE_L].laserOn ? "true" : "false");
   Serial.print(F(",\"enc_ok\":"));
   Serial.print(r.side[MOTION_SIDE_L].encOk ? "true" : "false");
-  Serial.print(F(",\"mm\":"));
-  Serial.print(r.side[MOTION_SIDE_L].mmMeasured, 2);
+  Serial.print(F(",\"counts\":"));
+  Serial.print(r.side[MOTION_SIDE_L].countsMeasured);
   Serial.print(F(",\"comp_mm\":"));
   Serial.print(gTune.feeder[MOTION_SIDE_L].compensationMm, 2);
   Serial.println(F("}}"));
@@ -1467,10 +1463,10 @@ static void printStatusJson() {
   for (int i = 0; i < MOTION_SIDE_COUNT; i++) {
     Serial.print(F(",\"enc_"));
     Serial.print(sideTag[i]);
-    Serial.print(F("\":{\"mm_live\":"));
-    Serial.print(gRt.encoder[i].mmLive, 2);
-    Serial.print(F(",\"mm_off\":"));
-    Serial.print(encoderMmOfficial((MotionSide)i), 2);
+    Serial.print(F("\":{\"counts\":"));
+    Serial.print(encoderCountsOfficial((MotionSide)i));
+    Serial.print(F(",\"counts_live\":"));
+    Serial.print(gRt.encoder[i].countsLive);
     Serial.print(F(",\"settled\":"));
     Serial.print(gRt.encoder[i].settled ? "true" : "false");
     Serial.print(F(",\"ok_tol\":"));
