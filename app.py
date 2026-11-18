@@ -86,6 +86,8 @@ _serial_cfg = {
     "prefeeder": "",
     "andon_disabled": False,  # ANDON_SKIP_OPCIONAL — TODO_BORRAR (quitar clave y usos)
     "checklist_bypass": False,
+    # Última prueba Probar por módulo: {port, ok, message}. No se borra al refrescar la lista USB.
+    "online": {},
 }
 
 # Orquestador del ciclo automático (rules.md §4.1–4.8) — app.py coordina Motion + PLC.
@@ -1100,6 +1102,31 @@ def _reply_wait_s(line: str) -> float:
     return 2.0
 
 
+def _normalize_online_map(raw, motion: str, plc: str, andon: str, prefeeder: str) -> dict:
+    """Conserva solo entradas online cuyo puerto sigue coincidiendo con la asignación."""
+    src = raw if isinstance(raw, dict) else {}
+    assigned = {
+        "motion": motion,
+        "plc": plc,
+        "andon": andon,
+        "prefeeder": prefeeder,
+    }
+    out = {}
+    for which, port in assigned.items():
+        item = src.get(which)
+        if not isinstance(item, dict) or not port:
+            continue
+        saved_port = str(item.get("port") or "").strip()
+        if not saved_port or _port_compare_key(saved_port) != _port_compare_key(port):
+            continue
+        out[which] = {
+            "port": port,
+            "ok": bool(item.get("ok")),
+            "message": str(item.get("message") or "").strip(),
+        }
+    return out
+
+
 def _load_serial_cfg() -> None:
     motion = os.environ.get("MOTION_SERIAL", "").strip()
     plc = os.environ.get("PLC_SERIAL", "").strip()
@@ -1108,6 +1135,7 @@ def _load_serial_cfg() -> None:
     # --- ANDON_SKIP_OPCIONAL — TODO_BORRAR ---
     andon_disabled = False
     checklist_bypass = False
+    online_raw = {}
     if SERIAL_PATH.exists():
         try:
             saved = json.loads(SERIAL_PATH.read_text(encoding="utf-8"))
@@ -1120,6 +1148,7 @@ def _load_serial_cfg() -> None:
             prefeeder = str(saved.get("prefeeder") or "").strip()
             andon_disabled = bool(saved.get("andon_disabled"))
             checklist_bypass = bool(saved.get("checklist_bypass"))
+            online_raw = saved.get("online") or {}
     # En RPi/Linux ignorar COMx guardados desde Windows (no existen /dev/COM*).
     if sys.platform != "win32":
         if _is_windows_com_name(motion):
@@ -1132,6 +1161,7 @@ def _load_serial_cfg() -> None:
             prefeeder = ""
     if andon_disabled:
         andon = ""
+    online = _normalize_online_map(online_raw, motion, plc, andon, prefeeder)
     with _serial_cfg_lock:
         _serial_cfg["motion"] = motion
         _serial_cfg["plc"] = plc
@@ -1139,6 +1169,7 @@ def _load_serial_cfg() -> None:
         _serial_cfg["prefeeder"] = prefeeder
         _serial_cfg["andon_disabled"] = andon_disabled
         _serial_cfg["checklist_bypass"] = checklist_bypass
+        _serial_cfg["online"] = online
     # --- fin ANDON_SKIP_OPCIONAL (_load_serial_cfg) ---
 
 
@@ -1274,6 +1305,83 @@ def _match_listed_port(value: str, ports: list[dict]) -> str:
     return ""
 
 
+def _online_snapshot() -> dict:
+    with _serial_cfg_lock:
+        raw = _serial_cfg.get("online") or {}
+        return {k: dict(v) for k, v in raw.items() if isinstance(v, dict)}
+
+
+def _set_module_online(which: str, *, ok: bool, message: str) -> None:
+    port = _serial_port(which)
+    with _serial_cfg_lock:
+        online = dict(_serial_cfg.get("online") or {})
+        if not port:
+            online.pop(which, None)
+        else:
+            online[which] = {
+                "port": port,
+                "ok": bool(ok),
+                "message": str(message or "").strip(),
+            }
+        _serial_cfg["online"] = online
+        motion = str(_serial_cfg.get("motion") or "")
+        plc = str(_serial_cfg.get("plc") or "")
+        andon = str(_serial_cfg.get("andon") or "")
+        prefeeder = str(_serial_cfg.get("prefeeder") or "")
+        andon_disabled = bool(_serial_cfg.get("andon_disabled"))
+        checklist_bypass = bool(_serial_cfg.get("checklist_bypass"))
+        online_save = _normalize_online_map(online, motion, plc, andon, prefeeder)
+        _serial_cfg["online"] = online_save
+    SERIAL_PATH.parent.mkdir(parents=True, exist_ok=True)
+    SERIAL_PATH.write_text(
+        json.dumps(
+            {
+                "motion": motion,
+                "plc": plc,
+                "andon": andon,
+                "prefeeder": prefeeder,
+                "andon_disabled": andon_disabled,
+                "checklist_bypass": checklist_bypass,
+                "online": online_save,
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _ports_for_ui() -> list[dict]:
+    """Lista USB actual + puertos ya asignados (aunque el nodo desaparezca un momento)."""
+    found = _list_com_ports()
+    seen = {_port_compare_key(item["device"]) for item in found}
+    for which in ("motion", "plc", "andon", "prefeeder"):
+        device = _serial_port(which)
+        if not device:
+            continue
+        key = _port_compare_key(device)
+        if key in seen:
+            continue
+        seen.add(key)
+        found.append({"device": device, "description": "asignado (no detectado ahora)"})
+    found.sort(key=lambda item: item["device"])
+    return found
+
+
+def _accept_assigned_port(raw: str, listed: list[dict], previous: str) -> str:
+    """Acepta un puerto listado; si USB parpadeó, conserva el mismo valor ya guardado."""
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    matched = _match_listed_port(text, listed)
+    if matched:
+        return matched
+    prev = str(previous or "").strip()
+    if prev and _port_compare_key(text) == _port_compare_key(prev):
+        return prev
+    return ""
+
+
 def _save_serial_cfg(
     motion: str,
     plc: str,
@@ -1300,12 +1408,15 @@ def _save_serial_cfg(
         prev_andon = _serial_cfg["andon"]
         prev_pf = str(_serial_cfg.get("prefeeder") or "").strip()
         prev_ad = bool(_serial_cfg.get("andon_disabled"))
+        prev_online = dict(_serial_cfg.get("online") or {})
         _serial_cfg["motion"] = motion
         _serial_cfg["plc"] = plc
         _serial_cfg["andon"] = andon
         _serial_cfg["prefeeder"] = prefeeder
         _serial_cfg["andon_disabled"] = bool(andon_disabled)
         _serial_cfg["checklist_bypass"] = bool(checklist_bypass)
+        online = _normalize_online_map(prev_online, motion, plc, andon, prefeeder)
+        _serial_cfg["online"] = online
     SERIAL_PATH.parent.mkdir(parents=True, exist_ok=True)
     # --- ANDON_SKIP_OPCIONAL — TODO_BORRAR: quitar clave andon_disabled del JSON ---
     SERIAL_PATH.write_text(
@@ -1317,6 +1428,7 @@ def _save_serial_cfg(
                 "prefeeder": prefeeder,
                 "andon_disabled": bool(andon_disabled),
                 "checklist_bypass": bool(checklist_bypass),
+                "online": online,
             },
             indent=2,
         )
@@ -3222,16 +3334,17 @@ def _status_module(replies) -> str:
     return ""
 
 
-def _check_module_link(which: str) -> tuple[bool, str]:
+def _check_module_link(which: str, *, status_timeout_s: float | None = None) -> tuple[bool, str]:
     """True si el COM elegido responde y es el módulo pedido."""
     if which == "motion":
         missing_port, wrong, silent = "E041", "E042", "E043"
         if not _serial_port("motion"):
             return False, missing_port
-        # En arranque el Motion puede tardar en init CAN y enviar muchas líneas antes del status al pedirlo.
+        # Ciclo/arranque: hasta 90 s (init CAN). Probar en UI: timeout corto.
+        motion_timeout = 90.0 if status_timeout_s is None else float(status_timeout_s)
         sent = _send_motion_serial(
             ['{"op":"status"}'],
-            line_timeout_s=90.0,
+            line_timeout_s=motion_timeout,
             reply_until_op="status",
         )
     elif which == "plc":
@@ -8156,7 +8269,7 @@ def prefeeder_cmd():
 
 @app.route("/api/serial", methods=["GET", "POST"])
 def serial_ports():
-    """Puertos COM elegidos en la pantalla."""
+    """Puertos serie elegidos en la pantalla."""
     if request.method == "GET":
         # --- ANDON_SKIP_OPCIONAL — TODO_BORRAR (GET: ad, andon_skipped, andon_none_value) ---
         with _serial_cfg_lock:
@@ -8164,11 +8277,12 @@ def serial_ports():
         return jsonify(
             {
                 "ok": True,
-                "ports": _list_com_ports(),
+                "ports": _ports_for_ui(),
                 "motion": _serial_port("motion"),
                 "plc": _serial_port("plc"),
                 "andon": _serial_port("andon"),
                 "prefeeder": _serial_port("prefeeder"),
+                "online": _online_snapshot(),
                 "andon_disabled": ad,
                 "andon_skipped": _andon_skipped_effective(),
                 "andon_none_value": _ANDON_NONE_TOKEN,
@@ -8176,20 +8290,24 @@ def serial_ports():
         )
 
     body = request.get_json(silent=True) or {}
-    listed = _list_com_ports()
+    listed = _ports_for_ui()
     motion_raw = str(body.get("motion") or "").strip()
     plc_raw = str(body.get("plc") or "").strip()
     andon_raw = str(body.get("andon") or "").strip()
     prefeeder_raw = str(body.get("prefeeder") or "").strip()
-    motion = _match_listed_port(motion_raw, listed)
-    plc = _match_listed_port(plc_raw, listed)
-    prefeeder = _match_listed_port(prefeeder_raw, listed)
+    prev_motion = _serial_port("motion")
+    prev_plc = _serial_port("plc")
+    prev_andon = _serial_port("andon")
+    prev_prefeeder = _serial_port("prefeeder")
+    motion = _accept_assigned_port(motion_raw, listed, prev_motion)
+    plc = _accept_assigned_port(plc_raw, listed, prev_plc)
+    prefeeder = _accept_assigned_port(prefeeder_raw, listed, prev_prefeeder)
     # --- ANDON_SKIP_OPCIONAL — TODO_BORRAR (POST: token __none__ y andon_disable_ui) ---
     andon_disable_ui = andon_raw == _ANDON_NONE_TOKEN
     if andon_disable_ui:
         andon = ""
     else:
-        andon = _match_listed_port(andon_raw, listed)
+        andon = _accept_assigned_port(andon_raw, listed, prev_andon)
     if motion_raw and not motion:
         return jsonify({"ok": False, "error": "El puerto de Motion no está conectado."}), 400
     if plc_raw and not plc:
@@ -8219,6 +8337,7 @@ def serial_ports():
             "plc": plc,
             "andon": andon,
             "prefeeder": prefeeder,
+            "online": _online_snapshot(),
             "andon_disabled": andon_disable_ui,
             "andon_skipped": _andon_skipped_effective(),
             "andon_none_value": _ANDON_NONE_TOKEN,
@@ -8247,38 +8366,58 @@ def checklist_bypass_setting():
 
 @app.route("/api/serial/test", methods=["POST"])
 def serial_module_test():
-    """Comprueba que el COM elegido responde y es el MCU pedido. Andon incluido."""
+    """Comprueba que el puerto elegido responde y es el MCU pedido. Andon incluido."""
     body = request.get_json(silent=True) or {}
     which = str(body.get("module") or "").strip().lower()
     if which not in ("motion", "plc", "andon", "prefeeder"):
         return jsonify({"ok": False, "error": "Módulo no reconocido."}), 400
     # --- ANDON_SKIP_OPCIONAL — TODO_BORRAR (early return si Andon omitido) ---
     if which == "andon" and _andon_skipped_effective():
+        msg = "Andon no usado (Conexión o HMI_ANDON_SKIP=1). No se prueba el puerto."
+        try:
+            _set_module_online(which, ok=True, message=msg)
+        except OSError:
+            pass
         return jsonify(
             {
                 "ok": True,
                 "module": which,
                 "skipped": True,
-                "message": "Andon no usado (Conexión o HMI_ANDON_SKIP=1). No se prueba COM.",
+                "message": msg,
+                "online": _online_snapshot(),
             }
         )
     # ---
-    ok, code = _check_module_link(which)
+    # UI Probar: no esperar 90 s del init CAN; el ciclo sigue usando el timeout largo.
+    ok, code = _check_module_link(which, status_timeout_s=15.0)
     if not ok:
+        err = error_codes.format_message(code)
+        try:
+            _set_module_online(which, ok=False, message=err)
+        except OSError:
+            pass
         return jsonify(
             {
                 "ok": False,
                 "module": which,
                 "code": code,
-                "error": error_codes.format_message(code),
+                "error": err,
+                "online": _online_snapshot(),
             }
         )
+    port = _serial_port(which)
+    msg = f"{which.upper()} en {port} en línea."
+    try:
+        _set_module_online(which, ok=True, message=msg)
+    except OSError:
+        pass
     return jsonify(
         {
             "ok": True,
             "module": which,
-            "port": _serial_port(which),
-            "message": f"{which.upper()} en {_serial_port(which)} respondió como {which.upper()}.",
+            "port": port,
+            "message": msg,
+            "online": _online_snapshot(),
         }
     )
 

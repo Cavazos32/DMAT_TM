@@ -131,6 +131,7 @@
   let recoveryPollBusy = false;
   let recoveryViewKey = "";
   let recoveryWantOpen = false;
+  let recoveryAutoKey = "";
 
   const PLC_OUTPUTS = [
     ["holder", "holder"],
@@ -901,16 +902,29 @@
         closeRecoveryModal();
       }
       recoveryViewKey = "";
+      recoveryAutoKey = "";
       return;
-    }
-
-    // Abrir popup para guiar al operador (Joint o error); el paso a paso no va en el banner.
-    if (active && step && step !== "listo") {
-      recoveryWantOpen = true;
     }
 
     const viewStep = step || (enError ? "error" : "");
     const code = rec.code || state.ciclo_error || "";
+    // Solo auto-abrir al surgir un error/paso nuevo. Si el operador cierra (X/Salir),
+    // no volver a forzar el popup en cada poll: puede usar «Abrir Error».
+    const autoKey =
+      (active ? "a" : "e") +
+      "|" +
+      String(code || "") +
+      "|" +
+      (jointKind ? "j" : "x") +
+      "|" +
+      String(viewStep || "");
+    if (autoKey !== recoveryAutoKey) {
+      recoveryAutoKey = autoKey;
+      if (active && step && step !== "listo") {
+        recoveryWantOpen = true;
+      }
+    }
+
     const rutina = String(state.rutina || "");
     const guideKey = String(rec.guide || "").slice(0, 80);
     const key =
@@ -2033,6 +2047,8 @@
   }
 
   let serialSyncing = false;
+  let serialSaveSeq = 0;
+  const serialTesting = {};
 
   /* ==========================================================================
    * ANDON_SKIP_OPCIONAL — TODO_BORRAR
@@ -2044,36 +2060,49 @@
   /** Valor enviado al guardar cuando se elige «No usar Andon» (coincide con app.py). */
   let andonNoneToken = "__none__";
 
-  function fillPortSelect(select, ports, selected, extraNone) {
-    const current = selected || "";
-    const seen = {};
-    select.innerHTML = "";
-    if (extraNone && extraNone.value) {
-      const optNone = document.createElement("option");
-      optNone.value = extraNone.value;
-      optNone.textContent = extraNone.label || "—";
-      select.appendChild(optNone);
-    }
-    const none = document.createElement("option");
-    none.value = "";
-    none.textContent = "Sin puerto";
-    select.appendChild(none);
-    (ports || []).forEach(function (port) {
-      if (!port || !port.device || seen[port.device]) return;
-      seen[port.device] = true;
-      const opt = document.createElement("option");
-      opt.value = port.device;
-      opt.textContent = port.description ? port.device + " — " + port.description : port.device;
-      select.appendChild(opt);
-    });
-    if (current && !seen[current]) {
-      const missing = document.createElement("option");
-      missing.value = current;
-      missing.textContent = current + " — no está conectado";
-      select.appendChild(missing);
-    }
-    select.value = current;
-  }
+  const serialUi = {
+    ports: [],
+    assign: { motion: "", plc: "", andon: "", prefeeder: "" },
+    online: {},
+  };
+
+  const SERIAL_MODULES = [
+    {
+      key: "motion",
+      name: "Motion",
+      select: function () { return els.selectMotionPort; },
+      status: function () { return els.serialMotionStatus; },
+      button: function () { return els.btnMotionTest; },
+      required: true,
+    },
+    {
+      key: "plc",
+      name: "PLC",
+      select: function () { return els.selectPlcPort; },
+      status: function () { return els.serialPlcStatus; },
+      button: function () { return els.btnPlcTest; },
+      required: true,
+    },
+    {
+      key: "andon",
+      name: "Andon",
+      select: function () { return els.selectAndonPort; },
+      status: function () { return els.serialAndonStatus; },
+      button: function () { return els.btnAndonTest; },
+      required: true,
+      extraNone: function () {
+        return { value: andonNoneToken, label: "No usar Andon" };
+      },
+    },
+    {
+      key: "prefeeder",
+      name: "PreAlimentador",
+      select: function () { return els.selectPrefeederPort; },
+      status: function () { return els.serialPrefeederStatus; },
+      button: function () { return els.btnPrefeederTest; },
+      required: false,
+    },
+  ];
 
   function setLinkStatus(el, text, ok) {
     if (!el) return;
@@ -2090,20 +2119,137 @@
     if (els.statusBannerDetail) els.statusBannerDetail.textContent = message;
   }
 
-  function serialLinkText(name, port) {
-    if (!port) return name + ": sin puerto. El ciclo no arranca.";
-    return name + ": " + port + " guardado. Pulsa Probar.";
-  }
-
-  function andonConnectionStatusText(data) {
-    if (!data) return "";
-    if (data.andon_disabled) {
+  function andonConnectionStatusText() {
+    if (serialAndonSkipped && serialUi.assign.andon === andonNoneToken) {
       return "Andon: no usado (puedes conectarlo más tarde en este menú).";
     }
-    if (data.andon_skipped && !data.andon_disabled) {
+    if (serialAndonSkipped && !serialUi.assign.andon) {
       return "Andon: omitido en esta sesión (variable HMI_ANDON_SKIP=1).";
     }
     return "";
+  }
+
+  function portsForModule(moduleKey) {
+    const mine = serialUi.assign[moduleKey] || "";
+    const taken = {};
+    SERIAL_MODULES.forEach(function (mod) {
+      const port = serialUi.assign[mod.key] || "";
+      if (!port || mod.key === moduleKey) return;
+      if (moduleKey === "andon" && port === andonNoneToken) return;
+      if (port === andonNoneToken) return;
+      taken[port] = mod.name;
+    });
+    const out = [];
+    const seen = {};
+    (serialUi.ports || []).forEach(function (port) {
+      if (!port || !port.device || seen[port.device]) return;
+      seen[port.device] = true;
+      if (taken[port.device] && port.device !== mine) return;
+      const online = serialUi.online[moduleKey];
+      let label = port.description ? port.device + " — " + port.description : port.device;
+      if (mine === port.device && online && online.ok && online.port === port.device) {
+        label += " · en línea";
+      }
+      out.push({ device: port.device, label: label });
+    });
+    if (mine && mine !== andonNoneToken && !seen[mine]) {
+      out.push({ device: mine, label: mine + " — asignado (no detectado ahora)" });
+    }
+    return out;
+  }
+
+  function fillOnePortSelect(mod) {
+    const select = mod.select();
+    if (!select) return;
+    const current = serialUi.assign[mod.key] || "";
+    const extraNone = mod.extraNone ? mod.extraNone() : null;
+    select.innerHTML = "";
+    if (extraNone && extraNone.value) {
+      const optNone = document.createElement("option");
+      optNone.value = extraNone.value;
+      optNone.textContent = extraNone.label || "—";
+      select.appendChild(optNone);
+    }
+    const none = document.createElement("option");
+    none.value = "";
+    none.textContent = "Sin puerto";
+    select.appendChild(none);
+    portsForModule(mod.key).forEach(function (port) {
+      const opt = document.createElement("option");
+      opt.value = port.device;
+      opt.textContent = port.label;
+      select.appendChild(opt);
+    });
+    select.value = current;
+    if (select.value !== current && current) {
+      const missing = document.createElement("option");
+      missing.value = current;
+      missing.textContent = current + " — no listado";
+      select.appendChild(missing);
+      select.value = current;
+    }
+  }
+
+  function rebuildAllPortSelects() {
+    serialSyncing = true;
+    try {
+      SERIAL_MODULES.forEach(fillOnePortSelect);
+    } finally {
+      serialSyncing = false;
+    }
+  }
+
+  function paintModuleStatus(mod) {
+    const statusEl = mod.status();
+    if (!statusEl) return;
+    if (serialTesting[mod.key]) {
+      setLinkStatus(statusEl, "Probando…", null);
+      return;
+    }
+    const assign = serialUi.assign[mod.key] || "";
+    if (mod.key === "andon") {
+      const hint = andonConnectionStatusText();
+      if (hint) {
+        setLinkStatus(statusEl, hint, null);
+        return;
+      }
+    }
+    const online = serialUi.online[mod.key];
+    if (online && assign && online.port === assign) {
+      setLinkStatus(
+        statusEl,
+        online.message || (online.ok ? mod.name + " en línea." : mod.name + ": sin respuesta."),
+        online.ok ? true : false
+      );
+      return;
+    }
+    if (!assign) {
+      if (mod.required) {
+        setLinkStatus(statusEl, mod.name + ": sin puerto. El ciclo no arranca.", false);
+      } else {
+        setLinkStatus(statusEl, mod.name + ": sin puerto (opcional).", null);
+      }
+      return;
+    }
+    setLinkStatus(statusEl, mod.name + ": " + assign + " asignado. Pulsa Probar.", null);
+  }
+
+  function paintAllModuleStatus() {
+    SERIAL_MODULES.forEach(paintModuleStatus);
+  }
+
+  function applyOnlineMap(online) {
+    serialUi.online = {};
+    if (!online || typeof online !== "object") return;
+    Object.keys(online).forEach(function (key) {
+      const item = online[key];
+      if (!item || typeof item !== "object") return;
+      serialUi.online[key] = {
+        port: String(item.port || ""),
+        ok: !!item.ok,
+        message: String(item.message || ""),
+      };
+    });
   }
 
   async function loadSerialPorts() {
@@ -2112,38 +2258,24 @@
     try {
       const res = await fetch("/api/serial");
       const data = await res.json();
-      if (data.andon_none_value) {
-        andonNoneToken = data.andon_none_value;
-      }
-      fillPortSelect(els.selectMotionPort, data.ports, data.motion);
-      fillPortSelect(els.selectPlcPort, data.ports, data.plc);
-      const andonSel =
-        data.andon_disabled && data.andon_none_value ? data.andon_none_value : data.andon;
-      fillPortSelect(els.selectAndonPort, data.ports, andonSel, {
-        value: andonNoneToken,
-        label: "No usar Andon",
-      });
-      if (els.selectPrefeederPort) {
-        fillPortSelect(els.selectPrefeederPort, data.ports, data.prefeeder || "");
-      }
+      if (data.andon_none_value) andonNoneToken = data.andon_none_value;
+      serialUi.ports = data.ports || [];
+      serialUi.assign.motion = data.motion || "";
+      serialUi.assign.plc = data.plc || "";
+      serialUi.assign.prefeeder = data.prefeeder || "";
       serialAndonSkipped = !!data.andon_skipped;
-      if (!data.motion) setLinkStatus(els.serialMotionStatus, serialLinkText("Motion", ""), false);
-      if (!data.plc) setLinkStatus(els.serialPlcStatus, serialLinkText("PLC", ""), false);
-      const andonHint = andonConnectionStatusText(data);
-      if (andonHint && els.serialAndonStatus) {
-        setLinkStatus(els.serialAndonStatus, andonHint, null);
-      } else if (!data.andon && !data.andon_disabled) {
-        setLinkStatus(els.serialAndonStatus, serialLinkText("Andon", ""), false);
+      if (data.andon_disabled && data.andon_none_value) {
+        serialUi.assign.andon = data.andon_none_value;
+      } else {
+        serialUi.assign.andon = data.andon || "";
       }
-      if (els.serialPrefeederStatus && !data.prefeeder) {
-        setLinkStatus(
-          els.serialPrefeederStatus,
-          "PreAlimentador: sin puerto (opcional).",
-          null
-        );
-      }
+      applyOnlineMap(data.online);
+      rebuildAllPortSelects();
+      paintAllModuleStatus();
     } catch (err) {
-      if (els.serialMotionStatus) els.serialMotionStatus.textContent = "No se pudo leer la lista de puertos.";
+      if (els.serialMotionStatus) {
+        setLinkStatus(els.serialMotionStatus, "No se pudo leer la lista de puertos.", false);
+      }
     } finally {
       serialSyncing = false;
     }
@@ -2151,66 +2283,68 @@
 
   async function saveSerialPorts() {
     if (serialSyncing || !els.selectMotionPort || !els.selectPlcPort || !els.selectAndonPort) return;
-    if (els.serialMotionStatus) els.serialMotionStatus.textContent = "Guardando puertos…";
-    if (els.serialPlcStatus) els.serialPlcStatus.textContent = "";
-    if (els.serialAndonStatus) els.serialAndonStatus.textContent = "";
+    const seq = ++serialSaveSeq;
+    const payload = {
+      motion: els.selectMotionPort.value,
+      plc: els.selectPlcPort.value,
+      andon: els.selectAndonPort.value,
+      prefeeder: els.selectPrefeederPort ? els.selectPrefeederPort.value : "",
+    };
+    const prev = {
+      motion: serialUi.assign.motion,
+      plc: serialUi.assign.plc,
+      andon: serialUi.assign.andon,
+      prefeeder: serialUi.assign.prefeeder,
+    };
+    serialUi.assign.motion = payload.motion;
+    serialUi.assign.plc = payload.plc;
+    serialUi.assign.andon = payload.andon;
+    serialUi.assign.prefeeder = payload.prefeeder;
+    // Al cambiar un puerto se invalida su prueba anterior.
+    ["motion", "plc", "andon", "prefeeder"].forEach(function (key) {
+      if (prev[key] !== serialUi.assign[key]) delete serialUi.online[key];
+    });
+    rebuildAllPortSelects();
+    paintAllModuleStatus();
     try {
       const res = await fetch("/api/serial", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          motion: els.selectMotionPort.value,
-          plc: els.selectPlcPort.value,
-          andon: els.selectAndonPort.value,
-          prefeeder: els.selectPrefeederPort ? els.selectPrefeederPort.value : "",
-        }),
+        body: JSON.stringify(payload),
       });
       const data = await res.json();
+      if (seq !== serialSaveSeq) return;
       if (!data.ok) {
-        const err = data.error || "No se pudo guardar el puerto.";
-        if (els.serialMotionStatus) setLinkStatus(els.serialMotionStatus, "No guardado.", false);
-        showComErrorInBanner(err);
-        await loadSerialPorts();
+        showComErrorInBanner(data.error || "No se pudo guardar el puerto.");
+        serialUi.assign.motion = prev.motion;
+        serialUi.assign.plc = prev.plc;
+        serialUi.assign.andon = prev.andon;
+        serialUi.assign.prefeeder = prev.prefeeder;
+        rebuildAllPortSelects();
+        paintAllModuleStatus();
         return;
       }
-      if (els.serialMotionStatus) {
-        setLinkStatus(
-          els.serialMotionStatus,
-          serialLinkText("Motion", data.motion),
-          data.motion ? null : false
-        );
+      serialUi.assign.motion = data.motion || "";
+      serialUi.assign.plc = data.plc || "";
+      serialUi.assign.prefeeder = data.prefeeder || "";
+      serialAndonSkipped = !!data.andon_skipped;
+      if (data.andon_disabled && data.andon_none_value) {
+        serialUi.assign.andon = data.andon_none_value;
+      } else {
+        serialUi.assign.andon = data.andon || "";
       }
-      if (els.serialPlcStatus) {
-        setLinkStatus(
-          els.serialPlcStatus,
-          serialLinkText("PLC", data.plc),
-          data.plc ? null : false
-        );
-      }
-      if (els.serialAndonStatus) {
-        const hint = andonConnectionStatusText(data);
-        if (hint) {
-          setLinkStatus(els.serialAndonStatus, hint, null);
-          serialAndonSkipped = !!data.andon_skipped;
-        } else {
-          serialAndonSkipped = !!data.andon_skipped;
-          setLinkStatus(
-            els.serialAndonStatus,
-            serialLinkText("Andon", data.andon),
-            data.andon ? null : false
-          );
-        }
-      }
-      if (els.serialPrefeederStatus && els.selectPrefeederPort) {
-        const pf = data.prefeeder || "";
-        setLinkStatus(
-          els.serialPrefeederStatus,
-          pf ? serialLinkText("PreAlimentador", pf) : "PreAlimentador: sin puerto (opcional).",
-          pf ? null : null
-        );
-      }
+      if (data.online) applyOnlineMap(data.online);
+      rebuildAllPortSelects();
+      paintAllModuleStatus();
     } catch (err) {
-      if (els.serialMotionStatus) els.serialMotionStatus.textContent = "Sin conexión con el servidor.";
+      if (seq !== serialSaveSeq) return;
+      showComErrorInBanner("Sin conexión con el servidor.");
+      serialUi.assign.motion = prev.motion;
+      serialUi.assign.plc = prev.plc;
+      serialUi.assign.andon = prev.andon;
+      serialUi.assign.prefeeder = prev.prefeeder;
+      rebuildAllPortSelects();
+      paintAllModuleStatus();
     }
   }
 
@@ -2261,51 +2395,90 @@
   if (els.selectPlcPort) els.selectPlcPort.addEventListener("change", saveSerialPorts);
   if (els.selectAndonPort) els.selectAndonPort.addEventListener("change", saveSerialPorts);
   if (els.selectPrefeederPort) els.selectPrefeederPort.addEventListener("change", saveSerialPorts);
-  async function testModuleCom(moduleName, statusEl) {
+
+  async function testModuleCom(moduleName) {
+    const mod = SERIAL_MODULES.find(function (item) { return item.key === moduleName; });
+    if (!mod) return;
+    const statusEl = mod.status();
+    const button = mod.button();
     if (moduleName === "andon" && serialAndonSkipped) {
-      setLinkStatus(statusEl, "Andon no usado. No hay COM que probar.", null);
+      setLinkStatus(statusEl, "Andon no usado. No hay puerto que probar.", null);
       return;
     }
+    if (serialTesting[moduleName]) return;
+    serialTesting[moduleName] = true;
+    if (button) button.disabled = true;
     setLinkStatus(statusEl, "Probando…", null);
+    const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+    const timer = controller
+      ? setTimeout(function () { controller.abort(); }, 20000)
+      : null;
     try {
       const res = await fetch("/api/serial/test", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ module: moduleName }),
+        signal: controller ? controller.signal : undefined,
       });
       const data = await res.json();
+      if (data.online) applyOnlineMap(data.online);
       if (data.ok) {
-        setLinkStatus(statusEl, data.message, true);
+        serialUi.online[moduleName] = {
+          port: data.port || serialUi.assign[moduleName] || "",
+          ok: true,
+          message: data.message || moduleName.toUpperCase() + " en línea.",
+        };
+        rebuildAllPortSelects();
+        paintAllModuleStatus();
         fetchState();
       } else {
-        showComErrorInBanner(data.error || "El COM no respondió.");
-        setLinkStatus(statusEl, "Sin respuesta.", false);
+        serialUi.online[moduleName] = {
+          port: serialUi.assign[moduleName] || "",
+          ok: false,
+          message: data.error || "Sin respuesta.",
+        };
+        showComErrorInBanner(data.error || "El puerto no respondió.");
+        paintAllModuleStatus();
       }
     } catch (err) {
-      showComErrorInBanner("Sin conexión con el servidor.");
-      setLinkStatus(statusEl, "Sin conexión.", false);
+      const aborted = err && err.name === "AbortError";
+      const msg = aborted
+        ? "Tiempo agotado al probar el puerto."
+        : "Sin conexión con el servidor.";
+      serialUi.online[moduleName] = {
+        port: serialUi.assign[moduleName] || "",
+        ok: false,
+        message: msg,
+      };
+      showComErrorInBanner(msg);
+      paintAllModuleStatus();
+    } finally {
+      if (timer) clearTimeout(timer);
+      serialTesting[moduleName] = false;
+      if (button) button.disabled = false;
+      paintModuleStatus(mod);
     }
   }
 
   if (els.btnRefreshPorts) els.btnRefreshPorts.addEventListener("click", loadSerialPorts);
   if (els.btnMotionTest) {
     els.btnMotionTest.addEventListener("click", function () {
-      testModuleCom("motion", els.serialMotionStatus);
+      testModuleCom("motion");
     });
   }
   if (els.btnPlcTest) {
     els.btnPlcTest.addEventListener("click", function () {
-      testModuleCom("plc", els.serialPlcStatus);
+      testModuleCom("plc");
     });
   }
   if (els.btnAndonTest) {
     els.btnAndonTest.addEventListener("click", function () {
-      testModuleCom("andon", els.serialAndonStatus);
+      testModuleCom("andon");
     });
   }
   if (els.btnPrefeederTest) {
     els.btnPrefeederTest.addEventListener("click", function () {
-      testModuleCom("prefeeder", els.serialPrefeederStatus);
+      testModuleCom("prefeeder");
     });
   }
   /* --- fin ANDON_SKIP_OPCIONAL (serial / conexión Andon en JS) — TODO_BORRAR --- */

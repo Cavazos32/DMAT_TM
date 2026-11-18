@@ -4,5 +4,6 @@
   "andon": "",
   "prefeeder": "",
   "andon_disabled": true,
-  "checklist_bypass": true
+  "checklist_bypass": true,
+  "online": {}
 }
