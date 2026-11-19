@@ -1,14 +1,14 @@
 {
   "L": {
-    "rpm": 60.0,
-    "puller_rpm": 60.0,
+    "rpm": 50.0,
+    "puller_rpm": 35.0,
     "settle_ms": 150,
     "on_s": 0.5,
     "stall_fault_s": 2.0
   },
   "R": {
-    "rpm": 60.0,
-    "puller_rpm": 60.0,
+    "rpm": 50.0,
+    "puller_rpm": 35.0,
     "settle_ms": 150,
     "on_s": 0.5,
     "stall_fault_s": 2.0

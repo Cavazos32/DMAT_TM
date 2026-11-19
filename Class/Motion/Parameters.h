@@ -33,25 +33,18 @@ static const uint32_t PARAM_MS_AT_HOME_END        = 50;
 
 static const float PARAM_DATA_TOLERANCE_MM_DEFAULT = 2.0f;
 
-// ── [A] Encoder OM + láser + joint ──────────────────────────────────────────
+// ── [A] Encoder OM (pines; lógica en Encoder.h / EncoderPCNT) + láser + joint ─
 
-static const uint16_t PARAM_ENC_PPR               = 2000;
-static const uint8_t  PARAM_ENC_QUAD              = 1;
-static const float    PARAM_ENC_PULLEY_DIAM_MM    = 50.0f;
-static const int32_t  PARAM_ENC_COUNTS_PER_100MM  = 1273;
-static const float    PARAM_ENC_MOVE_MMS          = 20.0f;
-static const uint32_t PARAM_ENC_SETTLE_MS         = 250;
-static const uint32_t PARAM_ENC_POLL_MS           = 80;
-static const int16_t  PARAM_ENC_PCNT_HIGH_LIM     = 30000;
-static const int16_t  PARAM_ENC_PCNT_LOW_LIM      = -30000;
-static const uint16_t PARAM_ENC_FILTER_APB_TICKS  = 1023;
+static const uint32_t PARAM_ENC_POLL_MS = 80;
+// Filtro de glitch PCNT (ns). 5 µs; tope típico ESP32 ~12.5 µs @ APB 80 MHz.
+static const uint32_t PARAM_ENC_GLITCH_FILTER_NS = 5000;
 
-static const int  PARAM_PIN_ENC_A_R = 18;
-static const int  PARAM_PIN_ENC_B_R = 19;
-static const int  PARAM_PIN_ENC_Z_R = 21;
-static const int  PARAM_PIN_ENC_A_L = 22;
-static const int  PARAM_PIN_ENC_B_L = 23;
-static const int  PARAM_PIN_ENC_Z_L = 25;
+static const int PARAM_PIN_ENC_A_R = 18;
+static const int PARAM_PIN_ENC_B_R = 19;
+static const int PARAM_PIN_ENC_Z_R = 21;
+static const int PARAM_PIN_ENC_A_L = 22;
+static const int PARAM_PIN_ENC_B_L = 23;
+static const int PARAM_PIN_ENC_Z_L = 25;
 
 static const int   PARAM_PIN_LASER_R        = 32;
 static const int   PARAM_PIN_LASER_L        = 34;
@@ -62,15 +55,15 @@ static const bool  PARAM_JOINT_ACTIVE_HIGH  = false;
 // Evita falsos ON cruzados por ruido/acoplamiento entre GPIO 12/13.
 static const uint32_t PARAM_JOINT_DEBOUNCE_MS = 25;
 static const int   PARAM_PIN_SAFETY         = 26;
-static const float PARAM_ENC_OFFSET_MM        = 0.0f;
-
-#define PARAM_ENC_COUNTS_TO_MM(counts) \
-  ((float)(counts) * (100.0f / (float)PARAM_ENC_COUNTS_PER_100MM))
 
 // ── [A] FeedStage (solo firmware) ─────────────────────────────────────────
 
 static const uint32_t PARAM_FEED_STAGE_LASER_TIMEOUT_MS = 4000u;
 static const bool     PARAM_FEED_VALIDATE_ENCODER       = true;
+/* Diagnóstico de parada por láser: asiento de encoder + lectura corta de status. */
+static const uint32_t PARAM_LASER_STOP_SETTLE_MS   = 80u;
+static const uint32_t PARAM_LASER_STOP_STABLE_MS   = 10u;
+static const uint32_t PARAM_LASER_STOP_STATUS_MS   = 50u;
 
 // ── [A] Feeder CAN (CiA402) ────────────────────────────────────────────────
 
@@ -90,7 +83,8 @@ static const uint32_t PARAM_CAN_NMT_OPERATIONAL_MS = 500;
 static const uint32_t PARAM_CAN_CIA402_STEP_MS    = 200;
 static const uint32_t PARAM_CAN_CIA402_SHORT_MS   = 50;
 
-static const uint32_t PARAM_FEED_ENC_INC_PER_REV  = 131072u;
+/* DSY 6091:01=1, 6091:02=10000 → 0x60FF = RPM * 10000 / 60 */
+static const uint32_t PARAM_FEED_SHAFT_INC_PER_REV = 10000u;
 static const int8_t   PARAM_FEED_CMD_SIGN_R       = 1;
 static const int8_t   PARAM_FEED_CMD_SIGN_L       = -1;
 
@@ -104,7 +98,7 @@ static const uint8_t  PARAM_FEED_HALT_OPTION_CODE        = 2;
 static const uint32_t PARAM_FEED_HALT_DECEL_PP           = 8000000u;
 
 static const uint32_t PARAM_FEED_MAX_PPS =
-    (uint32_t)((uint64_t)PARAM_FEED_MAX_RPM * PARAM_FEED_ENC_INC_PER_REV / 60u);
+    (uint32_t)((uint64_t)PARAM_FEED_MAX_RPM * PARAM_FEED_SHAFT_INC_PER_REV / 60u);
 
 // ── [A] LM Guide Modbus (ASDA-B3) ─────────────────────────────────────────
 
@@ -184,32 +178,15 @@ static inline void motionDataSetDefaults(MotionData* data) {
   data->toleranceMm = PARAM_DATA_TOLERANCE_MM_DEFAULT;
 }
 
-// ── Alias compatibilidad (Encoder.h / ServoFeeder.h / ServoLMGuide.h) ───────
+// ── Alias compatibilidad (ServoFeeder.h / ServoLMGuide.h / GPIO) ────────────
 
-#define ENC_OM_PPR              PARAM_ENC_PPR
-#define ENC_OM_QUAD             PARAM_ENC_QUAD
-#define ENC_OM_CPR              (PARAM_ENC_PPR * PARAM_ENC_QUAD)
-#define ENC_OM_PULLEY_DIAM_MM   PARAM_ENC_PULLEY_DIAM_MM
-#define ENC_OM_COUNTS_PER_100MM PARAM_ENC_COUNTS_PER_100MM
-#define ENC_OM_MOVE_MMS         PARAM_ENC_MOVE_MMS
-#define ENC_OM_SETTLE_MS        PARAM_ENC_SETTLE_MS
-#define ENC_OM_PCNT_HIGH_LIM    PARAM_ENC_PCNT_HIGH_LIM
-#define ENC_OM_PCNT_LOW_LIM     PARAM_ENC_PCNT_LOW_LIM
-#define ENC_OM_FILTER_APB_TICKS PARAM_ENC_FILTER_APB_TICKS
-#define ENC_OM_PIN_A_R          PARAM_PIN_ENC_A_R
-#define ENC_OM_PIN_B_R          PARAM_PIN_ENC_B_R
-#define ENC_OM_PIN_Z_R          PARAM_PIN_ENC_Z_R
-#define ENC_OM_PIN_A_L          PARAM_PIN_ENC_A_L
-#define ENC_OM_PIN_B_L          PARAM_PIN_ENC_B_L
-#define ENC_OM_PIN_Z_L          PARAM_PIN_ENC_Z_L
-#define LASER_PIN_R             PARAM_PIN_LASER_R
-#define LASER_PIN_L             PARAM_PIN_LASER_L
-#define LASER_ACTIVE_HIGH       PARAM_LASER_ACTIVE_HIGH
-#define JOINT_PIN_R             PARAM_PIN_JOINT_R
-#define JOINT_PIN_L             PARAM_PIN_JOINT_L
-#define JOINT_ACTIVE_HIGH       PARAM_JOINT_ACTIVE_HIGH
-#define SAFETY_PIN              PARAM_PIN_SAFETY
-#define ENC_OM_COUNTS_TO_MM     PARAM_ENC_COUNTS_TO_MM
+#define LASER_PIN_R       PARAM_PIN_LASER_R
+#define LASER_PIN_L       PARAM_PIN_LASER_L
+#define LASER_ACTIVE_HIGH PARAM_LASER_ACTIVE_HIGH
+#define JOINT_PIN_R       PARAM_PIN_JOINT_R
+#define JOINT_PIN_L       PARAM_PIN_JOINT_L
+#define JOINT_ACTIVE_HIGH PARAM_JOINT_ACTIVE_HIGH
+#define SAFETY_PIN        PARAM_PIN_SAFETY
 
 #define SERVO_CAN_TX_GPIO           PARAM_CAN_TX_GPIO
 #define SERVO_CAN_RX_GPIO           PARAM_CAN_RX_GPIO
@@ -226,7 +203,7 @@ static inline void motionDataSetDefaults(MotionData* data) {
 #define SERVO_CAN_NMT_OPERATIONAL_MS PARAM_CAN_NMT_OPERATIONAL_MS
 #define SERVO_CAN_CIA402_STEP_MS    PARAM_CAN_CIA402_STEP_MS
 #define SERVO_CAN_CIA402_SHORT_MS   PARAM_CAN_CIA402_SHORT_MS
-#define SERVO_CAN_ENC_INC_PER_REV   PARAM_FEED_ENC_INC_PER_REV
+#define SERVO_CAN_ENC_INC_PER_REV   PARAM_FEED_SHAFT_INC_PER_REV
 #define SERVO_CAN_CMD_SIGN_R        PARAM_FEED_CMD_SIGN_R
 #define SERVO_CAN_CMD_SIGN_L        PARAM_FEED_CMD_SIGN_L
 #define SERVO_CAN_HOME_PP           PARAM_FEED_TARGET_COUNTS_DEFAULT

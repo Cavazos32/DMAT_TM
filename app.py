@@ -1,14 +1,17 @@
 import json
 import math
 import os
+import socket
+import subprocess
 import sys
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 from flask import Flask, jsonify, render_template, request
-from werkzeug.serving import WSGIRequestHandler
+from werkzeug.serving import BaseWSGIServer, WSGIRequestHandler
 
 # Peticiones de sondeo del HMI: no escribir cada GET en la consola (ruido).
 _QUIET_HTTP_LOG_PREFIXES = (
@@ -40,6 +43,7 @@ MOTION_PATH = DATA_DIR / "Motion.json"
 PFEEDER_PATH = DATA_DIR / "PreFeeder.json"
 CYCLE_PATH = DATA_DIR / "cycle.json"
 PROD_CYCLE_LOG_PATH = DATA_DIR / "cycle_production.log"
+LASER_STOP_LOG_PATH = DATA_DIR / "laser_stop.log"
 SERIAL_PATH = DATA_DIR / "serial.json"
 MANT_PATH = DATA_DIR / "mantenimiento.json"
 CHECKLIST_LOG_PATH = DATA_DIR / "checklist.json"
@@ -62,8 +66,8 @@ LMGUIDE_PR_RPM_MAX = 3000.0
 # Reset de error: condiciones PLC/Motion despejadas de forma estable (ms).
 _ERROR_RESET_STABLE_MS = 200
 
-# ServoFeeder.h [8]: 3600 counts = 55 mm de cinta. Vale para mm/s → 6081 y mm → 607A.
-FEED_STEPS_PER_MM = 3600.0 / 55.0
+# DSY 6091:01=1, 6091:02=10000 → 0x60FF = RPM * 10000 / 60 (manual PV).
+FEED_SHAFT_INC_PER_REV = 10000.0
 
 # -----------------------------------------------------------------------------
 # ANDON_SKIP_OPCIONAL — TODO_BORRAR
@@ -191,8 +195,6 @@ _PIECE_BLOWER_MM = None
 # CAPTURA A: láser detuvo el servo (FeedStage). CAPTURA B: LM Guide reached.
 _PIECE_FEED = {"R": None, "L": None}
 _PIECE_ENC_AT_LM = {"R": None, "L": None}
-# Misma escala OM que Parameters.h (solo fallback si el MCU aún no manda counts).
-_ENC_OM_COUNTS_PER_100MM = 1273
 
 # Siguiente ciclo arrancado al soltar pinzas (paso 7).
 # Los pasos 1 a 3 pueden terminar mientras el eje sigue hacia home.
@@ -216,6 +218,12 @@ _OVERLAP = {
 # El siguiente paso 4 solo cierra: home ya está hecho y las pinzas siguen abiertas.
 _STEP4_CLOSES = False
 
+# MODO EXPERIMENTAL. En el paso 4 se abre el holder (igual que el camino normal) y
+# además se pone ServoCAN en "Suelto" (feeder_servo_off / Duro apagado) antes de
+# mover el LM Guide. Al depositar (paso 7) se vuelve a "Duro" (feeder_servo_on).
+# Para probar: True. Para desactivar: False.
+EXPERIMENTAL_SERVO_OFF = True
+
 # Pasos ejecutables en orden (1 = arranque / set_data al Motion).
 # Con otro ciclo pendiente, el paso 7 dispara de nuevo el 1 sin esperar al 8.
 CYCLE_STEPS = (
@@ -233,6 +241,7 @@ CYCLE_STEPS = (
 _LOT_SEQ = 0
 _PROD_CADENCE_SAMPLES: list[float] = []
 _PROD_LOG_LOCK = threading.Lock()
+_LASER_STOP_LOG_LOCK = threading.Lock()
 _PROD_CTX = {"piece": 1, "step_id": "1", "t0": 0.0}
 _PROD_STEP_DESC = {
     "1": "Configuración inicial",
@@ -457,12 +466,10 @@ def _lot_init_piece_targets(qty: int, sides: str) -> None:
     _LOT["cycle_sides"] = raw
 
 
-def _prod_lot_tag() -> str:
-    """LOTE = número secuencial de arranque (_LOT_SEQ / log_id)."""
-    lid = int(_LOT.get("log_id") or 0)
-    if lid <= 0:
-        lid = int(_LOT_SEQ or 0)
-    return f"LOTE {max(lid, 0):03d}"
+def _prod_ts() -> str:
+    """Fecha/hora corta con segundos y milisegundos."""
+    now = datetime.now()
+    return now.strftime("%d/%m/%y %H:%M:%S.") + f"{now.microsecond // 1000:03d}"
 
 
 def _prod_qty_tag() -> str:
@@ -502,12 +509,41 @@ def _prod_actor(step_id: str) -> str:
 
 
 def _prod_write(line: str) -> None:
+    stamped = f"{_prod_ts()} | {line}"
     with _PROD_LOG_LOCK:
         PROD_CYCLE_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
         with PROD_CYCLE_LOG_PATH.open("a", encoding="utf-8") as f:
-            f.write(line + "\n")
-    print(f"[PROD] {line}", flush=True)
-    _push_event(line, "prod")
+            f.write(stamped + "\n")
+    print(f"[PROD] {stamped}", flush=True)
+    _push_event(stamped, "prod")
+
+
+def _laser_stop_log_write(msg: dict | str) -> None:
+    """Traza de parada por láser: terminal + data/laser_stop.log."""
+    if isinstance(msg, dict):
+        try:
+            raw = json.dumps(msg, ensure_ascii=False, separators=(",", ":"))
+        except (TypeError, ValueError):
+            raw = str(msg)
+        side = str(msg.get("side") or "?")
+        summary = (
+            f"side={side} t_laser={msg.get('t_laser_ms')}ms "
+            f"at={msg.get('counts_at_laser')} after_halt={msg.get('counts_after_halt')} "
+            f"settled={msg.get('counts_settled')} overrun={msg.get('overrun_counts')} "
+            f"settle={msg.get('settle_ms')}ms stop_ok={msg.get('stop_ok')} "
+            f"status=0x{int(msg.get('status_word') or 0):04X} "
+            f"vel={msg.get('vel_actual')}"
+        )
+    else:
+        raw = str(msg)
+        summary = raw
+    stamped = f"{_prod_ts()} | {summary}"
+    with _LASER_STOP_LOG_LOCK:
+        LASER_STOP_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with LASER_STOP_LOG_PATH.open("a", encoding="utf-8") as f:
+            f.write(stamped + " | " + raw + "\n")
+    print(f"[LASER_STOP] {stamped}", flush=True)
+    _push_event(f"[LASER_STOP] {stamped}", "prod")
 
 
 def _prod_enc_counts_side(feed: dict | None, side: str) -> str:
@@ -549,7 +585,7 @@ def _prod_log_op(
     actor = _prod_actor(step_id)
     flag = status if status not in ("OK",) else ("PARALLEL" if parallel else "OK")
     line = (
-        f"{_prod_lot_tag()} | {_prod_qty_tag()} | {_prod_rl_tag(preview=True)} | "
+        f"{_prod_qty_tag()} | {_prod_rl_tag(preview=True)} | "
         f"{step_no} | {desc} | {actor} | {duration_s:.3f} s | {flag}"
     )
     if detail and flag in ("ERROR", "WARNING"):
@@ -564,7 +600,7 @@ def _prod_log_op(
 
 def _prod_log_complete(duration_s: float, kind: str) -> None:
     line = (
-        f"{_prod_lot_tag()} | {_prod_qty_tag()} | {_prod_rl_tag(preview=False)} | COMPLETE | "
+        f"{_prod_qty_tag()} | {_prod_rl_tag(preview=False)} | COMPLETE | "
         f"{duration_s:.3f} s | {kind} | {_prod_enc_tag()}"
     )
     _prod_write(line)
@@ -572,7 +608,7 @@ def _prod_log_complete(duration_s: float, kind: str) -> None:
 
 def _prod_log_summary(done: int, total: int, avg_cadence: float) -> None:
     line = (
-        f"{_prod_lot_tag()} | SUMMARY | {_prod_qty_tag()} | {_prod_rl_tag(preview=False)} | "
+        f"SUMMARY | {_prod_qty_tag()} | {_prod_rl_tag(preview=False)} | "
         f"AVG CADENCE: {avg_cadence:.3f} s"
     )
     _prod_write(line)
@@ -1252,7 +1288,7 @@ def _motion_scale() -> dict:
     return {
         "steps_per_mm": LMGUIDE_STEPS_PER_MM,
         "puu_sign": LMGUIDE_PUU_SIGN,
-        "feed_steps_per_mm": FEED_STEPS_PER_MM,
+        "feed_shaft_inc_per_rev": FEED_SHAFT_INC_PER_REV,
     }
 
 
@@ -1280,6 +1316,12 @@ def _build_motion_lines(op: str, tune: dict, body: dict):
         if body.get("on"):
             return tune, ['{"op":"lmguide_servo_on"}']
         return tune, ['{"op":"lmguide_servo_off"}']
+    if op == "feeder_servo":
+        side = str(body.get("side") or "").strip().upper()
+        payload = {"op": "feeder_servo_on" if body.get("on") else "feeder_servo_off"}
+        if side in ("R", "L"):
+            payload["side"] = side
+        return tune, [_compact(payload)]
     if op == "lmguide_home":
         return tune, ['{"op":"lmguide_home"}']
     if op == "lmguide_move_home":
@@ -1749,6 +1791,8 @@ def _read_lines_until_op(
         op = msg.get("op")
         if op:
             seen.add(op)
+            if op == "laser_stop_trace":
+                _laser_stop_log_write(msg)
             if on_line is not None:
                 on_line(msg)
         if want_op not in seen:
@@ -4349,51 +4393,13 @@ def _sent_ok(sent: dict, fallback: str) -> bool:
     return False
 
 
-def _feed_side_mm(block: dict | None) -> float | None:
-    """mm crudos desde counts (sin redondeo). Fallback a mm si viene del MCU antiguo."""
-    if not isinstance(block, dict):
-        return None
-    if block.get("counts") is not None:
-        try:
-            return abs(float(block["counts"])) * 100.0 / float(_ENC_OM_COUNTS_PER_100MM)
-        except (TypeError, ValueError):
-            pass
-    if block.get("mm") is not None:
-        try:
-            return abs(float(block["mm"]))
-        except (TypeError, ValueError):
-            return None
-    return None
-
-
-def _feed_dict_length_mm(feed: dict | None) -> Optional[float]:
-    """Promedio de mm derivados de counts L/R; None si aún no hay medición."""
-    feed = feed or {}
-    mm_vals = []
-    for side in ("R", "L"):
-        mm = _feed_side_mm(feed.get(side) if isinstance(feed.get(side), dict) else None)
-        if mm is not None:
-            mm_vals.append(mm)
-    if not mm_vals:
-        return None
-    return sum(mm_vals) / len(mm_vals)
-
-
-def _measured_feed_length_mm() -> Optional[float]:
-    return _feed_dict_length_mm(_MACHINE_STATE.get("ciclo_feed") or {})
-
-
 def _cycle_blower_length_mm() -> float:
     # Reglas §4.8: duración del blower = longitud programada de la pieza.
-    # La medición de encoder no define el soplo (puede ser parcial o con validación off).
+    # El encoder OM solo reporta counts; no se deriva mm para el soplo.
     prog = _num(_MOTION_DATA.get("target_length_mm"), 0.0)
     if prog > 0:
         return prog
-    snap = _num(_PIECE_BLOWER_MM, 0.0)
-    if snap > 0:
-        return snap
-    measured = _measured_feed_length_mm()
-    return _num(measured, 0.0)
+    return _num(_PIECE_BLOWER_MM, 0.0)
 
 
 def _cycle_blower_duration_ms(params: dict) -> int:
@@ -4531,7 +4537,7 @@ def _cycle_latch_after_completed_index(completed_idx: int) -> None:
     if completed_idx >= 2:
         _CYCLE_LATCH["feed_validated"] = True
     if completed_idx >= 3:
-        # Tras pinzas: se abre el holder solo para mover el LM; encoder cerrado.
+        # Holder abierto solo para mover el LM; encoder cerrado. (Igual en experimental.)
         _CYCLE_LATCH["holder_encoder_active"] = False
         _CYCLE_LATCH["holder_encoder_released"] = True
         _CYCLE_LATCH["gripper_active"] = True
@@ -4630,11 +4636,6 @@ def _read_feed_stage(sent: dict):
                         entry["counts"] = int(block["counts"])
                     except (TypeError, ValueError):
                         pass
-                # No convertir mm→counts: si llega mm con decimales, el MCU
-                # aún usa la ruta vieja; counts inventados ocultan ese problema.
-                mm = _feed_side_mm(entry)
-                if mm is not None:
-                    entry["mm"] = mm
                 feed[side] = entry
     return found, ok, error_name, feed
 
@@ -4693,9 +4694,28 @@ def _cycle_lm_home_absolute() -> bool:
 
 
 def _cycle_encoder_reset() -> bool:
-    """Pide reset de encoder R+L al Motion."""
+    """Reset hardware PCNT (solo recuperación / uso manual)."""
     return _motion_cmd_serial_ok(
         _cycle_motion_send({"op": "encoder_reset"}, timeout_s=2.0),
+        "E043",
+    )
+
+
+def _cycle_encoder_set0() -> bool:
+    """Marca referencia relativa R+L; PCNT sigue contando."""
+    return _motion_cmd_serial_ok(
+        _cycle_motion_send({"op": "encoder_set0", "side": "both"}, timeout_s=2.0),
+        "E043",
+    )
+
+
+def _cycle_feeder_servo(on: bool) -> bool:
+    """Duro (on=True) / Suelto (on=False) — mismo op que el botón feeder_servo de la UI."""
+    return _motion_cmd_serial_ok(
+        _cycle_motion_send(
+            {"op": "feeder_servo_on" if on else "feeder_servo_off"},
+            timeout_s=3.0,
+        ),
         "E043",
     )
 
@@ -4721,9 +4741,6 @@ def _cycle_capture_encoder_counts() -> dict:
                 entry["counts"] = abs(int(block["counts_live"]))
             except (TypeError, ValueError):
                 pass
-        mm = _feed_side_mm(entry)
-        if mm is not None:
-            entry["mm"] = mm
         if entry:
             out[side] = entry
     return out
@@ -4735,7 +4752,7 @@ def _cycle_run_step(step_id: str, params: dict) -> bool:
         flat = _motion_data_flat(_MOTION_DATA)
         return _motion_cmd_serial_ok(_cycle_motion_send(flat, timeout_s=2.0), "E043")
 
-    # Step 2. Cerrar holder+encoder, estabilizar, RESET #1 (antes de alimentar).
+    # Step 2. Cerrar holder+encoder, estabilizar, marcar referencia (set0).
     if step_id == "2":
         if not _plc_cmd_ok(_cycle_plc_send({"op": "valve", "name": "holder_encoder", "on": True}), "E019"):
             return False
@@ -4746,7 +4763,7 @@ def _cycle_run_step(step_id: str, params: dict) -> bool:
             if code:
                 _cycle_fail(code)
             return False
-        return _cycle_encoder_reset()
+        return _cycle_encoder_set0()
 
     # Step 3. Alimentar. CAPTURA A = counts cuando el láser detuvo el servo.
     if step_id == "3":
@@ -4767,19 +4784,25 @@ def _cycle_run_step(step_id: str, params: dict) -> bool:
         _set_machine_ui(feed=feed)
         global _PIECE_BLOWER_MM, _PIECE_FEED
         prog = _target_length_mm()
-        _PIECE_BLOWER_MM = prog if prog > 0 else _feed_dict_length_mm(feed)
+        _PIECE_BLOWER_MM = prog if prog > 0 else None
         _PIECE_FEED = {"R": feed.get("R"), "L": feed.get("L")}
         return True
 
-    # Step 4. Activar pinzas; abrir holder; RESET #2 antes de mover el LM Guide.
+    # Step 4. Activar pinzas; abrir holder. Misma referencia de encoder (sin set0/reset).
     # El encoder neumático permanece cerrado. El holder se vuelve a cerrar antes del corte.
+    # Experimental: además ServoCAN "Suelto" (Duro off) antes de mover el LM Guide.
     if step_id == "4":
         if not _plc_cmd_ok(_cycle_plc_send({"op": "valve", "name": "gripper", "on": True}), "E019"):
             return False
         # Desde el cierre: si falla el resto del ciclo, retener (no abrir).
         _gripper_holding_set(True)
-        if not _plc_cmd_ok(_cycle_plc_send({"op": "valve", "name": "holder", "on": False}), "E019"):
+        if not _plc_cmd_ok(
+            _cycle_plc_send({"op": "valve", "name": "holder", "on": False}), "E019"
+        ):
             return False
+        if EXPERIMENTAL_SERVO_OFF:
+            if not _cycle_feeder_servo(False):
+                return False
         if not _cycle_sleep_ms(int(params["ms_after_grip_release"])):
             return False
         ok_hw, code = _plc_confirm(
@@ -4789,9 +4812,9 @@ def _cycle_run_step(step_id: str, params: dict) -> bool:
             if code:
                 _cycle_fail(code)
             return False
-        return _cycle_encoder_reset()
+        return True
 
-    # Step 5. LM Guide a corte; al reached, CAPTURA B de counts.
+    # Step 5. LM Guide a corte; CAPTURA B con la misma referencia del FeedStage.
     if step_id == "5":
         plan = _active_cut_plan()
         if plan is None:
@@ -4810,6 +4833,7 @@ def _cycle_run_step(step_id: str, params: dict) -> bool:
         if not _cycle_sleep_ms(int(params["ms_lm_at_cut"])):
             return False
         global _PIECE_ENC_AT_LM
+        # Misma base que STEP 03 (sin set0/reset entre medias).
         _PIECE_ENC_AT_LM = _cycle_capture_encoder_counts()
         return True
 
@@ -4885,6 +4909,7 @@ def _cycle_run_step(step_id: str, params: dict) -> bool:
         return pulse_cutter(second_valve, str(plan["second_label"]))
 
     # Step 7. LM Guide al depósito del montón; liberar pinzas; esperar.
+    # Experimental: al depositar, volver a habilitar ServoCAN ("Duro").
     if step_id == "7":
         pos = _active_cut_deposit()
         if pos is None:
@@ -4896,6 +4921,9 @@ def _cycle_run_step(step_id: str, params: dict) -> bool:
             return False
         if not _cycle_sleep_ms(int(params["ms_lm_at_discharge"])):
             return False
+        if EXPERIMENTAL_SERVO_OFF:
+            if not _cycle_feeder_servo(True):
+                return False
         # Error en el tramo con pieza sujeta: no abrir pinzas (retención).
         if _cycle_should_abort():
             return False
@@ -5127,11 +5155,11 @@ def _overlap_start_holder(params: dict) -> None:
         if not ok_hw:
             _overlap_fail_holder(code or "E010")
             return
-        # Holder/encoder cerrados: reset antes de alimentar (mismo orden que el paso 2).
-        sent_enc = _cycle_motion_send({"op": "encoder_reset"}, timeout_s=2.0)
+        # Holder/encoder cerrados: marca relativa antes de alimentar (mismo orden que paso 2).
+        sent_enc = _cycle_motion_send({"op": "encoder_set0", "side": "both"}, timeout_s=2.0)
         if _OVERLAP["gen"] != gen:
             return
-        if not _motion_cmd_ok(sent_enc, "encoder_reset"):
+        if not _motion_cmd_ok(sent_enc, "encoder_set0"):
             _overlap_fail_holder(sent_enc.get("code") or "E043")
             return
         _OVERLAP["holder_ready"].set()
@@ -5261,7 +5289,7 @@ def _overlap_accept_feed(replies) -> bool:
     _OVERLAP["feed_done"] = True
     _OVERLAP["feed"] = feed
     prog = _target_length_mm()
-    _OVERLAP["blower_mm"] = prog if prog > 0 else _feed_dict_length_mm(feed)
+    _OVERLAP["blower_mm"] = prog if prog > 0 else None
     _set_machine_ui(feed=feed, paralelo_id="")
     nxt = int(_LOT["cycles_done"]) + 2
     total = int(_LOT["cycles_total"])
@@ -8261,11 +8289,6 @@ def _encoder_from_status(replies):
                     item["counts"] = abs(int(block["counts_live"]))
                 except (TypeError, ValueError):
                     pass
-            # mm derivado solo si ya hay counts reales (HMI/compat).
-            # No aceptar mm_live/mm_off: eso es la ruta con fórmula del MCU viejo.
-            mm = _feed_side_mm(item)
-            if mm is not None:
-                item["mm"] = mm
             if "laser" in block:
                 item["laser"] = bool(block.get("laser"))
             if "joint" in block:
@@ -8286,6 +8309,7 @@ def motion_status():
     lm_servo_on = None
     lm_homed = None
     feeder_ready = {"R": None, "L": None}
+    feeder_servo_on = {"R": None, "L": None}
     safety = None
     for raw in reversed(sent.get("replies") or []):
         try:
@@ -8297,6 +8321,8 @@ def motion_status():
             lm_homed = status_reply.get("lm_homed")
             feeder_ready["R"] = status_reply.get("feeder_r_ready")
             feeder_ready["L"] = status_reply.get("feeder_l_ready")
+            feeder_servo_on["R"] = status_reply.get("feeder_r_servo_on")
+            feeder_servo_on["L"] = status_reply.get("feeder_l_servo_on")
             safety = status_reply.get("safety")
             break
     encoder = _encoder_from_status(sent.get("replies"))
@@ -8308,6 +8334,7 @@ def motion_status():
             "lm_servo_on": lm_servo_on,
             "lm_homed": lm_homed,
             "feeder_ready": feeder_ready,
+            "feeder_servo_on": feeder_servo_on,
             "safety": safety,
         }
     )
@@ -8846,16 +8873,122 @@ _hydrate_hmi_from_cycle()
 threading.Thread(target=_prefeeder_watch_loop, daemon=True, name="prefeeder_watch").start()
 threading.Thread(target=_prefeeder_boot_lock, daemon=True, name="prefeeder_boot").start()
 
+
+def _terminate_sibling_app_py() -> None:
+    """Cierra otras copias vivas de este app.py (no puede limpiar zombies de Windows)."""
+    me = os.getpid()
+    here = str(Path(__file__).resolve().parent).lower()
+    try:
+        raw = subprocess.check_output(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" "
+                "| Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress",
+            ],
+            text=True,
+            timeout=15,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        return
+    if not raw.strip():
+        return
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return
+    if isinstance(data, dict):
+        data = [data]
+    for row in data:
+        pid = int(row.get("ProcessId") or 0)
+        cmd = (row.get("CommandLine") or "").lower()
+        cmd_norm = cmd.replace("/", "\\")
+        if pid in (0, me) or "app.py" not in cmd_norm:
+            continue
+        if here.replace("/", "\\") not in cmd_norm:
+            continue
+        try:
+            r = subprocess.run(
+                ["taskkill", "/F", "/PID", str(pid)],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if r.returncode == 0:
+                print(f"[HMI] Cerrada instancia previa PID {pid}", flush=True)
+            else:
+                print(
+                    f"[HMI] PID {pid} no se pudo cerrar (posible zombie de Windows).",
+                    flush=True,
+                )
+        except Exception:
+            pass
+
+
+def _port_free_exclusive(host: str, port: int) -> bool:
+    """True si este proceso puede reclamar el puerto en exclusivo (Windows)."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        sock.bind((host, port))
+        return True
+    except OSError:
+        return False
+    finally:
+        sock.close()
+
+
+def _pick_hmi_port(host: str, preferred: int = 5000, span: int = 5) -> int:
+    """Elige un puerto libre. Si 5000 está zombie, avanza al siguiente."""
+    _terminate_sibling_app_py()
+    bind_host = "0.0.0.0" if host in ("0.0.0.0", "::", "") else host
+    for port in range(preferred, preferred + span):
+        if _port_free_exclusive(bind_host, port):
+            if port != preferred:
+                print(
+                    f"[HMI] Puerto {preferred} bloqueado (instancia zombie). "
+                    f"Usando {port}. Abre http://127.0.0.1:{port}/",
+                    flush=True,
+                )
+            return port
+    print(
+        f"[HMI] No hay puerto libre en {preferred}–{preferred + span - 1}. "
+        "Reinicia Windows para liberar el socket zombie.",
+        flush=True,
+    )
+    sys.exit(1)
+
+
+def _harden_wsgi_bind() -> None:
+    """Sin SO_REUSEADDR: evita dos listeners en el mismo puerto (HMI en blanco)."""
+    BaseWSGIServer.allow_reuse_address = False
+    _orig_bind = BaseWSGIServer.server_bind
+
+    def _bind_exclusive(self):
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        return _orig_bind(self)
+
+    BaseWSGIServer.server_bind = _bind_exclusive  # type: ignore[method-assign]
+
+
 if __name__ == "__main__":
     # Sin una línea por cada GET de sondeo del HMI (~400–800 ms).
     # use_reloader=False: el reloader mata el hilo del ciclo a mitad de un
     # lmguide_move / feed_stage y al reiniciar deja la HMI en «En espera»
     # sin código de error (estado en RAM se pierde).
+    _hmi_host = "0.0.0.0"
+    _hmi_port = _pick_hmi_port(_hmi_host, preferred=5000)
+    _harden_wsgi_bind()
     app.run(
         debug=True,
         use_reloader=False,
         threaded=True,
-        host="0.0.0.0",
-        port=5000,
+        host=_hmi_host,
+        port=_hmi_port,
         request_handler=_QuietRequestHandler,
     )

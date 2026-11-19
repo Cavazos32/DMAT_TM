@@ -372,12 +372,13 @@
                 <div class="motion-fieldset__actions">
                   <button type="button" class="btn btn-feeder" data-motion-op="motion_hw_init">Preparar equipos</button>
                   <button type="button" class="btn btn-feeder btn-feeder--secondary" data-motion-op="feeder_init">Solo alimentadores</button>
+                  <button type="button" class="btn btn-manual" id="feederServoToggle" data-motion-op="feeder_servo" aria-pressed="false">Suelto</button>
                 </div>
                 <div class="motion-side">
                   <p class="motion-side__title">Lado R</p>
                   <div class="motion-fieldset__row">
-                    <label class="motion-field">Velocidad (mm/s)
-                      <input type="number" step="0.1" data-motion-path="feeder.R.profile_velocity_pps" data-motion-unit="feed_mms">
+                    <label class="motion-field">Velocidad (RPM)
+                      <input type="number" step="1" min="0" data-motion-path="feeder.R.profile_velocity_pps" data-motion-unit="feed_rpm">
                     </label>
                     <label class="motion-field">Compensación (mm)
                       <input type="number" step="0.01" data-motion-path="feeder.R.compensation_mm">
@@ -388,8 +389,8 @@
                 <div class="motion-side">
                   <p class="motion-side__title">Lado L</p>
                   <div class="motion-fieldset__row">
-                    <label class="motion-field">Velocidad (mm/s)
-                      <input type="number" step="0.1" data-motion-path="feeder.L.profile_velocity_pps" data-motion-unit="feed_mms">
+                    <label class="motion-field">Velocidad (RPM)
+                      <input type="number" step="1" min="0" data-motion-path="feeder.L.profile_velocity_pps" data-motion-unit="feed_rpm">
                     </label>
                     <label class="motion-field">Compensación (mm)
                       <input type="number" step="0.01" data-motion-path="feeder.L.compensation_mm">

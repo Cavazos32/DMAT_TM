@@ -121,7 +121,7 @@
   let syncingModelSelect = false;
   let motionStepsPerMm = 770 / 45;
   let motionPuuSign = -1;
-  let motionFeedStepsPerMm = 3600 / 55;
+  let motionFeedShaftIncPerRev = 10000;  // DSY 6091:02
   let motionEncPollTimer = null;
   let motionEncPollBusy = false;
   let motionCommandInFlight = false;
@@ -599,6 +599,10 @@
     if (!btn) return;
     if (btn.getAttribute("data-motion-op") === "lmguide_servo") {
       btn.textContent = on ? "Encendido" : "Apagado";
+      return;
+    }
+    if (btn.getAttribute("data-motion-op") === "feeder_servo") {
+      btn.textContent = on ? "Duro" : "Suelto";
       return;
     }
     if (btn.hasAttribute("data-plc-op")) {
@@ -1747,23 +1751,17 @@
     const steps = Number(data.steps_per_mm);
     if (Number.isFinite(steps) && steps > 0) motionStepsPerMm = steps;
     if (data.puu_sign === 1 || data.puu_sign === -1) motionPuuSign = data.puu_sign;
-    const feed = Number(data.feed_steps_per_mm);
-    if (Number.isFinite(feed) && feed > 0) motionFeedStepsPerMm = feed;
+    const shaft = Number(data.feed_shaft_inc_per_rev);
+    if (Number.isFinite(shaft) && shaft > 0) motionFeedShaftIncPerRev = shaft;
   }
 
-  function feedMmToCounts(mm) {
-    return Math.round(Number(mm) * motionFeedStepsPerMm);
+  function feedRpmToPps(rpm) {
+    return Math.round(Math.round(Number(rpm)) * motionFeedShaftIncPerRev / 60);
   }
 
-  function feedCountsToMmText(counts) {
-    const mm = Number(counts) / (motionFeedStepsPerMm || 1);
-    const target = Math.round(Number(counts));
-    for (let d = 1; d <= 4; d++) {
-      const f = Math.pow(10, d);
-      const shown = Math.round(mm * f) / f;
-      if (Math.round(shown * motionFeedStepsPerMm) === target) return String(shown);
-    }
-    return String(Math.round(mm * 10000) / 10000);
+  function feedPpsToRpmText(pps) {
+    const rpm = Math.round((Number(pps) * 60) / (motionFeedShaftIncPerRev || 1));
+    return String(Number.isFinite(rpm) ? rpm : 0);
   }
 
   function motionMmToPuu(mm) {
@@ -1804,8 +1802,8 @@
         input.value = motionFormatMm(val);
         return;
       }
-      if (unit === "feed_mms" || unit === "feed_mm") {
-        input.value = feedCountsToMmText(val);
+      if (unit === "feed_rpm") {
+        input.value = feedPpsToRpmText(val);
         return;
       }
       input.value = String(val);
@@ -1834,7 +1832,7 @@
       }
       const unit = input.getAttribute("data-motion-unit");
       if (unit === "mm") num = motionMmToPuu(num);
-      if (unit === "feed_mms" || unit === "feed_mm") num = feedMmToCounts(num);
+      if (unit === "feed_rpm") num = feedRpmToPps(num);
       setByPath(tune, path, num);
     });
     return tune;
@@ -1880,6 +1878,14 @@
 
   function latchLmServo(on) {
     const btn = document.getElementById("lmServoToggle");
+    if (!btn) return;
+    btn.setAttribute("aria-pressed", on ? "true" : "false");
+    btn.classList.toggle("is-active", !!on);
+    setToggleLabel(btn, on);
+  }
+
+  function latchFeederServo(on) {
+    const btn = document.getElementById("feederServoToggle");
     if (!btn) return;
     btn.setAttribute("aria-pressed", on ? "true" : "false");
     btn.classList.toggle("is-active", !!on);
@@ -1973,6 +1979,13 @@
       if (data && data.command_ok === true) latchLmServo(on);
       return;
     }
+    if (op === "feeder_servo") {
+      const on = btn.getAttribute("aria-pressed") !== "true";
+      extra.on = on;
+      const data = await sendMotionOp(op, extra);
+      if (data && data.command_ok === true) latchFeederServo(on);
+      return;
+    }
     if (op === "lmguide_init") {
       const data = await sendMotionOp(op);
       if (data && data.command_ok === true) latchLmServo(true);
@@ -1980,7 +1993,15 @@
     }
     if (op === "motion_hw_init") {
       const data = await sendMotionOp(op);
-      if (data && data.command_ok === true) latchLmServo(true);
+      if (data && data.command_ok === true) {
+        latchLmServo(true);
+        latchFeederServo(true);
+      }
+      return;
+    }
+    if (op === "feeder_init") {
+      const data = await sendMotionOp(op);
+      if (data && data.command_ok === true) latchFeederServo(true);
       return;
     }
     if (op === "lmguide_move") {
@@ -2054,6 +2075,13 @@
       if (data.ok && data.sent) {
         motionShowEncoder(data.encoder);
         if (typeof data.lm_servo_on === "boolean") latchLmServo(data.lm_servo_on);
+        if (data.feeder_servo_on) {
+          const rOn = data.feeder_servo_on.R === true;
+          const lOn = data.feeder_servo_on.L === true;
+          if (data.feeder_servo_on.R != null || data.feeder_servo_on.L != null) {
+            latchFeederServo(rOn && lOn);
+          }
+        }
       }
     } catch (err) {
       motionShowEncoder(null);
