@@ -13,7 +13,7 @@ CATALOG: dict[str, tuple[str, str]] = {
     "E000": ("Sistema", "Error desconocido."),
     "E001": ("Orquestador", "No se puede alimentar: holder y encoder deben estar activos (paso 2)."),
     "E002": ("Orquestador", "No se pueden accionar pinzas: falta alimentación L/R validada (paso 3)."),
-    "E003": ("Orquestador", "No se puede ir a corte: pinzas activas, holder liberado y encoder cerrado (paso 4)."),
+    "E003": ("Orquestador", "No se puede ir a corte: pinzas, holder y encoder deben estar activos (paso 4)."),
     "E004": ("Orquestador", "No se puede cortar: LM Guide debe estar en posición de corte (paso 5)."),
     "E005": ("Orquestador", "No se puede descargar: el corte debe haberse completado (paso 6)."),
     "E006": ("Orquestador", "No se puede ir a home/blower: falta descarga de pieza (paso 7)."),

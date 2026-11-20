@@ -237,6 +237,31 @@ static bool canSendRaw(uint32_t cobId, const uint8_t* data, uint8_t len) {
   return twai_transmit(&msg, pdMS_TO_TICKS(80)) == ESP_OK;
 }
 
+static bool canSdoDownload(uint8_t node, uint16_t index, uint8_t sub, const uint8_t data[8]) {
+  const uint32_t expectedRx = SERVO_CAN_COB_RX(node);
+  const TickType_t rxTicks = pdMS_TO_TICKS(5);
+
+  // Una transmisión TWAI correcta solo confirma que el ESP32 encoló la trama.
+  // Esperar 0x60 confirma que el servo realmente aplicó la escritura.
+  for (uint8_t attempt = 0; attempt < 2; attempt++) {
+    if (!canSendRaw(SERVO_CAN_COB_TX(node), data, 8)) continue;
+
+    uint32_t t0 = millis();
+    while (millis() - t0 < FEEDER_SDO_CONFIRM_MS) {
+      feederPoll();
+      twai_message_t rx;
+      if (twai_receive(&rx, rxTicks) != ESP_OK) continue;
+      if ((rx.identifier & 0x7FFu) != expectedRx || rx.data_length_code < 4) continue;
+      if (rx.data[1] != (uint8_t)(index & 0xFF) ||
+          rx.data[2] != (uint8_t)(index >> 8) || rx.data[3] != sub)
+        continue;
+      if (rx.data[0] == 0x60) return true;
+      if (rx.data[0] == 0x80) break;
+    }
+  }
+  return false;
+}
+
 static bool canSdoDownloadU32(uint8_t node, uint16_t index, uint8_t sub, uint32_t value) {
   uint8_t d[8] = {0x23,
                   (uint8_t)(index & 0xFF),
@@ -246,7 +271,7 @@ static bool canSdoDownloadU32(uint8_t node, uint16_t index, uint8_t sub, uint32_
                   (uint8_t)((value >> 8) & 0xFF),
                   (uint8_t)((value >> 16) & 0xFF),
                   (uint8_t)((value >> 24) & 0xFF)};
-  return canSendRaw(SERVO_CAN_COB_TX(node), d, 8);
+  return canSdoDownload(node, index, sub, d);
 }
 
 static bool canSdoDownloadU16(uint8_t node, uint16_t index, uint8_t sub, uint16_t value) {
@@ -258,12 +283,12 @@ static bool canSdoDownloadU16(uint8_t node, uint16_t index, uint8_t sub, uint16_
                   (uint8_t)((value >> 8) & 0xFF),
                   0,
                   0};
-  return canSendRaw(SERVO_CAN_COB_TX(node), d, 8);
+  return canSdoDownload(node, index, sub, d);
 }
 
 static bool canSdoDownloadU8(uint8_t node, uint16_t index, uint8_t sub, uint8_t value) {
   uint8_t d[8] = {0x2F, (uint8_t)(index & 0xFF), (uint8_t)(index >> 8), sub, value, 0, 0, 0};
-  return canSendRaw(SERVO_CAN_COB_TX(node), d, 8);
+  return canSdoDownload(node, index, sub, d);
 }
 
 static bool canNmt(uint8_t cmd) {

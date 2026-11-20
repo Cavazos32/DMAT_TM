@@ -122,7 +122,6 @@ _CYCLE_LATCH = {
     "holder_encoder_active": False,
     "feed_validated": False,
     "gripper_active": False,
-    "holder_encoder_released": False,
     "lm_at_cut": False,
     "cut_done": False,
     "discharge_done": False,
@@ -218,9 +217,10 @@ _OVERLAP = {
 # El siguiente paso 4 solo cierra: home ya está hecho y las pinzas siguen abiertas.
 _STEP4_CLOSES = False
 
-# MODO EXPERIMENTAL. En el paso 4 se abre el holder (igual que el camino normal) y
-# además se pone ServoCAN en "Suelto" (feeder_servo_off / Duro apagado) antes de
-# mover el LM Guide. Al depositar (paso 7) se vuelve a "Duro" (feeder_servo_on).
+# MODO EXPERIMENTAL. En el paso 4 se pone ServoCAN en "Suelto"
+# (feeder_servo_off / Duro apagado) y el holder permanece cerrado durante el
+# movimiento del LM Guide. Al depositar (paso 7) se vuelve a "Duro"
+# (feeder_servo_on).
 # Para probar: True. Para desactivar: False.
 EXPERIMENTAL_SERVO_OFF = True
 
@@ -439,6 +439,32 @@ def _lot_would_need_another_after_credit() -> bool:
 
 def _lot_pieces_done_total() -> int:
     return int(_LOT.get("pieces_r") or 0) + int(_LOT.get("pieces_l") or 0)
+
+
+def _lot_resume_pending() -> bool:
+    """Pedido aún no terminado (aunque active haya quedado en False tras error/purga)."""
+    if _LOT.get("active") or _LOT.get("tray_wait"):
+        return True
+    qty = int(_LOT.get("qty_total") or 0)
+    tr = int(_LOT.get("target_r") or 0)
+    tl = int(_LOT.get("target_l") or 0)
+    if qty <= 0 or (tr <= 0 and tl <= 0):
+        return False
+    if _lot_targets_met():
+        return False
+    return True
+
+
+def _lot_ensure_active_for_resume() -> bool:
+    """Reactiva el lote sin tocar pieces_r/l ni cycles_done. True si el lote queda abierto."""
+    if _LOT.get("tray_wait"):
+        return True
+    if _LOT.get("active"):
+        return True
+    if not _lot_resume_pending():
+        return False
+    _LOT["active"] = True
+    return True
 
 
 def _lot_init_piece_targets(qty: int, sides: str) -> None:
@@ -4537,9 +4563,8 @@ def _cycle_latch_after_completed_index(completed_idx: int) -> None:
     if completed_idx >= 2:
         _CYCLE_LATCH["feed_validated"] = True
     if completed_idx >= 3:
-        # Holder abierto solo para mover el LM; encoder cerrado. (Igual en experimental.)
-        _CYCLE_LATCH["holder_encoder_active"] = False
-        _CYCLE_LATCH["holder_encoder_released"] = True
+        # Holder y encoder permanecen cerrados durante el movimiento del LM.
+        _CYCLE_LATCH["holder_encoder_active"] = True
         _CYCLE_LATCH["gripper_active"] = True
     if completed_idx >= 4:
         _CYCLE_LATCH["lm_at_cut"] = True
@@ -4572,14 +4597,11 @@ def _cycle_assert_preconditions(step_index: int) -> bool:
             return False
 
     if step_id == "5":
-        if not _CYCLE_LATCH["gripper_active"] or not _CYCLE_LATCH["holder_encoder_released"]:
-            _cycle_fail("E003")
-            return False
-        if _CYCLE_LATCH["holder_encoder_active"]:
+        if not _CYCLE_LATCH["gripper_active"] or not _CYCLE_LATCH["holder_encoder_active"]:
             _cycle_fail("E003")
             return False
         ok_hw, code = _plc_confirm(
-            {"gripper": True, "holder": False, "encoder": True}
+            {"gripper": True, "holder": True, "encoder": True}
         )
         if not ok_hw:
             if code:
@@ -4788,25 +4810,21 @@ def _cycle_run_step(step_id: str, params: dict) -> bool:
         _PIECE_FEED = {"R": feed.get("R"), "L": feed.get("L")}
         return True
 
-    # Step 4. Activar pinzas; abrir holder. Misma referencia de encoder (sin set0/reset).
-    # El encoder neumático permanece cerrado. El holder se vuelve a cerrar antes del corte.
-    # Experimental: además ServoCAN "Suelto" (Duro off) antes de mover el LM Guide.
+    # Step 4. Activar pinzas y poner ServoCAN "Suelto". Holder y encoder neumático
+    # permanecen cerrados durante el movimiento del LM Guide.
+    # Misma referencia de encoder (sin set0/reset).
     if step_id == "4":
         if not _plc_cmd_ok(_cycle_plc_send({"op": "valve", "name": "gripper", "on": True}), "E019"):
             return False
         # Desde el cierre: si falla el resto del ciclo, retener (no abrir).
         _gripper_holding_set(True)
-        if not _plc_cmd_ok(
-            _cycle_plc_send({"op": "valve", "name": "holder", "on": False}), "E019"
-        ):
-            return False
         if EXPERIMENTAL_SERVO_OFF:
             if not _cycle_feeder_servo(False):
                 return False
         if not _cycle_sleep_ms(int(params["ms_after_grip_release"])):
             return False
         ok_hw, code = _plc_confirm(
-            {"gripper": True, "holder": False, "encoder": True}
+            {"gripper": True, "holder": True, "encoder": True}
         )
         if not ok_hw:
             if code:
@@ -6023,14 +6041,14 @@ def _cycle_resume() -> tuple[bool, str]:
     else:
         _joint_latch_clear()
     idx = int(_MACHINE_STATE.get("ciclo_paso_indice") or 0)
-    lot_open = bool(_LOT["active"])
+    # Tras error/purga active puede haberse perdido con el pedido intacto.
+    # Reactivar sin _lot_init (no borrar pieces_r/l). Nunca lanzar worker sin lote.
+    lot_open = _lot_ensure_active_for_resume()
     en_curso = bool(_MACHINE_STATE.get("ciclo_en_curso"))
-    # Pausa limpia: reanuda el paso guardado. Tras error+purga, _rearm_piece
-    # ya dejó índice 0; cycles_done no se toca aquí.
-    if not lot_open and idx <= 0 and not en_curso:
+    # Sin lote recuperable: Start limpio. Con lote: continuar contadores.
+    if not lot_open:
         return _cycle_start()
-    if lot_open and not en_curso:
-        # Defensa: el lote sigue, aunque el flag en_curso se haya perdido.
+    if not en_curso:
         en_curso = True
     ready, link_err = _links_ready_for_cycle()
     if not ready:
@@ -6075,7 +6093,11 @@ def _cycle_resume() -> tuple[bool, str]:
             mensaje="Reanudando secuencia.",
             en_curso=True,
         )
-        _push_event("Ciclo reanudado.")
+        _push_event(
+            "Ciclo reanudado. "
+            f"QTY {int(_LOT.get('qty_total') or 0)} | "
+            f"R{int(_LOT.get('pieces_r') or 0):03d}/L{int(_LOT.get('pieces_l') or 0):03d}."
+        )
     return True, ""
 
 
@@ -6481,7 +6503,7 @@ def _checklist_log(empleado: str) -> None:
 
 
 def _rearm_piece(mensaje: str) -> None:
-    """Vuelve la pieza al paso 1. No toca cycles_done ni el lote activo."""
+    """Vuelve la pieza al paso 1. No toca cycles_done ni pieces_r/l."""
     global _PIECE_FEED, _PIECE_ENC_AT_LM, _PIECE_BLOWER_MM, _PIECE_TICK0
     _overlap_reset()
     _cycle_latch_reset()
@@ -6489,6 +6511,8 @@ def _rearm_piece(mensaje: str) -> None:
     _PIECE_ENC_AT_LM = {"R": None, "L": None}
     _PIECE_BLOWER_MM = None
     _PIECE_TICK0 = None
+    # Mantener el lote vivo tras error/purga para que Reanudar no arranque en R000.
+    _lot_ensure_active_for_resume()
     _set_machine_ui(
         estado="paused",
         estado_label="Pausa",
