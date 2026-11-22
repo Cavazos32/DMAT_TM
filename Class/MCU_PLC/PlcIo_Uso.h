@@ -66,7 +66,6 @@ static const uint8_t PLC_PIN_OUT_CUTTER_L = 14;
 static const uint8_t PLC_PIN_OUT_GRIPPER  = 16;
 static const uint8_t PLC_PIN_OUT_HOLDER   = 17;
 static const uint8_t PLC_PIN_OUT_ENCODER  = 21;
-static const uint8_t PLC_PIN_OUT_BLOWER   = 4;
 static const uint8_t PLC_PIN_OUT_RESET    = 33;
 
 static const uint8_t PLC_BIT_GRIPPER = (1 << 0);
@@ -86,7 +85,6 @@ static const uint8_t PLC_CMD_GRIPPER         = 0x1B;
 static const uint8_t PLC_CMD_HOLDER          = 0x1C;
 static const uint8_t PLC_CMD_ENCODER_VALVE   = 0x1D;
 static const uint8_t PLC_CMD_RESET           = 0x1E;
-static const uint8_t PLC_CMD_BLOWER          = 0x23;
 static const uint8_t PLC_CMD_HOLDER_ENCODER  = 0x2A;
 static const uint8_t PLC_CMD_CUTTERS         = 0x2B;
 
@@ -132,27 +130,19 @@ static const unsigned long PLC_BOOT_GRACE_MS      = 15000;
 // Durante PLC_BOOT_GRACE_MS no emitir errores de sensor por arranque lento.
 
 // ═══════════════════════════════════════════════════════════════════════════
-// [5] Blower y reset hardware
+// [5] Reset hardware
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// Blower (GPIO 4): distinto a válvulas — nivel HIGH sostenido, luego OFF auto.
-//   BLOWER_ON(durationMs): default 2000 ms, min 200, max 300000.
-//   BLOWER_OFF(): GPIO LOW de inmediato.
+// Blower Dual: MCU Motion (PARAM_PIN_BLOWER), no este MCU.
 //
 // RESET (0x1E, GPIO 33):
-//   Todas las válvulas y blower → LOW; GPIO 33 HIGH durante 100 ms y luego LOW.
-
-#ifndef PLC_BLOWER_DEFAULT_MS
-static const unsigned long PLC_BLOWER_DEFAULT_MS = 2000;
-static const unsigned long PLC_BLOWER_MIN_MS     = 200;
-static const unsigned long PLC_BLOWER_MAX_MS     = 300000;
-#endif
+//   Todas las válvulas → LOW; GPIO 33 HIGH durante 100 ms y luego LOW.
 
 // ═══════════════════════════════════════════════════════════════════════════
 // [6] All off
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// Todas las salidas de válvula y blower pasan a LOW de inmediato.
+// Todas las salidas de válvula pasan a LOW de inmediato.
 
 // ═══════════════════════════════════════════════════════════════════════════
 // [7] Ejemplos numéricos
@@ -166,9 +156,6 @@ static const unsigned long PLC_BLOWER_MAX_MS     = 300000;
 //
 // ── Ejemplo C: Cutters ms=50 ──
 //   GPIO 25/14 HIGH → 50 ms → LOW → reply valve (cortadores false).
-//
-// ── Ejemplo D: Blower 3 s ──
-//   GPIO 4 HIGH; ack blower_on inmediato; LOW al vencer ms o blower_off.
 //
 // ── Ejemplo F: Leer sensor Cutter ──
 //   digitalRead(26) == LOW  →  falla cortador activa (bit Cutter en mask)

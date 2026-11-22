@@ -7,8 +7,9 @@
  *     que PlcIo_Uso.h; los #define evitan una segunda definición.
  *
  * Sin JSON: pines, debounce y límites físicos no se editan en ciclo.
- * Las duraciones de cortador y blower llegan en sus órdenes; aquí se fijan
+ * Las duraciones de cortador llegan en sus órdenes; aquí se fijan
  * únicamente los límites físicos y valores por defecto.
+ * Blower Dual: MCU Motion (PARAM_PIN_BLOWER), no este MCU.
  */
 
 #include <stdint.h>
@@ -27,14 +28,13 @@ static const uint8_t PARAM_PLC_BIT_HOLDER  = (1 << 1);
 static const uint8_t PARAM_PLC_BIT_CUTTER  = (1 << 2);
 static const uint8_t PARAM_PLC_BIT_ENCODER = (1 << 5);
 
-// ── [A] Salidas (válvulas/blower por nivel, reset por pulso) ──────────────
+// ── [A] Salidas (válvulas por nivel, reset por pulso) ─────────────────────
 
 static const uint8_t PARAM_PLC_PIN_OUT_CUTTER_R = 25;
 static const uint8_t PARAM_PLC_PIN_OUT_CUTTER_L = 14;
 static const uint8_t PARAM_PLC_PIN_OUT_GRIPPER  = 16;
 static const uint8_t PARAM_PLC_PIN_OUT_HOLDER   = 17;
 static const uint8_t PARAM_PLC_PIN_OUT_ENCODER  = 21;
-static const uint8_t PARAM_PLC_PIN_OUT_BLOWER   = 4;
 static const uint8_t PARAM_PLC_PIN_OUT_RESET    = 33;
 
 // ── [A] Temporizaciones internas y sensores ────────────────────────────────
@@ -45,12 +45,6 @@ static const uint32_t PARAM_PLC_SETTLE_MAX_MS      = 5000;
 static const uint32_t PARAM_PLC_SENSOR_DEBOUNCE_MS = 150;
 static const uint32_t PARAM_PLC_BOOT_GRACE_MS      = 15000;
 
-// ── [A] Blower (nivel, no pulso de 100 ms) ─────────────────────────────────
-
-static const uint32_t PARAM_PLC_BLOWER_DEFAULT_MS = 2000;
-static const uint32_t PARAM_PLC_BLOWER_MIN_MS     = 200;
-static const uint32_t PARAM_PLC_BLOWER_MAX_MS     = 300000;
-
 // ── [A] Etiquetas lógicas (PlcStates — no son trama serial) ────────────────
 
 static const uint8_t PARAM_PLC_CMD_CUTTER_R       = 0x19;
@@ -59,7 +53,6 @@ static const uint8_t PARAM_PLC_CMD_GRIPPER        = 0x1B;
 static const uint8_t PARAM_PLC_CMD_HOLDER         = 0x1C;
 static const uint8_t PARAM_PLC_CMD_ENCODER_VALVE  = 0x1D;
 static const uint8_t PARAM_PLC_CMD_RESET          = 0x1E;
-static const uint8_t PARAM_PLC_CMD_BLOWER         = 0x23;
 static const uint8_t PARAM_PLC_CMD_HOLDER_ENCODER = 0x2A;
 static const uint8_t PARAM_PLC_CMD_CUTTERS        = 0x2B;
 
@@ -80,7 +73,6 @@ static const uint8_t PARAM_PLC_ERR_ENCODER = 0x22;
 #define PLC_PIN_OUT_GRIPPER  PARAM_PLC_PIN_OUT_GRIPPER
 #define PLC_PIN_OUT_HOLDER   PARAM_PLC_PIN_OUT_HOLDER
 #define PLC_PIN_OUT_ENCODER  PARAM_PLC_PIN_OUT_ENCODER
-#define PLC_PIN_OUT_BLOWER   PARAM_PLC_PIN_OUT_BLOWER
 #define PLC_PIN_OUT_RESET    PARAM_PLC_PIN_OUT_RESET
 
 #define PLC_BIT_GRIPPER PARAM_PLC_BIT_GRIPPER
@@ -94,17 +86,12 @@ static const uint8_t PARAM_PLC_ERR_ENCODER = 0x22;
 #define PLC_SENSOR_DEBOUNCE_MS PARAM_PLC_SENSOR_DEBOUNCE_MS
 #define PLC_BOOT_GRACE_MS      PARAM_PLC_BOOT_GRACE_MS
 
-#define PLC_BLOWER_DEFAULT_MS PARAM_PLC_BLOWER_DEFAULT_MS
-#define PLC_BLOWER_MIN_MS     PARAM_PLC_BLOWER_MIN_MS
-#define PLC_BLOWER_MAX_MS     PARAM_PLC_BLOWER_MAX_MS
-
 #define PLC_CMD_CUTTER_R       PARAM_PLC_CMD_CUTTER_R
 #define PLC_CMD_CUTTER_L       PARAM_PLC_CMD_CUTTER_L
 #define PLC_CMD_GRIPPER        PARAM_PLC_CMD_GRIPPER
 #define PLC_CMD_HOLDER         PARAM_PLC_CMD_HOLDER
 #define PLC_CMD_ENCODER_VALVE  PARAM_PLC_CMD_ENCODER_VALVE
 #define PLC_CMD_RESET          PARAM_PLC_CMD_RESET
-#define PLC_CMD_BLOWER         PARAM_PLC_CMD_BLOWER
 #define PLC_CMD_HOLDER_ENCODER PARAM_PLC_CMD_HOLDER_ENCODER
 #define PLC_CMD_CUTTERS        PARAM_PLC_CMD_CUTTERS
 

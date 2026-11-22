@@ -130,6 +130,21 @@ _CYCLE_LATCH = {
     "cut_done": False,
     "discharge_done": False,
 }
+# Espejo de salidas PLC: lo actualiza la reply/push del esclavo, no un status pedido.
+# known=False si se perdió el COM o aún no hay estado.
+_PLC_MIRROR = {
+    "known": False,
+    "holder": False,
+    "encoder": False,
+    "gripper": False,
+    "cutter_r": False,
+    "cutter_l": False,
+}
+_PLC_MIRROR_LOCK = threading.Lock()
+# Blower vive en Motion; se refleja aquí para la UI manual (panel PLC).
+_MOTION_BLOWER_ON = False
+# Arranque fresco: set_data ya viajó embebido en lmguide_move home.
+_CYCLE_SET_DATA_ON_HOME = False
 # Pinzas cerradas con pieza en proceso (paso 4 → antes de soltar en paso 7).
 # Ante error se retiene; no se re-cierra si ya estaban abiertas.
 _GRIPPER_HOLDING = False
@@ -252,7 +267,7 @@ CYCLE_STEPS = (
     {"id": "5", "label": "LM Guide — posición de corte", "actor": "motion"},
     {"id": "6", "label": "Corte R/L", "actor": "plc"},
     {"id": "7", "label": "Descarga de pieza", "actor": "motion+plc"},
-    {"id": "8", "label": "Home LM Guide + blower", "actor": "motion+plc"},
+    {"id": "8", "label": "ReleasePart — despeje, home y blower", "actor": "motion"},
 )
 
 # ── Registro de producción (una línea por operación; no sustituye [Motion]/[PLC]) ──
@@ -269,7 +284,7 @@ _PROD_STEP_DESC = {
     "5": "LM Guide — corte",
     "6": "Corte R/L",
     "7": "Descarga de pieza",
-    "8": "Regreso Home + blower",
+    "8": "ReleasePart home + blower",
 }
 
 
@@ -1487,6 +1502,27 @@ def _build_motion_lines(op: str, tune: dict, body: dict):
         ]
     if op == "lmguide_stop":
         return tune, ['{"op":"lmguide_stop"}']
+    if op == "blower_on":
+        raw = body.get("ms")
+        ms = 2000 if raw is None or raw == "" else int(raw)
+        if ms < 200:
+            ms = 200
+        if ms > 300000:
+            ms = 300000
+        return tune, [_compact({"op": "blower_on", "ms": ms})]
+    if op == "blower_off":
+        return tune, ['{"op":"blower_off"}']
+    if op == "release_part":
+        payload = {
+            "op": "release_part",
+            "lm_pr_speed_rpm": tune["lmguide"]["pr_speed_rpm"],
+        }
+        if body.get("clear_puu") is not None:
+            payload["clear_puu"] = int(body["clear_puu"])
+        for key in ("blower_delay_ms", "blower_ms", "home_settle_ms"):
+            if body.get(key) is not None:
+                payload[key] = int(body[key])
+        return tune, [_compact(payload)]
     raise ValueError("Orden Motion no reconocida.")
 
 
@@ -1496,6 +1532,8 @@ _MOTION_STATUS_TIMEOUT_S = 3.0
 
 
 def _reply_wait_s(line: str) -> float:
+    if "release_part" in line:
+        return _MOTION_LM_MOVE_TIMEOUT_S * 2.0
     if "lmguide_home" in line or "lmguide_move" in line:
         return _MOTION_LM_MOVE_TIMEOUT_S
     if "motion_hw_init" in line:
@@ -1595,6 +1633,58 @@ def _close_motion_serial() -> None:
             _motion_serial = None
 
 
+def _plc_mirror_invalidate() -> None:
+    with _PLC_MIRROR_LOCK:
+        _PLC_MIRROR["known"] = False
+
+
+def _plc_mirror_apply(msg: dict | None) -> None:
+    """Actualiza banderas desde status/valve reply del PLC."""
+    if not isinstance(msg, dict):
+        return
+    keys = ("holder", "encoder", "gripper", "cutter_r", "cutter_l")
+    if not any(k in msg for k in keys):
+        return
+    with _PLC_MIRROR_LOCK:
+        for key in keys:
+            if key in msg:
+                _PLC_MIRROR[key] = bool(msg[key])
+        _PLC_MIRROR["known"] = True
+
+
+def _plc_mirror_check(expected: dict) -> tuple[bool, str | None]:
+    """Valida salidas contra el espejo local (sin GET status)."""
+    if not _plc_serial_configured():
+        return False, "E017"
+    with _PLC_MIRROR_LOCK:
+        if not _PLC_MIRROR["known"]:
+            return False, "E010"
+        snap = {key: _PLC_MIRROR.get(key) for key in expected}
+    return _plc_verify_logical(snap, expected)
+
+
+def _plc_rx_seed_mirror(ser) -> None:
+    """Tras abrir COM: consume boot/status push y alimenta el espejo."""
+    t_end = time.time() + 0.2
+    while time.time() < t_end:
+        try:
+            n = getattr(ser, "in_waiting", 0) or 0
+        except Exception:
+            break
+        if not n:
+            time.sleep(0.02)
+            continue
+        line = _read_serial_line(ser, 0.08)
+        if not line:
+            break
+        try:
+            msg = json.loads(line)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if msg.get("op") in ("status", "valve"):
+            _plc_mirror_apply(msg)
+
+
 def _close_plc_serial() -> None:
     global _plc_serial
     with _plc_serial_lock:
@@ -1604,6 +1694,7 @@ def _close_plc_serial() -> None:
             except Exception:
                 pass
             _plc_serial = None
+    _plc_mirror_invalidate()
 
 
 def _close_andon_serial() -> None:
@@ -2059,7 +2150,8 @@ def _send_plc_serial(lines):
                 ser.rts = False
                 ser.open()
                 time.sleep(0.05)
-                _serial_rx_flush(ser)
+                # Boot push del PLC (status); no descartar — alimenta el espejo.
+                _plc_rx_seed_mirror(ser)
                 _plc_serial = ser
             ser = _plc_serial
             for line in lines:
@@ -2088,7 +2180,15 @@ def _send_plc_serial(lines):
         with _plc_serial_lock:
             _invalidate_serial_handle(_plc_serial)
             _plc_serial = None
+        _plc_mirror_invalidate()
         return {"sent": False, "reason": str(exc), "replies": replies}
+    for raw in replies:
+        try:
+            msg = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if msg.get("op") in ("status", "valve"):
+            _plc_mirror_apply(msg)
     return {"sent": True, "reason": "", "replies": replies}
 
 
@@ -3537,19 +3637,8 @@ def _build_plc_line(op: str, body: dict) -> dict:
             if settle > 0:
                 command["settle_ms"] = settle
         return command
-    if op == "blower_on":
-        raw = body.get("ms")
-        if raw is None or raw == "":
-            ms = 2000
-        else:
-            ms = int(raw)
-        if ms < 200:
-            ms = 200
-        if ms > 300000:
-            ms = 300000
-        return {"op": "blower_on", "ms": ms}
-    if op == "blower_off":
-        return {"op": "blower_off"}
+    if op == "blower_on" or op == "blower_off":
+        raise ValueError("El blower está en MCU Motion; usa /api/motion/cmd.")
     if op == "all_off":
         return {"op": "all_off"}
     if op == "reset":
@@ -3597,6 +3686,7 @@ def _plc_accept_valve(
         if _cycle_should_abort():
             return False, ""
         return False, "E010"
+    _plc_mirror_apply(reply)
     if not bool(reply.get("ok", True)):
         return False, "E019"
     faults = _plc_fault_codes_ops(reply)
@@ -3705,7 +3795,9 @@ def _plc_status_get() -> dict | None:
     sent = _send_plc_serial(['{"op":"status"}'])
     if not sent.get("sent"):
         return None
-    return _plc_status_from_replies(sent.get("replies"))
+    status = _plc_status_from_replies(sent.get("replies"))
+    _plc_mirror_apply(status)
+    return status
 
 
 def _plc_status_after_command(sent: dict) -> dict | None:
@@ -3723,11 +3815,47 @@ def _plc_wait_ready(timeout_s: float = 3.0) -> dict | None:
     return _plc_status_get()
 
 
+def _motion_blower_send(payload: dict, *, push_log: bool = False) -> dict:
+    """Blower Dual: MCU Motion (GPIO)."""
+    global _MOTION_BLOWER_ON
+    op = str(payload.get("op") or "")
+    try:
+        tune = _load_motion_tune()
+        _tune, lines = _build_motion_lines(op, tune, payload)
+        line = lines[0]
+    except (TypeError, ValueError, OSError, json.JSONDecodeError):
+        line = _compact(payload)
+    sent = _send_motion_serial([line], line_timeout_s=2.0)
+    sent["last_payload"] = payload
+    if not sent.get("sent"):
+        sent["code"] = "E043" if _serial_port("motion") else "E041"
+        if push_log:
+            _push_event(error_codes.format_message(sent["code"]), "error")
+    else:
+        if push_log:
+            _push_event(f"[Motion] {line}")
+        for raw in sent.get("replies") or []:
+            try:
+                msg = json.loads(raw)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if msg.get("op") in ("blower_on", "blower_off", "status", "release_part"):
+                if "blower" in msg:
+                    _MOTION_BLOWER_ON = bool(msg["blower"])
+                elif msg.get("op") == "blower_on":
+                    _MOTION_BLOWER_ON = True
+                elif msg.get("op") == "blower_off":
+                    _MOTION_BLOWER_ON = False
+    return sent
+
+
 def _plc_send_payload(payload: dict, *, push_log: bool = False) -> dict:
     """Envía una orden al MCU PLC."""
     op = str(payload.get("op") or "")
+    if op in ("blower_on", "blower_off"):
+        return _motion_blower_send(payload, push_log=push_log)
     try:
-        if op in ("valve", "blower_on", "blower_off", "all_off", "reset"):
+        if op in ("valve", "all_off", "reset"):
             line = _compact(_build_plc_line(op, payload))
         else:
             line = _compact(payload)
@@ -4478,9 +4606,9 @@ def _cycle_should_abort() -> bool:
 def _cycle_motion_halt_for_error() -> None:
     """Para Motion y blower. No toca pinzas: si hay pieza sujeta, se retiene."""
     if _serial_port("motion"):
-        _send_motion_urgent(['{"op":"feeder_stop"}', '{"op":"lmguide_stop"}'])
-    if _serial_port("plc"):
-        _send_plc_serial([_compact({"op": "blower_off"})])
+        _send_motion_urgent(
+            ['{"op":"feeder_stop"}', '{"op":"lmguide_stop"}', '{"op":"blower_off"}']
+        )
 
 
 def _gripper_holding_set(holding: bool) -> None:
@@ -4581,7 +4709,18 @@ def _serial_reply_ok(sent: dict, op: str, fallback: str) -> bool:
             continue
         if msg.get("op") == op:
             if not bool(msg.get("ok", True)):
-                _cycle_fail("E044" if op in ("lmguide_move", "lmguide_home", "set_tune", "set_data") else fallback)
+                _cycle_fail(
+                    "E044"
+                    if op
+                    in (
+                        "lmguide_move",
+                        "lmguide_home",
+                        "set_tune",
+                        "set_data",
+                        "release_part",
+                    )
+                    else fallback
+                )
                 return False
             return True
     # Espera cortada por Stop/error: no confundir con COM mudo.
@@ -4823,7 +4962,7 @@ def _cycle_assert_preconditions(step_index: int) -> bool:
         if not _CYCLE_LATCH["holder_encoder_active"]:
             _cycle_fail("E001")
             return False
-        ok_hw, code = _plc_confirm({"holder": True, "encoder": True})
+        ok_hw, code = _plc_mirror_check({"holder": True, "encoder": True})
         if not ok_hw:
             if code:
                 _cycle_fail(code)
@@ -4839,7 +4978,7 @@ def _cycle_assert_preconditions(step_index: int) -> bool:
         if not _CYCLE_LATCH["gripper_active"]:
             _cycle_fail("E003")
             return False
-        ok_hw, code = _plc_confirm(
+        ok_hw, code = _plc_mirror_check(
             {"gripper": True, "holder": False, "encoder": True}
         )
         if not ok_hw:
@@ -4975,20 +5114,34 @@ def _cycle_move_lm_mm(mm: float, inject=None, on_line=None) -> bool:
     return _motion_cmd_serial_ok(_cycle_move_lm_send(mm, inject=inject, on_line=on_line), "E043")
 
 
-def _cycle_lm_home_absolute() -> bool:
-    """Mueve el LM Guide a PUU 0 absoluto (no homing mecánico)."""
+def _cycle_lm_home_absolute(*, with_set_data: bool = False) -> bool:
+    """Mueve el LM Guide a PUU 0 absoluto (no homing mecánico).
+
+    with_set_data: embebe campos de ciclo en la misma orden (arranque fresco).
+    """
+    global _CYCLE_SET_DATA_ON_HOME
     tune = _load_motion_tune()
-    return _motion_cmd_serial_ok(
-        _cycle_motion_send(
-            {
-                "op": "lmguide_move",
-                "target": "home",
-                "lm_pr_speed_rpm": tune["lmguide"]["pr_speed_rpm"],
-            },
-            timeout_s=_MOTION_LM_MOVE_TIMEOUT_S,
-        ),
-        "E043",
-    )
+    payload = {
+        "op": "lmguide_move",
+        "target": "home",
+        "lm_pr_speed_rpm": tune["lmguide"]["pr_speed_rpm"],
+    }
+    if with_set_data:
+        flat = _motion_data_flat(_MOTION_DATA)
+        payload["target_length_mm"] = flat.get("target_length_mm")
+        payload["tolerance_mm"] = flat.get("tolerance_mm", 2.0)
+        payload["modelo_id"] = flat.get("modelo_id") or ""
+        payload["measure_comp_mm"] = flat.get("measure_comp_mm", 0.0)
+    sent = _cycle_motion_send(payload, timeout_s=_MOTION_LM_MOVE_TIMEOUT_S)
+    if not _motion_cmd_serial_ok(sent, "E043"):
+        return False
+    if with_set_data:
+        msg = _motion_reply_op(sent, "lmguide_move")
+        _CYCLE_SET_DATA_ON_HOME = bool(msg and msg.get("set_data") is True)
+        if not _CYCLE_SET_DATA_ON_HOME:
+            # Firmware antiguo sin set_data embebido: el paso 1 lo reenvía.
+            _CYCLE_SET_DATA_ON_HOME = False
+    return True
 
 
 def _cycle_encoder_reset() -> bool:
@@ -5032,8 +5185,12 @@ def _cycle_capture_encoder_counts(sent: dict | None = None) -> dict:
 
 
 def _cycle_run_step(step_id: str, params: dict) -> bool:
-    # Step 1. Start — publicar datos de ciclo (modelo, longitud, tolerancia) al MCU Motion.
+    # Step 1. Start — set_data (omitido si ya viajó en el home de arranque fresco).
     if step_id == "1":
+        global _CYCLE_SET_DATA_ON_HOME
+        if _CYCLE_SET_DATA_ON_HOME:
+            _CYCLE_SET_DATA_ON_HOME = False
+            return True
         flat = _motion_data_flat(_MOTION_DATA)
         return _motion_cmd_serial_ok(_cycle_motion_send(flat, timeout_s=2.0), "E043")
 
@@ -5265,7 +5422,7 @@ def _cycle_run_step(step_id: str, params: dict) -> bool:
         _cadence_on_gripper_off()
         return True
 
-    # Step 8. Despeje, regreso a home y blower en ese regreso.
+    # Step 8. ReleasePart: despeje → home + blower (una orden Motion).
     if step_id == "8":
         pos = _active_cut_deposit()
         if pos is None:
@@ -5287,103 +5444,57 @@ def _cycle_run_step(step_id: str, params: dict) -> bool:
         ):
             if not _overlap_arm(params):
                 return False
+
+        blower_ms = _cycle_blower_duration_ms(params)
+        payload = {
+            "op": "release_part",
+            "blower_delay_ms": int(params["ms_blower_delay"]),
+            "blower_ms": blower_ms,
+            "home_settle_ms": int(params["ms_at_home_end"]),
+            "lm_pr_speed_rpm": _load_motion_tune()["lmguide"]["pr_speed_rpm"],
+        }
         if abs(clear_at - deposit) >= 0.05:
-            _push_event(f"Despeje de pinzas: {clear_at:.2f} mm.")
-            feed_inject, feed_line = _overlap_feed_hook()
-            if not _cycle_move_lm_mm(clear_at, inject=feed_inject, on_line=feed_line):
-                return False
-        home_result: dict = {}
-
-        def send_home() -> None:
-            feed_inject, feed_line = _overlap_feed_hook()
-            home_result["sent"] = _cycle_motion_send(
-                {"op": "lmguide_move", "target": "home"},
-                timeout_s=_MOTION_LM_MOVE_TIMEOUT_S,
-                inject=feed_inject,
-                on_line=feed_line,
-            )
-
-        home_thread = threading.Thread(target=send_home, daemon=True)
-        home_thread.start()
-        if not _cycle_sleep_ms(int(params["ms_blower_delay"])):
-            _send_motion_urgent(['{"op":"feeder_stop"}', '{"op":"lmguide_stop"}'])
-            return False
-
-        def _lm_already_home() -> bool:
-            if home_thread.is_alive():
-                return False
-            msg = _motion_reply_op(home_result.get("sent") or {}, "lmguide_move")
-            if msg is not None:
-                return bool(msg.get("ok", True) and msg.get("lm_homed") is True)
-            mst = _motion_status_get()
-            return bool(mst and mst.get("lm_homed") is True)
-
-        # Soplo solo en el regreso. Si ya está en home, no enciende.
-        blower_started = False
-        if not _lm_already_home():
-            blower_ms = _cycle_blower_duration_ms(params)
+            payload["clear_puu"] = _mm_to_puu(clear_at)
             _push_event(
-                f"Blower ON {blower_ms} ms "
-                f"(longitud programada {_cycle_blower_length_mm():.1f} mm; "
-                f"corte al llegar a home)."
+                f"ReleasePart: despeje {clear_at:.2f} mm → home + blower "
+                f"{blower_ms} ms (L {_cycle_blower_length_mm():.1f} mm)."
             )
-            if not _plc_cmd_ok(_cycle_plc_send({"op": "blower_on", "ms": blower_ms}), "E019"):
-                _send_motion_urgent(['{"op":"feeder_stop"}', '{"op":"lmguide_stop"}'])
-                return False
-            blower_started = True
         else:
-            _push_event("LM Guide ya en home — blower omitido.")
+            _push_event(
+                f"ReleasePart: home + blower {blower_ms} ms "
+                f"(L {_cycle_blower_length_mm():.1f} mm)."
+            )
 
-        while home_thread.is_alive():
-            if _cycle_wait_if_paused():
-                _send_motion_urgent(['{"op":"feeder_stop"}', '{"op":"lmguide_stop"}'])
-                _cycle_plc_send({"op": "blower_off"})
-                return False
-            home_thread.join(0.05)
-
+        feed_inject, feed_line = _overlap_feed_hook()
+        sent = _cycle_motion_send(
+            payload,
+            timeout_s=_MOTION_LM_MOVE_TIMEOUT_S * 2.0,
+            inject=feed_inject,
+            on_line=feed_line,
+        )
         if _cycle_should_stop():
+            _send_motion_urgent(
+                ['{"op":"feeder_stop"}', '{"op":"lmguide_stop"}', '{"op":"blower_off"}']
+            )
             return False
-        home_sent = home_result.get("sent") or {}
-        replies = home_sent.get("replies") or []
+        replies = sent.get("replies") or []
         _overlap_ensure_feed_collected(replies, budget_s=4.0)
-        home_ok = _motion_cmd_serial_ok(home_sent, "E043")
-        if home_ok and _OVERLAP["on"] and not _OVERLAP["feed_done"] and not _OVERLAP["feed_sent"]:
-            _overlap_start_feed_task()
-        if not home_ok:
+        if not _motion_cmd_serial_ok(sent, "E043"):
             return False
-
-        home_msg = _motion_reply_op(home_sent, "lmguide_move")
-        home_confirmed = bool(home_msg and home_msg.get("lm_homed") is True)
-        if not home_confirmed:
-            t_home_ok = time.time()
-            while time.time() - t_home_ok < 3.0:
-                if _cycle_wait_if_paused():
-                    _cycle_plc_send({"op": "blower_off"})
-                    return False
-                _overlap_poll_feed(0.15)
-                mst = _motion_status_get()
-                if mst and mst.get("lm_homed") is True:
-                    home_confirmed = True
-                    break
-                time.sleep(0.05)
-        if not home_confirmed:
+        rp = _motion_reply_op(sent, "release_part")
+        if not (rp and rp.get("lm_homed") is True):
             _cycle_fail("E044")
             return False
-
-        # Límite: en home se corta el soplo (no sigue soplando parado en origen).
-        if blower_started:
-            _cycle_plc_send({"op": "blower_off"})
-            _push_event("Blower OFF — LM Guide en home.")
-
-        home_settle_deadline = time.time() + (int(params["ms_at_home_end"]) / 1000.0)
-        while time.time() < home_settle_deadline:
+        if _OVERLAP["on"] and not _OVERLAP["feed_done"] and not _OVERLAP["feed_sent"]:
+            _overlap_start_feed_task()
+        # Settle ya corrió en Motion; poll solape residual breve.
+        t_end = time.time() + 0.05
+        while time.time() < t_end:
             if _cycle_wait_if_paused():
-                _cycle_plc_send({"op": "blower_off"})
+                _send_motion_urgent(['{"op":"blower_off"}'])
                 return False
-            _overlap_poll_feed(0.15)
-            if not _OVERLAP["feed_sent"] and _OVERLAP["on"] and not _OVERLAP["feed_done"]:
-                _overlap_start_feed_task()
-            time.sleep(0.05)
+            _overlap_poll_feed(0.05)
+            time.sleep(0.02)
         if _OVERLAP["feed_error"]:
             return False
         return True
@@ -6000,8 +6111,9 @@ def _piece_log_name() -> str:
 
 def _run_one_piece(start_index: int, started_at: float | None = None) -> bool:
     global _PROD_CTX, _PIECE_TICK0, _CADENCE_RECORDED
-    global _PIECE_FEED, _PIECE_ENC_AT_LM
+    global _PIECE_FEED, _PIECE_ENC_AT_LM, _CYCLE_SET_DATA_ON_HOME
     params = _load_cycle_params()
+    _CYCLE_SET_DATA_ON_HOME = False
     # Régimen = handoff con solape; la cadencia ya ancla en Gripper OFF (perf_counter).
     regime = bool(started_at is not None and start_index > 0 and _PREV_PIECE_END_T is not None)
     fresh = start_index <= 0 and not regime
@@ -6029,7 +6141,7 @@ def _run_one_piece(start_index: int, started_at: float | None = None) -> bool:
             step_id="1",
             step_index=0,
         )
-        if not _cycle_lm_home_absolute():
+        if not _cycle_lm_home_absolute(with_set_data=True):
             return False
     for idx in range(start_index, len(CYCLE_STEPS)):
         step = CYCLE_STEPS[idx]
@@ -6635,9 +6747,9 @@ def _cycle_stop() -> None:
         _CYCLE_CTRL["step_mode"] = False
     _ROUTINE["stop"].set()
     if _serial_port("motion"):
-        _send_motion_urgent(['{"op":"feeder_stop"}', '{"op":"lmguide_stop"}'])
-    if _serial_port("plc"):
-        _send_plc_serial([_compact({"op": "blower_off"})])
+        _send_motion_urgent(
+            ['{"op":"feeder_stop"}', '{"op":"lmguide_stop"}', '{"op":"blower_off"}']
+        )
     if _MACHINE_STATE.get("rutina") == "purga" and not (
         _ROUTINE["thread"] and _ROUTINE["thread"].is_alive()
     ):
@@ -7570,37 +7682,22 @@ def _purge_cut() -> bool:
         return False
 
     _set_routine_ui(mensaje="NO METAS LAS MANOS. Regresando a home.")
-    home_result: dict = {}
-
-    def send_home() -> None:
-        home_result["sent"] = _cycle_motion_send(
-            {"op": "lmguide_move", "target": "home"}, timeout_s=40.0
-        )
-
-    home_thread = threading.Thread(target=send_home, daemon=True)
-    home_thread.start()
-    if not _routine_sleep_ms(int(params["ms_blower_delay"])):
-        _cycle_plc_send({"op": "blower_off"})
+    blower_ms = _cycle_blower_duration_ms(params)
+    sent = _cycle_motion_send(
+        {
+            "op": "release_part",
+            "blower_delay_ms": int(params["ms_blower_delay"]),
+            "blower_ms": blower_ms,
+            "home_settle_ms": int(params["ms_at_home_end"]),
+            "lm_pr_speed_rpm": _load_motion_tune()["lmguide"]["pr_speed_rpm"],
+        },
+        timeout_s=40.0,
+    )
+    if _ROUTINE["stop"].is_set():
+        _send_motion_urgent(['{"op":"blower_off"}', '{"op":"lmguide_stop"}'])
         return False
-    blower_started = False
-    if home_thread.is_alive():
-        blower_ms = _cycle_blower_duration_ms(params)
-        if not sent_ok(_cycle_plc_send({"op": "blower_on", "ms": blower_ms})):
-            return False
-        blower_started = True
-    while home_thread.is_alive():
-        if _ROUTINE["stop"].is_set():
-            _cycle_plc_send({"op": "blower_off"})
-            return False
-        home_thread.join(0.05)
-    home = home_result.get("sent") or {}
-    if not _motion_cmd_ok(home, "lmguide_move") or _ROUTINE["stop"].is_set():
-        _cycle_plc_send({"op": "blower_off"})
-        return False
-    # Límite: en home se corta el soplo.
-    if blower_started:
-        _cycle_plc_send({"op": "blower_off"})
-    if not _routine_sleep_ms(int(params["ms_at_home_end"])):
+    if not _motion_cmd_ok(sent, "release_part"):
+        _send_motion_urgent(['{"op":"blower_off"}'])
         return False
     _purga_leave_holder_encoder_closed()
     return not _ROUTINE["stop"].is_set()
@@ -8988,12 +9085,18 @@ def motion_data():
 @app.route("/api/plc/status", methods=["GET"])
 def plc_status():
     status = _plc_status_get()
+    # Blower vive en Motion; se fusiona para la UI del panel manual.
+    if isinstance(status, dict):
+        status = dict(status)
+        status["blower"] = bool(_MOTION_BLOWER_ON)
+    elif status is None and _serial_port("motion"):
+        status = {"blower": bool(_MOTION_BLOWER_ON)}
     return jsonify(
         {
             "ok": True,
             "sent": bool(_plc_serial_configured() and status is not None),
             "status": status,
-            "active_errors": _plc_active_errors(status),
+            "active_errors": _plc_active_errors(status if isinstance(status, dict) else None),
         }
     )
 
@@ -9002,6 +9105,34 @@ def plc_status():
 def plc_cmd():
     body = request.get_json(silent=True) or {}
     op = (body.get("op") or "").strip()
+    # Blower: MCU Motion (UI del panel PLC sigue usando este endpoint).
+    if op in ("blower_on", "blower_off"):
+        sent = _motion_blower_send({"op": op, **body}, push_log=False)
+        packed = _compact(sent.get("last_payload") or {"op": op})
+        command_ok = None
+        for raw in reversed(sent.get("replies") or []):
+            try:
+                reply = json.loads(raw)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if reply.get("op") == op:
+                command_ok = bool(reply.get("ok", True))
+                break
+        status = _plc_status_get() or {}
+        if isinstance(status, dict):
+            status = dict(status)
+            status["blower"] = bool(_MOTION_BLOWER_ON)
+        return jsonify(
+            {
+                "ok": True,
+                "op": op,
+                "lines": [packed],
+                "command_ok": command_ok,
+                "status": status,
+                "active_errors": _plc_active_errors(status),
+                **sent,
+            }
+        )
     try:
         line = _build_plc_line(op, body)
     except (TypeError, ValueError) as exc:
@@ -9018,8 +9149,11 @@ def plc_cmd():
             command_ok = bool(reply.get("ok", True))
             break
     status = _plc_status_after_command(sent)
-    if sent.get("sent") and op in ("valve", "blower_on", "blower_off", "all_off", "reset"):
+    if sent.get("sent") and op in ("valve", "all_off", "reset"):
         status = _plc_wait_ready(2.5) or status
+    if isinstance(status, dict):
+        status = dict(status)
+        status["blower"] = bool(_MOTION_BLOWER_ON)
     return jsonify(
         {
             "ok": True,

@@ -562,17 +562,163 @@ static void printFeedStageResultJson(const FeedStageResult& r) {
 }
 
 // Ack de movimiento con estado útil (evita status aparte tras lmguide_move).
-static void printLmguideMoveResult(bool ok) {
+static void printLmguideMoveResult(bool ok, bool setDataApplied) {
   gEncoders.update();
   Serial.print(F("{\"op\":\"lmguide_move\",\"ok\":"));
   Serial.print(ok ? "true" : "false");
   Serial.print(F(",\"lm_homed\":"));
   Serial.print(gRt.lmguideHomed ? "true" : "false");
+  if (setDataApplied) {
+    Serial.print(F(",\"set_data\":true"));
+  }
   Serial.print(F(",\"enc_R\":{\"counts\":"));
   Serial.print(encoderCountsOfficial(MOTION_SIDE_R));
   Serial.print(F("},\"enc_L\":{\"counts\":"));
   Serial.print(encoderCountsOfficial(MOTION_SIDE_L));
   Serial.println(F("}}"));
+}
+
+// ── Blower Dual (GPIO Motion) ───────────────────────────────────────────────
+
+static bool gBlowerOn = false;
+static uint32_t gBlowerT0 = 0;
+static uint32_t gBlowerMs = 0;
+
+static void blowerOff() {
+  digitalWrite(PARAM_PIN_BLOWER, LOW);
+  gBlowerOn = false;
+}
+
+static uint32_t blowerOn(uint32_t ms) {
+  if (ms < PARAM_BLOWER_MIN_MS) ms = PARAM_BLOWER_MIN_MS;
+  if (ms > PARAM_BLOWER_MAX_MS) ms = PARAM_BLOWER_MAX_MS;
+  digitalWrite(PARAM_PIN_BLOWER, HIGH);
+  gBlowerOn = true;
+  gBlowerT0 = millis();
+  gBlowerMs = ms;
+  return ms;
+}
+
+static void serviceBlower(uint32_t now) {
+  if (!gBlowerOn) return;
+  if ((uint32_t)(now - gBlowerT0) >= gBlowerMs) blowerOff();
+}
+
+static void initBlowerHw() {
+  pinMode(PARAM_PIN_BLOWER, OUTPUT);
+  digitalWrite(PARAM_PIN_BLOWER, LOW);
+  gBlowerOn = false;
+}
+
+// Home a PUU 0 con blower: delay → ON → OFF al llegar (o al vencer ms).
+static bool releasePartHomeWithBlower(uint32_t blowerDelayMs, uint32_t blowerMs) {
+  gLmAbortRequested = false;
+  gRt.lmguideHomed = false;
+  if (!lmguideIssueMovePr1(0)) return false;
+
+  uint32_t t0 = millis();
+  bool blowerStarted = false;
+
+  while ((uint32_t)(millis() - t0) < PARAM_LM_MOVE_DONE_TIMEOUT_MS) {
+    pollSerial();
+    canServiceRxDrain();
+    jointPoll(millis());
+    serviceBlower(millis());
+
+    if (gLmAbortRequested || safetyIsActive()) {
+      blowerOff();
+      (void)lmguideStop();
+      return false;
+    }
+
+    uint16_t dwo = 0;
+    if (!modbusReadReg16(ASDA_REG_P0_046, &dwo)) {
+      delay(5);
+      continue;
+    }
+
+    bool atTarget = false;
+    if ((dwo & ASDA_DO_BIT_TPOS) != 0) {
+      int32_t pos = 0;
+      if (modbusReadReg32(ASDA_REG_P5_016, &pos) &&
+          lmPositionWithinTol(pos, 0, PARAM_LM_MOVE_TOLERANCE_MM)) {
+        atTarget = true;
+      }
+    }
+
+    uint32_t elapsed = (uint32_t)(millis() - t0);
+    if (!blowerStarted && blowerMs > 0 && elapsed >= blowerDelayMs) {
+      if (atTarget) {
+        // Ya en home antes del retardo: no soplar (mismo criterio que App).
+        gRt.lmguideHomed = true;
+        gRt.lmguideServoOn = true;
+        return true;
+      }
+      (void)blowerOn(blowerMs);
+      blowerStarted = true;
+    }
+
+    if (atTarget) {
+      gRt.lmguideHomed = true;
+      gRt.lmguideServoOn = true;
+      if (blowerStarted) blowerOff();
+      return true;
+    }
+    delay(5);
+  }
+  blowerOff();
+  return false;
+}
+
+static void printReleasePartResult(bool ok) {
+  gEncoders.update();
+  Serial.print(F("{\"op\":\"release_part\",\"ok\":"));
+  Serial.print(ok ? "true" : "false");
+  Serial.print(F(",\"lm_homed\":"));
+  Serial.print(gRt.lmguideHomed ? "true" : "false");
+  Serial.print(F(",\"blower\":"));
+  Serial.print(gBlowerOn ? "true" : "false");
+  Serial.println(F("}"));
+}
+
+static void releasePartRun(const char* line) {
+  gTune.lmguide.prSpeedRpm =
+      lmClampSpeedRpm(jsonReadFloat(line, "lm_pr_speed_rpm", gTune.lmguide.prSpeedRpm));
+
+  uint32_t blowerDelayMs =
+      (uint32_t)jsonReadLong(line, "blower_delay_ms", (long)PARAM_MS_BLOWER_DELAY);
+  uint32_t blowerMs =
+      (uint32_t)jsonReadLong(line, "blower_ms", (long)PARAM_BLOWER_DEFAULT_MS);
+  uint32_t homeSettleMs =
+      (uint32_t)jsonReadLong(line, "home_settle_ms", (long)PARAM_MS_AT_HOME_END);
+
+  long clearPuu = jsonReadLong(line, "clear_puu", LONG_MIN);
+  bool doClear = (clearPuu != LONG_MIN);
+
+  if (doClear) {
+    if (!lmguideMovePr1((int32_t)clearPuu)) {
+      printReleasePartResult(false);
+      return;
+    }
+  }
+
+  if (!releasePartHomeWithBlower(blowerDelayMs, blowerMs)) {
+    printReleasePartResult(false);
+    return;
+  }
+
+  if (homeSettleMs > 0) {
+    uint32_t tSettle = millis();
+    while ((uint32_t)(millis() - tSettle) < homeSettleMs) {
+      pollSerial();
+      canServiceRxDrain();
+      jointPoll(millis());
+      serviceBlower(millis());
+      delay(1);
+    }
+  }
+  blowerOff();
+  printReleasePartResult(true);
 }
 
 // ── LM Guide (ciclo: model/named; HW en ServoLMGuide.h) ───────────────────
@@ -677,6 +823,8 @@ static void printStatusJson() {
   Serial.print(gRt.lmguideServoOn ? "true" : "false");
   Serial.print(F(",\"lm_homed\":"));
   Serial.print(gRt.lmguideHomed ? "true" : "false");
+  Serial.print(F(",\"blower\":"));
+  Serial.print(gBlowerOn ? "true" : "false");
   Serial.print(F(",\"safety\":"));
   Serial.print(safetyIsActive() ? "true" : "false");
   Serial.println(F(",\"mcu\":\"motion\"}"));
@@ -815,6 +963,7 @@ static void handleSerialLine(char* line) {
   if (strstr(line, "\"op\":\"feeder_stop\"")) {
     gFeedAbortRequested = true;
     gLmAbortRequested = true;
+    blowerOff();
     bool ok = feederStopAll();
     Serial.print(F("{\"op\":\"feeder_stop\",\"ok\":"));
     Serial.print(ok ? "true" : "false");
@@ -908,6 +1057,12 @@ static void handleSerialLine(char* line) {
       Serial.println(F("{\"op\":\"lmguide_move\",\"ok\":false,\"error\":\"safety\"}"));
       return;
     }
+    bool setDataApplied = false;
+    if (strstr(line, "target_length_mm") || strstr(line, "tolerance_mm") ||
+        strstr(line, "modelo_id") || strstr(line, "measure_comp_mm")) {
+      applyDataFromJson(line);
+      setDataApplied = true;
+    }
     gTune.lmguide.prSpeedRpm =
         lmClampSpeedRpm(jsonReadFloat(line, "lm_pr_speed_rpm", gTune.lmguide.prSpeedRpm));
     const char* target = "home";
@@ -926,7 +1081,28 @@ static void handleSerialLine(char* line) {
       ok = lmguideMovePr1((int32_t)customPuu);
     else
       ok = lmguideMoveNamed(target);
-    printLmguideMoveResult(ok);
+    printLmguideMoveResult(ok, setDataApplied);
+    return;
+  }
+  if (strstr(line, "\"op\":\"release_part\"")) {
+    if (safetyIsActive()) {
+      Serial.println(F("{\"op\":\"release_part\",\"ok\":false,\"error\":\"safety\"}"));
+      return;
+    }
+    releasePartRun(line);
+    return;
+  }
+  if (strstr(line, "\"op\":\"blower_on\"")) {
+    uint32_t ms = blowerOn((uint32_t)jsonReadLong(line, "ms", (long)PARAM_BLOWER_DEFAULT_MS));
+    Serial.print(F("{\"op\":\"blower_on\",\"ok\":true,\"ms\":"));
+    Serial.print(ms);
+    Serial.print(F(",\"blower\":true"));
+    Serial.println(F("}"));
+    return;
+  }
+  if (strstr(line, "\"op\":\"blower_off\"")) {
+    blowerOff();
+    Serial.println(F("{\"op\":\"blower_off\",\"ok\":true,\"blower\":false}"));
     return;
   }
   if (strstr(line, "\"op\":\"lmguide_jog\"")) {
@@ -949,6 +1125,7 @@ static void handleSerialLine(char* line) {
     return;
   }
   if (strstr(line, "\"op\":\"lmguide_stop\"")) {
+    blowerOff();
     bool ok = lmguideStop();
     Serial.print(F("{\"op\":\"lmguide_stop\",\"ok\":"));
     Serial.print(ok ? "true" : "false");
@@ -1012,6 +1189,7 @@ void setup() {
     }
   }
   initLasersHw();
+  initBlowerHw();
   modbusBeginHw();
 
   motionYieldMs(SERVO_CAN_POWERUP_MS);
@@ -1027,6 +1205,7 @@ void loop() {
 
   uint32_t now = millis();
   jointPoll(now);
+  serviceBlower(now);
   if (now - gLastEncoderPollMs >= PARAM_ENC_POLL_MS) {
     gLastEncoderPollMs = now;
     gEncoders.update();

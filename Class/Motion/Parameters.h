@@ -33,6 +33,12 @@ static const uint32_t PARAM_MS_AT_HOME_END        = 50;
 
 static const float PARAM_DATA_TOLERANCE_MM_DEFAULT = 2.0f;
 
+// ── [A] Blower Dual (GPIO en Motion; pin provisional, cableable) ───────────
+static const int      PARAM_PIN_BLOWER       = 27;
+static const uint32_t PARAM_BLOWER_MIN_MS    = 200;
+static const uint32_t PARAM_BLOWER_MAX_MS    = 300000;
+static const uint32_t PARAM_BLOWER_DEFAULT_MS = 2000;
+
 // ── [A] Encoder OM (pines; lógica en Encoder.h / EncoderPCNT) + láser + joint ─
 
 static const uint32_t PARAM_ENC_POLL_MS = 80;

@@ -1,12 +1,12 @@
 ---
-description: Cortadora de tubo — Firmware y lógica de control (rules.md v0.5)
+description: Cortadora de tubo — Firmware y lógica de control (rules.md v0.6)
 alwaysApply: true
 ---
 
 # rules.md
 # Cortadora de tubo — Firmware y lógica de control
 
-**Estado del documento:** Borrador — v0.5  
+**Estado del documento:** Borrador — v0.6  
 **Proyecto:** Cortadora de tubo dual / espejo  
 **Requisito principal:** Tolerancia de corte de ±2 mm por lado  
 **Alcance:** Firmware, responsabilidades de los MCU, secuencias de control, comunicación y reglas de desarrollo de software.
@@ -42,8 +42,8 @@ La máquina estará compuesta por tres MCU independientes:
 
 | MCU | Responsabilidad |
 |---|---|
-| MCU Motion | Control de servos, alimentación, medición mediante encoders, detección por láser y posicionamiento del LM Guide. |
-| MCU PLC | Control de salidas, interfaz con el PLC físico y lectura de señales de error. |
+| MCU Motion | Control de servos, alimentación, medición mediante encoders, detección por láser, posicionamiento del LM Guide y Blower Dual. |
+| MCU PLC | Control de salidas de válvulas, interfaz con el PLC físico y lectura de señales de error. |
 | MCU Andon | Indicación del estado de la máquina. |
 
 ## 2.1 MCU Motion
@@ -58,6 +58,7 @@ Responsable de todas las operaciones relacionadas con movimiento.
 - **Encoder R:** mide el material alimentado por el servo CAN derecho.
 - **Láser L:** detecta la presencia y el borde del tubo del lado izquierdo.
 - **Láser R:** detecta la presencia y el borde del tubo del lado derecho.
+- **Blower Dual:** GPIO de soplado (pin en Parameters de Motion).
 
 Los servos CAN se inicializan únicamente durante el encendido de la máquina. Durante los ciclos normales, el MCU Motion solamente envía las órdenes de movimiento necesarias; no vuelve a inicializar los servos en cada ciclo.
 
@@ -72,7 +73,7 @@ Los servos CAN se inicializan únicamente durante el encendido de la máquina. D
 5. Validar la longitud medida contra la longitud objetivo y la tolerancia de cada lado.
 6. Posicionar el LM Guide para el corte.
 7. Posicionar el LM Guide para descargar la pieza.
-8. Regresar el LM Guide a posición de origen (home).
+8. Ejecutar el bloque `ReleasePart`: despeje de pinzas, regreso a home y Blower Dual (una orden / una confirmación).
 
 ## 2.2 MCU PLC
 
@@ -89,7 +90,8 @@ El PLC físico coordina las válvulas neumáticas y la lógica asociada de la m�
 | Cutter R | Activación del cortador derecho. |
 | Cutter L | Activación del cortador izquierdo. |
 | Grippers Dual | Activación de las pinzas de ambos lados. |
-| Blower Dual | Activación de los sopladores de ambos lados. |
+
+**Blower Dual** pertenece a MCU Motion, no a MCU PLC.
 
 ### Entradas de error provenientes del PLC físico
 
@@ -106,14 +108,15 @@ La polaridad eléctrica y el detalle de lectura de estas señales quedan pendien
 
 ### Controles manuales para depuración
 
-Se requieren generalmente seis controles manuales:
+Se requieren controles manuales de válvulas PLC:
 
 1. Holder.
 2. Encoder.
 3. Cutter R.
 4. Cutter L.
 5. Grippers Dual.
-6. Blower Dual.
+
+El Blower Dual se prueba desde el control asociado a MCU Motion.
 
 Los controles manuales permiten probar las salidas individualmente.
 
@@ -151,7 +154,7 @@ La conexión del MCU Andon con los demás controladores está contemplada, pero 
 
 # 3. MCU Motion — Bloques funcionales
 
-El MCU Motion tiene dos bloques funcionales principales.
+El MCU Motion tiene tres bloques funcionales principales.
 
 ## Bloque 1 — Alimentación y medición del material
 
@@ -182,9 +185,9 @@ Si un láser no se activa o la medición queda fuera de tolerancia, se considera
 
 **Importante:** La lectura del encoder debe corresponder al movimiento real del alimentador del lado correspondiente.
 
-## Bloque 2 — Posicionamiento del LM Guide
+## Bloque 2 — Posicionamiento del LM Guide (corte y descarga)
 
-**Objetivo:** Posicionar el LM Guide para corte, descarga y regreso.
+**Objetivo:** Posicionar el LM Guide para corte y descarga.
 
 Secuencia:
 
@@ -192,7 +195,6 @@ Secuencia:
 2. Esperar 100 ms.
 3. Mover el LM Guide a la posición de descarga (`X_DISCHARGE`).
 4. Esperar 100 ms.
-5. Regresar el LM Guide a home (`X_HOME`).
 
 Las posiciones son parámetros lógicos, no valores codificados directamente en diferentes partes del firmware.
 
@@ -201,6 +203,22 @@ Sus valores reales quedan pendientes de definición.
 El control y la confirmación de posición se realizarán mediante Modbus. El detalle de comandos y confirmaciones se definirá posteriormente.
 
 El LM Guide es compartido por ambos lados.
+
+## Bloque 3 — ReleasePart (despeje, home y blower)
+
+**Objetivo:** Completar el tramo final del ciclo con una sola orden y una sola confirmación.
+
+Secuencia interna del bloque (`op: release_part`):
+
+1. Mover a despeje de pinzas si aplica (`clear_puu`).
+2. Iniciar el regreso del LM Guide a home (`X_HOME` / PUU 0).
+3. Tras el retardo de 200 ms desde el inicio del regreso, activar Blower Dual.
+4. La duración del blower corresponde a la longitud programada de la pieza.
+5. Al confirmar home, desactivar el blower si sigue activo.
+6. Esperar 50 ms en home.
+7. Responder `release_part` con `ok` y `lm_homed`.
+
+El maestro no orquesta blower ni home por separado en este tramo.
 
 # 4. Ciclo automático de la máquina
 
@@ -269,18 +287,22 @@ Los lados trabajan con la misma longitud objetivo y se espera que terminen en co
 
 La liberación del gripper es la condición de referencia para iniciar la siguiente alimentación cuando se habilite el funcionamiento en paralelo.
 
-## 4.8 Regreso a home y activación del blower
+## 4.8 ReleasePart — despeje, home y blower
 
-1. Ordenar al LM Guide regresar a home / posición cero.
-2. Iniciar el conteo de 200 ms cuando comience el movimiento de regreso.
-3. Después de 200 ms, activar Blower Dual.
-4. La duración de activación del blower corresponde a la longitud programada de la pieza.
-5. El tiempo de activación del blower depende de la longitud de la pieza, no de la llegada del LM Guide a home.
-6. Esperar a que el LM Guide llegue a home.
+El maestro envía una sola orden `release_part` a MCU Motion. Motion ejecuta internamente:
+
+1. Mover a despeje de pinzas si aplica.
+2. Ordenar al LM Guide regresar a home / posición cero.
+3. Iniciar el conteo de 200 ms cuando comience el movimiento de regreso.
+4. Después de 200 ms, activar Blower Dual (GPIO Motion).
+5. La duración de activación del blower corresponde a la longitud programada de la pieza.
+6. Al confirmar home, cortar el blower si sigue activo.
 7. Esperar 50 ms.
-8. Finalizar el ciclo cuando se hayan completado las condiciones correspondientes.
+8. Responder al maestro con `release_part` ok / `lm_homed`.
 
 El retardo de activación de 200 ms y la duración dependiente de la longitud de la pieza son requisitos definidos y no deben modificarse silenciosamente.
+
+Si el LM Guide ya está en home antes del retardo de 200 ms, el blower se omite.
 
 # 5. Manejo de errores y pausa
 
@@ -436,6 +458,10 @@ El firmware debe considerar el tráfico de comunicación y los tiempos de ejecuc
 
 La comunicación entre controladores debe limitarse a la información indispensable: estados generales, peticiones y respuestas necesarias. No todos los MCU necesitan conocer cada detalle interno de los demás.
 
+**Espejo de salidas PLC en el maestro:** el PLC empuja estado al conectar y cada reply `valve` trae el estado GPIO. El maestro mantiene banderas locales y valida precondiciones del ciclo contra ese espejo. No debe pedir `status` en cada paso del ciclo automático. Si se pierde el COM, las banderas pasan a desconocidas hasta recibir de nuevo estado del PLC.
+
+**Arranque Motion:** el home absoluto de arranque fresco puede embeber `set_data` en la misma orden `lmguide_move`; Motion confirma con `set_data:true` en el ack del move.
+
 Interfaces identificadas:
 
 | Origen | Destino | Interfaz | Propósito |
@@ -444,7 +470,8 @@ Interfaces identificadas:
 | MCU Motion | Servo LM Guide | Modbus | Control de posición |
 | MCU Motion | Encoder L/R | Interfaz de hardware | Medición de alimentación |
 | MCU Motion | Láser L/R | Entradas digitales | Detección del borde |
-| MCU PLC | PLC físico | GPIO de salida | Activación de salidas |
+| MCU Motion | Blower Dual | GPIO | Soplado en ReleasePart |
+| MCU PLC | PLC físico | GPIO de salida | Activación de válvulas |
 | PLC físico | MCU PLC | GPIO de entrada | Señales de error |
 | MCU Andon | MCU de control | Por definir | Estado de máquina |
 

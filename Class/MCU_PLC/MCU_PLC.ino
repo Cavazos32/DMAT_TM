@@ -1,10 +1,11 @@
 /*
  * MCU_PLC.ino — MCU PLC (ESP32)
  * Válvulas por nivel: orden → ejecuta (settle/ms) → confirma con estado.
- * Blower por nivel; sensores con debounce.
+ * Sensores con debounce. Blower Dual está en MCU Motion (no aquí).
  * Referencia: PlcIo_Uso.h. Parámetros: Parameters.h.
  *
  * Sin bus hacia el PLC físico. Órdenes por Serial (JSON, una línea).
+ * Al boot empuja status para que el maestro alimente su espejo de salidas.
  */
 
 #include <Arduino.h>
@@ -41,10 +42,6 @@ static uint32_t gSettleMs = 0;
 
 static bool gResetActive = false;
 static uint32_t gResetT0 = 0;
-
-static bool gBlowerOn = false;
-static uint32_t gBlowerT0 = 0;
-static uint32_t gBlowerMs = 0;
 
 static uint8_t gLastRaw = 0;
 static uint8_t gStable = 0;
@@ -115,13 +112,11 @@ static void initIo() {
   const uint8_t outs[] = {
       PLC_PIN_OUT_CUTTER_R, PLC_PIN_OUT_CUTTER_L, PLC_PIN_OUT_GRIPPER,
       PLC_PIN_OUT_HOLDER,   PLC_PIN_OUT_ENCODER,  PLC_PIN_OUT_RESET,
-      PLC_PIN_OUT_BLOWER,
   };
   for (uint8_t i = 0; i < sizeof(outs); i++) {
     pinMode(outs[i], OUTPUT);
   }
   valveOutputsIdle();
-  digitalWrite(PLC_PIN_OUT_BLOWER, LOW);
 
   pinMode(PLC_PIN_IN_CUTTER, INPUT_PULLUP);
   pinMode(PLC_PIN_IN_GRIPPER, INPUT_PULLUP);
@@ -221,28 +216,7 @@ static void serviceTimedCut(uint32_t now) {
   replyValveDone(true);
 }
 
-static void blowerOff() {
-  digitalWrite(PLC_PIN_OUT_BLOWER, LOW);
-  gBlowerOn = false;
-}
-
-static uint32_t blowerOn(uint32_t ms) {
-  if (ms < PLC_BLOWER_MIN_MS) ms = PLC_BLOWER_MIN_MS;
-  if (ms > PLC_BLOWER_MAX_MS) ms = PLC_BLOWER_MAX_MS;
-  digitalWrite(PLC_PIN_OUT_BLOWER, HIGH);
-  gBlowerOn = true;
-  gBlowerT0 = millis();
-  gBlowerMs = ms;
-  return ms;
-}
-
-static void serviceBlower(uint32_t now) {
-  if (!gBlowerOn) return;
-  if ((uint32_t)(now - gBlowerT0) >= gBlowerMs) blowerOff();
-}
-
 static bool allOff() {
-  blowerOff();
   for (uint8_t id = 0; id < PLC_VALVE_COUNT; id++) {
     digitalWrite(kValvePin[id], LOW);
   }
@@ -342,6 +316,7 @@ static void printStatusJson() {
   uint8_t faults = grace ? 0 : reportableFaults();
 
   Serial.print(F("{\"op\":\"status\""));
+  Serial.print(F(",\"mcu\":\"plc\""));
   Serial.print(F(",\"cutter_r\":"));
   printBool(digitalRead(PLC_PIN_OUT_CUTTER_R) == HIGH);
   Serial.print(F(",\"cutter_l\":"));
@@ -352,8 +327,6 @@ static void printStatusJson() {
   printBool(digitalRead(PLC_PIN_OUT_HOLDER) == HIGH);
   Serial.print(F(",\"encoder\":"));
   printBool(digitalRead(PLC_PIN_OUT_ENCODER) == HIGH);
-  Serial.print(F(",\"blower\":"));
-  printBool(gBlowerOn);
   Serial.print(F(",\"timed_cut_busy\":"));
   printBool(gTimedCutActive);
   Serial.print(F(",\"settle_busy\":"));
@@ -423,8 +396,6 @@ static void replyValveDone(bool ok) {
   printBool(digitalRead(PLC_PIN_OUT_HOLDER) == HIGH);
   Serial.print(F(",\"encoder\":"));
   printBool(digitalRead(PLC_PIN_OUT_ENCODER) == HIGH);
-  Serial.print(F(",\"blower\":"));
-  printBool(gBlowerOn);
   Serial.print(F(",\"fault_cutter\":"));
   printBool((faults & PLC_BIT_CUTTER) != 0);
   Serial.print(F(",\"fault_gripper\":"));
@@ -470,18 +441,6 @@ static void handleSerialLine(char* line) {
       return;
     }
     if (!startSettle(settleMs)) replyValveDone(false);
-    return;
-  }
-  if (strstr(line, "\"op\":\"blower_on\"")) {
-    uint32_t ms = blowerOn((uint32_t)jsonReadLong(line, "ms", (long)PLC_BLOWER_DEFAULT_MS));
-    Serial.print(F("{\"op\":\"blower_on\",\"ok\":true,\"ms\":"));
-    Serial.print(ms);
-    Serial.println(F("}"));
-    return;
-  }
-  if (strstr(line, "\"op\":\"blower_off\"")) {
-    blowerOff();
-    replyOk("blower_off", true);
     return;
   }
   if (strstr(line, "\"op\":\"all_off\"")) {
@@ -532,6 +491,5 @@ void loop() {
   serviceTimedCut(now);
   serviceSettle(now);
   serviceReset(now);
-  serviceBlower(now);
   serviceSensors(now);
 }
