@@ -537,27 +537,6 @@ static bool feederServoOffAll() {
   return okR && okL;
 }
 
-static bool feederApplySideComp(MotionSide side) {
-  if (!gFeederTune || !gFeederReady) return false;
-  float mm = gFeederTune->feeder[side].compensationMm;
-  int32_t counts = (int32_t)lroundf(mm * SERVO_FEED_STEPS_PER_MM_S);
-  if (counts == 0) return true;
-  if (!gFeederReady[side]) return false;
-
-  counts *= (int32_t)feederCmdSign(side);
-  uint8_t node = feederNode(side);
-  if (!canSdoDownloadU8(node, SERVO_OD_MODE_OF_OPERATION, 0, (uint8_t)SERVO_MODE_PP)) return false;
-  int32_t pos = 0;
-  if (!canReadSdoI32(node, SERVO_OD_POSITION_ACTUAL, 0, &pos, 400)) return false;
-
-  int32_t target = pos + counts;
-  return feederWriteProfile(side) && canSdoDownloadU16(node, SERVO_OD_CONTROL_WORD, 0, 0x010F) &&
-         canSdoDownloadU32(node, SERVO_OD_TARGET_POSITION, 0, (uint32_t)target) &&
-         canSdoDownloadU16(node, SERVO_OD_CONTROL_WORD, 0, 0x012F) &&
-         canSdoDownloadU16(node, SERVO_OD_CONTROL_WORD, 0, 0x013F) &&
-         canSdoDownloadU16(node, SERVO_OD_CONTROL_WORD, 0, 0x003F);
-}
-
 static bool feederJogStep(MotionSide side, int dirSign) {
   if (!gFeederReady || !gFeederReady[side]) return false;
   uint8_t node = feederNode(side);

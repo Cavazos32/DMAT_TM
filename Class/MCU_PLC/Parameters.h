@@ -6,13 +6,12 @@
  * [A] Fijos de I/O (PlcIo_Uso.h). El sketch incluye este archivo antes
  *     que PlcIo_Uso.h; los #define evitan una segunda definición.
  *
- * Sin JSON: pines, pulso KEEP, debounce y límites del blower no se editan en ciclo.
- * La duración del blower llega en cada orden blower_on (pieza); aquí solo min/max/default.
+ * Sin JSON: pines, debounce y límites físicos no se editan en ciclo.
+ * Las duraciones de cortador y blower llegan en sus órdenes; aquí se fijan
+ * únicamente los límites físicos y valores por defecto.
  */
 
 #include <stdint.h>
-
-#define VALVE_ACTIVE_HIGH 1
 
 static const uint32_t PARAM_SERIAL_BAUD = 115200;
 
@@ -28,7 +27,7 @@ static const uint8_t PARAM_PLC_BIT_HOLDER  = (1 << 1);
 static const uint8_t PARAM_PLC_BIT_CUTTER  = (1 << 2);
 static const uint8_t PARAM_PLC_BIT_ENCODER = (1 << 5);
 
-// ── [A] Salidas (válvula KEEP, blower por nivel, reset por pulso) ─────────
+// ── [A] Salidas (válvulas/blower por nivel, reset por pulso) ──────────────
 
 static const uint8_t PARAM_PLC_PIN_OUT_CUTTER_R = 25;
 static const uint8_t PARAM_PLC_PIN_OUT_CUTTER_L = 14;
@@ -38,10 +37,11 @@ static const uint8_t PARAM_PLC_PIN_OUT_ENCODER  = 21;
 static const uint8_t PARAM_PLC_PIN_OUT_BLOWER   = 4;
 static const uint8_t PARAM_PLC_PIN_OUT_RESET    = 33;
 
-// ── [A] Pulso KEEP y sensores ──────────────────────────────────────────────
+// ── [A] Temporizaciones internas y sensores ────────────────────────────────
 
-static const uint32_t PARAM_PLC_VALVE_PULSE_MS     = 100;
-static const uint32_t PARAM_PLC_VALVE_PULSE_GAP_MS = 50;
+static const uint32_t PARAM_PLC_RESET_PULSE_MS     = 100;
+static const uint32_t PARAM_PLC_CUTTER_MAX_MS      = 5000;
+static const uint32_t PARAM_PLC_SETTLE_MAX_MS      = 5000;
 static const uint32_t PARAM_PLC_SENSOR_DEBOUNCE_MS = 150;
 static const uint32_t PARAM_PLC_BOOT_GRACE_MS      = 15000;
 
@@ -88,8 +88,9 @@ static const uint8_t PARAM_PLC_ERR_ENCODER = 0x22;
 #define PLC_BIT_CUTTER  PARAM_PLC_BIT_CUTTER
 #define PLC_BIT_ENCODER PARAM_PLC_BIT_ENCODER
 
-#define PLC_VALVE_PULSE_MS     PARAM_PLC_VALVE_PULSE_MS
-#define PLC_VALVE_PULSE_GAP_MS PARAM_PLC_VALVE_PULSE_GAP_MS
+#define PLC_RESET_PULSE_MS     PARAM_PLC_RESET_PULSE_MS
+#define PLC_CUTTER_MAX_MS      PARAM_PLC_CUTTER_MAX_MS
+#define PLC_SETTLE_MAX_MS      PARAM_PLC_SETTLE_MAX_MS
 #define PLC_SENSOR_DEBOUNCE_MS PARAM_PLC_SENSOR_DEBOUNCE_MS
 #define PLC_BOOT_GRACE_MS      PARAM_PLC_BOOT_GRACE_MS
 

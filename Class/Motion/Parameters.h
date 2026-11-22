@@ -8,7 +8,7 @@
  * [C] Datos de ciclo + set_data / modelo (NVS en ESP32)
  *
  * Claves JSON (data/Motion.json) ↔ tune:
- *   feeder.R/L.profile_velocity_pps, target_position_counts, compensation_mm
+ *   feeder.R/L.profile_velocity_pps, target_position_counts
  *   lmguide.pr_speed_rpm, pos_puu
  *   set_data: target_length_mm, tolerance_mm, modelo_id, measure_comp_mm
  *
@@ -137,7 +137,6 @@ enum MotionSide : uint8_t { MOTION_SIDE_R = 0, MOTION_SIDE_L = 1, MOTION_SIDE_CO
 struct MotionFeederSideTune {
   uint32_t profileVelocityPps;
   int32_t targetPositionCounts;
-  float compensationMm;
 };
 
 struct MotionLMGuideTune {

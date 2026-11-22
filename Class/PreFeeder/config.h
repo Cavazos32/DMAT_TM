@@ -76,4 +76,5 @@ constexpr uint16_t HOLGURA_SETTLE_MS = 150;
 constexpr uint16_t HOLGURA_SETTLE_MS_MIN = 10;
 constexpr uint16_t HOLGURA_SETTLE_MS_MAX = 500;
 constexpr float HOLGURA_ON_FEED_SEC = 2.0f;
-constexpr float HOLGURA_STALL_FAULT_SEC = 2.0f;
+// Fijo: holgura OFF + motores quietos → FAULT_HOLGURA. No editable por HMI.
+constexpr uint32_t HOLGURA_STALL_FAULT_MS = 800;

@@ -36,7 +36,6 @@ enum FeedStageError {
   FEED_STAGE_ERR_LASER_L,
   FEED_STAGE_ERR_ENC_R,
   FEED_STAGE_ERR_ENC_L,
-  FEED_STAGE_ERR_COMP,
   FEED_STAGE_ERR_SAFETY,
   FEED_STAGE_ERR_STOP,
   FEED_STAGE_ERR_JOINT_R,
@@ -55,10 +54,10 @@ struct FeedStageResult {
 };
 
 // Sin "side" y sin "mode" el ciclo usa ambos lados, lee encoder (counts) y el timeout de Parameters.h.
-// "mode":"laser" (purga): cada lado sigue hasta su láser. No aplica compensación.
+// "mode":"laser" (purga): cada lado sigue hasta su láser.
 // "mode":"clean" alimenta el tiempo indicado y no se detiene en el láser.
-// Si el láser de un lado ya está activo, ese lado no arranca. La compensación de ese lado
-// se manda una sola vez mientras el láser siga activo.
+// Si el láser de un lado ya está activo, ese lado no arranca.
+// El servo CAN alimenta en velocidad (PV); no hay compensación por posición.
 struct FeedStageRequest {
   bool useR;
   bool useL;
@@ -68,7 +67,6 @@ struct FeedStageRequest {
 };
 
 static FeedStageResult gLastFeedStage = {};
-static bool gFeedOffsetApplied[MOTION_SIDE_COUNT] = {false, false};
 
 /* Diagnóstico: conteo al láser, tras Halt TX, asiento real y status CAN. */
 struct LaserStopDiag {
@@ -179,14 +177,6 @@ static void encoderSetZero(MotionSide side) {
 
 static bool encoderResetHw(MotionSide side) {
   return (side == MOTION_SIDE_R) ? gEncoders.resetRight() : gEncoders.resetLeft();
-}
-
-static bool feedApplyOffsetOnce(MotionSide side) {
-  if (gFeedOffsetApplied[side]) return true;
-  if (!feederApplySideComp(side)) return false;
-  int32_t counts = (int32_t)lroundf(gTune.feeder[side].compensationMm * SERVO_FEED_STEPS_PER_MM_S);
-  if (counts != 0) gFeedOffsetApplied[side] = true;
-  return true;
 }
 
 static void laserStopDiagResetAll() {
@@ -354,8 +344,6 @@ static const char* feedStageErrorName(FeedStageError err) {
       return "encoder_tolerance_r";
     case FEED_STAGE_ERR_ENC_L:
       return "encoder_tolerance_l";
-    case FEED_STAGE_ERR_COMP:
-      return "comp_move";
     case FEED_STAGE_ERR_SAFETY:
       return "safety";
     case FEED_STAGE_ERR_STOP:
@@ -401,18 +389,9 @@ static FeedStageResult FeedStage(FeedStageRequest req) {
   laserStopDiagResetAll();
 
   bool sideAtLaser[MOTION_SIDE_COUNT] = {false, false};
-  if (req.ignoreLaser) {
-    if (req.useR) gFeedOffsetApplied[MOTION_SIDE_R] = false;
-    if (req.useL) gFeedOffsetApplied[MOTION_SIDE_L] = false;
-  } else {
-    if (req.useR) {
-      sideAtLaser[MOTION_SIDE_R] = laserIsOn(MOTION_SIDE_R);
-      if (!sideAtLaser[MOTION_SIDE_R]) gFeedOffsetApplied[MOTION_SIDE_R] = false;
-    }
-    if (req.useL) {
-      sideAtLaser[MOTION_SIDE_L] = laserIsOn(MOTION_SIDE_L);
-      if (!sideAtLaser[MOTION_SIDE_L]) gFeedOffsetApplied[MOTION_SIDE_L] = false;
-    }
+  if (!req.ignoreLaser) {
+    if (req.useR) sideAtLaser[MOTION_SIDE_R] = laserIsOn(MOTION_SIDE_R);
+    if (req.useL) sideAtLaser[MOTION_SIDE_L] = laserIsOn(MOTION_SIDE_L);
   }
 
   bool runR = req.useR && !sideAtLaser[MOTION_SIDE_R];
@@ -555,11 +534,6 @@ static FeedStageResult FeedStage(FeedStageRequest req) {
   laserStopDiagFinalize();
   if (fail != FEED_STAGE_OK) {
     out.error = fail;
-  } else if (req.checkEncoder) {
-    bool compOk = true;
-    if (req.useR) compOk = feedApplyOffsetOnce(MOTION_SIDE_R);
-    if (compOk && req.useL) compOk = feedApplyOffsetOnce(MOTION_SIDE_L);
-    if (!compOk) out.error = FEED_STAGE_ERR_COMP;
   }
 
   gLastFeedStage = out;
@@ -578,16 +552,26 @@ static void printFeedStageResultJson(const FeedStageResult& r) {
   Serial.print(r.side[MOTION_SIDE_R].encOk ? "true" : "false");
   Serial.print(F(",\"counts\":"));
   Serial.print(r.side[MOTION_SIDE_R].countsMeasured);
-  Serial.print(F(",\"comp_mm\":"));
-  Serial.print(gTune.feeder[MOTION_SIDE_R].compensationMm, 2);
   Serial.print(F("},\"L\":{\"laser\":"));
   Serial.print(r.side[MOTION_SIDE_L].laserOn ? "true" : "false");
   Serial.print(F(",\"enc_ok\":"));
   Serial.print(r.side[MOTION_SIDE_L].encOk ? "true" : "false");
   Serial.print(F(",\"counts\":"));
   Serial.print(r.side[MOTION_SIDE_L].countsMeasured);
-  Serial.print(F(",\"comp_mm\":"));
-  Serial.print(gTune.feeder[MOTION_SIDE_L].compensationMm, 2);
+  Serial.println(F("}}"));
+}
+
+// Ack de movimiento con estado útil (evita status aparte tras lmguide_move).
+static void printLmguideMoveResult(bool ok) {
+  gEncoders.update();
+  Serial.print(F("{\"op\":\"lmguide_move\",\"ok\":"));
+  Serial.print(ok ? "true" : "false");
+  Serial.print(F(",\"lm_homed\":"));
+  Serial.print(gRt.lmguideHomed ? "true" : "false");
+  Serial.print(F(",\"enc_R\":{\"counts\":"));
+  Serial.print(encoderCountsOfficial(MOTION_SIDE_R));
+  Serial.print(F("},\"enc_L\":{\"counts\":"));
+  Serial.print(encoderCountsOfficial(MOTION_SIDE_L));
   Serial.println(F("}}"));
 }
 
@@ -616,11 +600,18 @@ static void motionHwInitRun() {
     Serial.println(F("{\"op\":\"motion_hw_init\",\"ok\":false,\"error\":\"safety\"}"));
     return;
   }
+  Serial.println(F("{\"op\":\"hw_init_stage\",\"stage\":\"feeder_init\"}"));
   bool okFeed = feederInitBus();
   if (!okFeed) {
     Serial.println(F("{\"op\":\"motion_hw_init\",\"ok\":false,\"error\":\"feeder_init\"}"));
     return;
   }
+  Serial.println(F("{\"op\":\"hw_init_stage\",\"stage\":\"lmguide_init\"}"));
+  if (!lmguideServoOn()) {
+    Serial.println(F("{\"op\":\"motion_hw_init\",\"ok\":false,\"error\":\"lmguide_init\"}"));
+    return;
+  }
+  Serial.println(F("{\"op\":\"hw_init_stage\",\"stage\":\"lmguide_home\"}"));
   bool okHome = lmguideHome();
   if (!okHome) {
     Serial.println(F("{\"op\":\"motion_hw_init\",\"ok\":false,\"error\":\"lmguide_home\"}"));
@@ -701,11 +692,6 @@ static void applyTuneFromJson(const char* json) {
       (uint32_t)jsonReadLong(json, "feed_l_vel_pps", (long)gTune.feeder[MOTION_SIDE_L].profileVelocityPps);
   gTune.feeder[MOTION_SIDE_L].targetPositionCounts =
       (int32_t)jsonReadLong(json, "feed_l_target_counts", gTune.feeder[MOTION_SIDE_L].targetPositionCounts);
-
-  gTune.feeder[MOTION_SIDE_R].compensationMm =
-      jsonReadFloat(json, "feed_r_comp_mm", gTune.feeder[MOTION_SIDE_R].compensationMm);
-  gTune.feeder[MOTION_SIDE_L].compensationMm =
-      jsonReadFloat(json, "feed_l_comp_mm", gTune.feeder[MOTION_SIDE_L].compensationMm);
 
   gTune.lmguide.prSpeedRpm =
       lmClampSpeedRpm(jsonReadFloat(json, "lm_pr_speed_rpm", gTune.lmguide.prSpeedRpm));
@@ -864,6 +850,13 @@ static void handleSerialLine(char* line) {
     return;
   }
   if (strstr(line, "\"op\":\"feed_stage\"")) {
+    // Tune opcional en la misma orden (1 request → trabajo → 1 reply).
+    if (strstr(line, "feed_r_vel_pps") || strstr(line, "feed_l_vel_pps") ||
+        strstr(line, "lm_pr_speed_rpm") || strstr(line, "feed_validate_encoder") ||
+        strstr(line, "feed_r_target_counts") || strstr(line, "feed_l_target_counts") ||
+        strstr(line, "lm_pos_puu")) {
+      applyTuneFromJson(line);
+    }
     FeedStageRequest req = feedStageDefaultRequest();
     if (strstr(line, "\"feed_validate_encoder\"")) {
       req.checkEncoder = jsonReadBool(line, "feed_validate_encoder", req.checkEncoder);
@@ -933,9 +926,7 @@ static void handleSerialLine(char* line) {
       ok = lmguideMovePr1((int32_t)customPuu);
     else
       ok = lmguideMoveNamed(target);
-    Serial.print(F("{\"op\":\"lmguide_move\",\"ok\":"));
-    Serial.print(ok ? "true" : "false");
-    Serial.println(F("}"));
+    printLmguideMoveResult(ok);
     return;
   }
   if (strstr(line, "\"op\":\"lmguide_jog\"")) {

@@ -2,6 +2,8 @@
   const STORAGE_EVENTS = "dmat_show_events_panel";
   const STORAGE_THEME = "dmat_theme";
   const STORAGE_MODEL = "dmat_modelo";
+  const STORAGE_PLC_BLOWER_MS = "dmat_plc_blower_ms";
+  const ACTUATOR_STAGE_ORDER = ["feeder", "lmguide", "home", "ready"];
 
   const els = {
     statusBanner: document.getElementById("statusBanner"),
@@ -10,6 +12,9 @@
     progressPct: document.getElementById("progressPct"),
     progressFill: document.getElementById("progressFill"),
     selectModelo: document.getElementById("selectModelo"),
+    modelCombo: document.getElementById("modelCombo"),
+    modelComboList: document.getElementById("modelComboList"),
+    metricModeloDesc: document.getElementById("metricModeloDesc"),
     metricLongitud: document.getElementById("metricLongitud"),
     metricCantidad: document.getElementById("metricCantidad"),
     metricCutCompR: document.getElementById("metricCutCompR"),
@@ -28,6 +33,7 @@
     selectAndonPort: document.getElementById("selectAndonPort"),
     selectPrefeederPort: document.getElementById("selectPrefeederPort"),
     btnRefreshPorts: document.getElementById("btnRefreshPorts"),
+    btnTestAllPorts: document.getElementById("btnTestAllPorts"),
     btnMotionTest: document.getElementById("btnMotionTest"),
     btnPlcTest: document.getElementById("btnPlcTest"),
     btnAndonTest: document.getElementById("btnAndonTest"),
@@ -36,6 +42,10 @@
     serialPlcStatus: document.getElementById("serialPlcStatus"),
     serialAndonStatus: document.getElementById("serialAndonStatus"),
     serialPrefeederStatus: document.getElementById("serialPrefeederStatus"),
+    serialMotionBadge: document.getElementById("serialMotionBadge"),
+    serialPlcBadge: document.getElementById("serialPlcBadge"),
+    serialAndonBadge: document.getElementById("serialAndonBadge"),
+    serialPrefeederBadge: document.getElementById("serialPrefeederBadge"),
     prefeederTuneForm: document.getElementById("prefeederTuneForm"),
     prefeederTuneReload: document.getElementById("prefeederTuneReload"),
     prefeederStatusRefresh: document.getElementById("prefeederStatusRefresh"),
@@ -55,9 +65,6 @@
     motionTuneReload: document.getElementById("motionTuneReload"),
     motionStatusRefresh: document.getElementById("motionStatusRefresh"),
     motionEsp32Hint: document.getElementById("motionEsp32Hint"),
-    motionDataModelo: document.getElementById("motionDataModelo"),
-    motionDataTargetMm: document.getElementById("motionDataTargetMm"),
-    motionDataToleranceMm: document.getElementById("motionDataToleranceMm"),
     plcManualForm: document.getElementById("plcManualForm"),
     plcEsp32Hint: document.getElementById("plcEsp32Hint"),
     plcBlowerMs: document.getElementById("plcBlowerMs"),
@@ -95,6 +102,9 @@
     sideBypassPickL: document.getElementById("sideBypassPickL"),
     sideBypassTurnOff: document.getElementById("sideBypassTurnOff"),
     btnOpenRecovery: document.getElementById("btnOpenRecovery"),
+    actuatorsStrip: document.getElementById("actuatorsStrip"),
+    actuatorsStatusLabel: document.getElementById("actuatorsStatusLabel"),
+    btnInitActuators: document.getElementById("btnInitActuators"),
     recoveryModal: document.getElementById("recoveryModal"),
     recoveryModalClose: document.getElementById("recoveryModalClose"),
     recoveryModalTitle: document.getElementById("recoveryModalTitle"),
@@ -119,8 +129,12 @@
   let lastProcessAction = null;
   let modelosCatalog = [];
   let syncingModelSelect = false;
+  let cycleParamsDirty = false;
+  let motionTuneDirty = false;
+  let prefeederDirty = { L: false, R: false };
   let motionStepsPerMm = 770 / 45;
   let motionPuuSign = -1;
+  let motionMmRes = 0.1;
   let motionFeedShaftIncPerRev = 10000;  // DSY 6091:02
   let motionEncPollTimer = null;
   let motionEncPollBusy = false;
@@ -202,23 +216,6 @@
     return String(Math.floor(v));
   }
 
-  function formatPiezasRL(state) {
-    const r = Number(state.piezas_r);
-    const l = Number(state.piezas_l);
-    const tr = Number(state.piezas_target_r);
-    const tl = Number(state.piezas_target_l);
-    const dual =
-      (state.lote_activo || state.lote_lados === "LR" || state.feed_sides === "LR") &&
-      Number.isFinite(tr) &&
-      Number.isFinite(tl) &&
-      tr > 0 &&
-      tl > 0;
-    if (dual && Number.isFinite(r) && Number.isFinite(l)) {
-      return `${Math.floor(r)}/${Math.floor(l)}`;
-    }
-    return formatPiezasCount(state.piezas_producidas);
-  }
-
   function formatMm(value) {
     if (value == null) return "—";
     return Number(value).toFixed(2);
@@ -291,6 +288,33 @@
       }
       syncModelSelect(modelo);
     }
+    syncModeloDesc(state);
+  }
+
+  function findModeloInCatalog(modeloId) {
+    const mid = String(modeloId || "").trim();
+    if (!mid) return null;
+    for (let i = 0; i < modelosCatalog.length; i++) {
+      if (modelosCatalog[i].modelo === mid) return modelosCatalog[i];
+    }
+    return null;
+  }
+
+  function syncModeloDesc(stateOrModelo) {
+    if (!els.metricModeloDesc) return;
+    let desc = "";
+    if (stateOrModelo && typeof stateOrModelo === "object") {
+      desc = String(stateOrModelo.modelo_desc || "").trim();
+      if (!desc) {
+        const hit = findModeloInCatalog(stateOrModelo.numero_modelo);
+        desc = hit && hit.desc ? String(hit.desc).trim() : "";
+      }
+    } else {
+      const hit = findModeloInCatalog(stateOrModelo);
+      desc = hit && hit.desc ? String(hit.desc).trim() : "";
+    }
+    els.metricModeloDesc.textContent = desc || "—";
+    els.metricModeloDesc.title = desc || "";
   }
 
   function updatePieceVisual(state) {
@@ -311,14 +335,15 @@
   }
 
   async function maybeRestoreModelFromLocal() {
-    if (!els.selectModelo || els.selectModelo.value) return;
     let saved = "";
     try {
       saved = localStorage.getItem(STORAGE_MODEL) || "";
     } catch (e) {
       /* ignore */
     }
-    if (saved && modelosCatalog.some(function (m) { return m.modelo === saved; })) {
+    if (!saved) return;
+    if (els.selectModelo && String(els.selectModelo.value || "").trim()) return;
+    if (findModeloInCatalog(saved)) {
       await selectModelo(saved, true);
     }
   }
@@ -432,6 +457,7 @@
     els.progressFill.style.width = pct + "%";
 
     syncModelSelect(state.numero_modelo || "");
+    syncModeloDesc(state);
     els.metricLongitud.textContent = formatMm(state.longitud_modelo_mm);
     setCantidadInput(
       state.cantidad,
@@ -440,9 +466,13 @@
     setCutCompInput(els.metricCutCompR, state.cut_comp_r_mm);
     setCutCompInput(els.metricCutCompL, state.cut_comp_l_mm);
     updatePieceVisual(state);
-    els.metricTiempoCiclo.textContent = formatSeconds(state.tiempo_ciclo_s);
+    if (els.metricTiempoCiclo) {
+      els.metricTiempoCiclo.textContent = formatSeconds(state.tiempo_ciclo_s);
+    }
     if (els.metricPiezasProducidas) {
-      els.metricPiezasProducidas.textContent = formatPiezasRL(state);
+      els.metricPiezasProducidas.textContent = formatPiezasCount(
+        state.piezas_producidas
+      );
     }
     if (els.metricPiezasTotal) {
       const totalPiezas =
@@ -464,6 +494,9 @@
       state.ciclo_paralelo_id || ""
     );
     const pfCom = !!(state.prefeeder && state.prefeeder.com);
+    applyActuatorsStatus(state.actuators);
+    const actuatorsBusy =
+      !!(state.actuators && state.actuators.state === "initializing");
     setStatePoll(
       estado === "running" ||
         estado === "paused" ||
@@ -471,8 +504,77 @@
         !!state.ciclo_en_curso ||
         !!state.lote_activo ||
         !!state.rutina ||
-        pfCom
+        pfCom ||
+        actuatorsBusy
     );
+  }
+
+  function mapActuatorStageKey(state, stageRaw) {
+    const st = String(state || "offline").toLowerCase();
+    if (st === "online") return "ready";
+    if (st !== "initializing") return "";
+    const stage = String(stageRaw || "").trim().toLowerCase();
+    if (!stage) return "feeder";
+    if (stage.indexOf("feeder") >= 0) return "feeder";
+    if (stage.indexOf("lm") >= 0 && stage.indexOf("home") < 0) return "lmguide";
+    if (stage.indexOf("home") >= 0) return "home";
+    if (stage.indexOf("ready") >= 0 || stage.indexOf("listo") >= 0) return "ready";
+    return "feeder";
+  }
+
+  function actuatorStageLabel(stageKey) {
+    if (stageKey === "feeder") return "Feeder";
+    if (stageKey === "lmguide") return "LM Guide";
+    if (stageKey === "home") return "Home";
+    if (stageKey === "ready") return "Listo";
+    return "Offline";
+  }
+
+  function applyActuatorsStatus(actuators) {
+    const strip = els.actuatorsStrip;
+    const label = els.actuatorsStatusLabel;
+    const btn = els.btnInitActuators;
+    if (!strip || !label) return;
+    const act = actuators || {};
+    const state = String(act.state || "offline").toLowerCase();
+    const stageRaw = String(act.stage || "").trim();
+    let mode = "offline";
+    let stageKey = "";
+    if (state === "online") {
+      mode = "online";
+      stageKey = "ready";
+    } else if (state === "initializing") {
+      mode = "initializing";
+      stageKey = mapActuatorStageKey(state, stageRaw);
+    }
+    const text =
+      mode === "online"
+        ? "Listo"
+        : mode === "initializing"
+          ? actuatorStageLabel(stageKey)
+          : "Offline";
+    strip.setAttribute("data-actuators-state", mode);
+    strip.setAttribute("data-actuators-stage", stageKey);
+    label.textContent = text;
+    const activeIdx = ACTUATOR_STAGE_ORDER.indexOf(stageKey);
+    strip.querySelectorAll(".actuators-strip__stage").forEach(function (el) {
+      const key = el.getAttribute("data-stage");
+      const idx = ACTUATOR_STAGE_ORDER.indexOf(key);
+      el.classList.toggle("is-active", mode === "initializing" && key === stageKey);
+      el.classList.toggle(
+        "is-done",
+        mode === "online" || (activeIdx >= 0 && idx >= 0 && idx < activeIdx)
+      );
+    });
+    if (btn) {
+      btn.disabled = mode === "initializing";
+      btn.title =
+        mode === "initializing"
+          ? "Inicialización en curso: " + text + "."
+          : mode === "online"
+            ? "Actuadores listos. Puedes volver a inicializar si hace falta."
+            : "Inicializa feeder CAN y LM Guide (home).";
+    }
   }
 
   function renderCycleSteps(activeId, activeIndex, parallelId) {
@@ -511,6 +613,10 @@
 
   function fillCycleParamsForm(params) {
     if (!els.cycleParamsForm || !params) return;
+    if (cycleParamsDirty) return;
+    const active = document.activeElement;
+    const editing = !!(active && els.cycleParamsForm.contains(active));
+    if (editing) return;
     els.cycleParamsForm.querySelectorAll("[data-cycle-param]").forEach(function (input) {
       const key = input.dataset.cycleParam;
       const val = params[key];
@@ -574,7 +680,18 @@
         pushLocalEvent("No se guardaron parámetros de ciclo.", "error");
         return;
       }
-      fillCycleParamsForm(data.params);
+      cycleParamsDirty = false;
+      if (data.params && els.cycleParamsForm) {
+        els.cycleParamsForm.querySelectorAll("[data-cycle-param]").forEach(function (input) {
+          const key = input.dataset.cycleParam;
+          const val = data.params[key];
+          if (input.type === "checkbox") {
+            input.checked = !!val && val !== 0 && val !== "0" && val !== "false";
+            return;
+          }
+          input.value = val == null || val === "" ? "" : String(val);
+        });
+      }
       if (data.state) applyState(data.state);
       pushLocalEvent("Parámetros de ciclo guardados.");
     } catch (err) {
@@ -602,7 +719,7 @@
       return;
     }
     if (btn.getAttribute("data-motion-op") === "feeder_servo") {
-      btn.textContent = on ? "Duro" : "Suelto";
+      btn.textContent = on ? "Enable" : "Disable";
       return;
     }
     if (btn.hasAttribute("data-plc-op")) {
@@ -615,6 +732,24 @@
     return document.querySelector(
       '#statusBannerActions [data-plc-name="holder_encoder"]'
     );
+  }
+
+  function motionCuttersButton() {
+    return document.querySelector(
+      '#motionTuneForm [data-plc-name="cutters"]'
+    );
+  }
+
+  function syncMotionCuttersButton(status) {
+    const btn = motionCuttersButton();
+    if (!btn || !status) return;
+    if (
+      typeof status.cutter_r !== "boolean" ||
+      typeof status.cutter_l !== "boolean"
+    ) {
+      return;
+    }
+    setPlcPressed(btn, status.cutter_r && status.cutter_l);
   }
 
   function syncPlcHolderEncoderButton(status) {
@@ -725,9 +860,27 @@
         const res = await fetch("/api/motion/status");
         const data = await res.json();
         const enc = (data && data.encoder) || {};
+        const busy =
+          !!els.recoveryModal &&
+          els.recoveryModal.dataset.recoveryBusy === "1";
         if (mode === "joint") {
-          setRecoverySensorEl(els.recoverySensorR, !!(enc.R && enc.R.joint === true));
-          setRecoverySensorEl(els.recoverySensorL, !!(enc.L && enc.L.joint === true));
+          const onR = !!(enc.R && enc.R.joint === true);
+          const onL = !!(enc.L && enc.L.joint === true);
+          setRecoverySensorEl(els.recoverySensorR, onR);
+          setRecoverySensorEl(els.recoverySensorL, onL);
+          const cont = els.recoveryActions
+            ? els.recoveryActions.querySelector(
+                '[data-recovery="joint_continuar"]'
+              )
+            : null;
+          if (cont) {
+            const side = String(
+              (els.recoveryModal && els.recoveryModal.dataset.jointSide) || ""
+            ).toUpperCase();
+            const blocked =
+              side === "L" ? onL : side === "R" ? onR : onR || onL;
+            cont.disabled = busy || blocked;
+          }
         } else {
           const onR = !!(enc.R && enc.R.laser === true);
           const onL = !!(enc.L && enc.L.laser === true);
@@ -736,7 +889,7 @@
           const cont = els.recoveryActions
             ? els.recoveryActions.querySelector('[data-recovery="manguera"]')
             : null;
-          if (cont) cont.disabled = onR || onL;
+          if (cont) cont.disabled = busy || onR || onL;
         }
       }
     } catch (e) {
@@ -799,7 +952,7 @@
     return p;
   }
 
-  function renderRecoveryActions(step, cuttersOn, jointCtx, rutina) {
+  function renderRecoveryActions(step, jointCtx, rutina) {
     if (!els.recoveryActions) return;
     els.recoveryActions.innerHTML = "";
     const joint = jointCtx || null;
@@ -838,7 +991,8 @@
         );
         alimentar.disabled = busy;
         liberar.disabled = busy;
-        continuar.disabled = busy;
+        // Continuar solo cuando el poll confirme Joint Apagado en el lado afectado.
+        continuar.disabled = true;
         required.appendChild(continuar);
         helpers.appendChild(
           recoveryHelperDesc("Alimentar: avanza un poco el material del lado afectado.")
@@ -905,7 +1059,8 @@
         "btn-start",
         "manguera"
       );
-      cont.disabled = !!cuttersOn || busy;
+      // Confirmar solo cuando el poll confirme láseres Apagado.
+      cont.disabled = true;
       required.appendChild(cont);
       meta.appendChild(
         recoveryPrimaryButton("Salir", "btn-secondary", "salir")
@@ -1106,7 +1261,8 @@
       operator: [
         "Joint · Intervención",
         "Elige una acción",
-        stepGuide || "Pulsa Continuar para iniciar la limpieza.",
+        stepGuide ||
+          "Libera el Joint hasta Apagado. Luego pulsa Continuar para iniciar la limpieza.",
       ],
       purga: [
         "Joint · Purga",
@@ -1230,6 +1386,9 @@
     if (els.recoveryModal) {
       els.recoveryModal.dataset.jointMode = jointKind ? "1" : "";
       els.recoveryModal.dataset.sensorMode = jointKind ? "joint" : "laser";
+      els.recoveryModal.dataset.jointSide = jointKind
+        ? String(rec.side || "")
+        : "";
       els.recoveryModal.dataset.lmAtPark = rec.lm_at_park ? "1" : "";
       els.recoveryModal.dataset.recoveryBusy = rec.busy ? "1" : "";
     }
@@ -1242,7 +1401,6 @@
       recoveryViewKey = key;
       renderRecoveryActions(
         viewStep,
-        false,
         jointKind
           ? { origin: jointOrigin, side: rec.side, busy: !!rec.busy }
           : null,
@@ -1251,6 +1409,7 @@
       if (showSensors) pollRecoverySensors();
     } else {
       syncRecoverySkipLink(viewStep, rutina, jointKind);
+      if (showSensors) pollRecoverySensors();
     }
   }
 
@@ -1442,9 +1601,11 @@
     });
 
     const loteActivo = !!state.lote_activo || (!!enCurso && (running || paused || enError));
+    const modeloOk = hasModeloSeleccionado(state);
     if (start) {
       start.disabled =
         !checklistReady ||
+        !modeloOk ||
         purga ||
         running ||
         (paused && enCurso) ||
@@ -1454,6 +1615,8 @@
         postErrorPurga;
       if (!checklistReady) {
         start.title = "Completa la revisión de arranque.";
+      } else if (!modeloOk) {
+        start.title = "Selecciona un modelo antes de Iniciar.";
       } else if (purga) {
         start.title = "Hay una purga en curso.";
       } else if (enError) {
@@ -1464,7 +1627,7 @@
         start.title =
           "Con ambos lados la cantidad tiene que ser par y de al menos 2 piezas.";
       } else if (loteActivo) {
-        start.title = "Hay un lote en curso. Reanuda o pulsa Stop.";
+        start.title = "Hay un lote en curso. Reanuda o pulsa Detener.";
       } else if (running) {
         start.title = "El ciclo ya está en marcha.";
       } else {
@@ -1660,30 +1823,112 @@
     renderEvents(pendingEventos);
   }
 
+  let modelComboFilter = "";
+  let modelComboActive = -1;
+  let modelComboOpen = false;
+
   function syncModelSelect(modeloId) {
     if (!els.selectModelo) return;
+    if (document.activeElement === els.selectModelo && modelComboOpen) return;
     syncingModelSelect = true;
     els.selectModelo.value = modeloId || "";
     syncingModelSelect = false;
+    syncModeloDesc(modeloId);
   }
 
   function populateModelSelect(modelos) {
-    if (!els.selectModelo) return;
     modelosCatalog = modelos || [];
-    const current = els.selectModelo.value;
-    els.selectModelo.innerHTML = "";
-    const empty = document.createElement("option");
-    empty.value = "";
-    empty.textContent = "— Seleccionar —";
-    els.selectModelo.appendChild(empty);
-    modelosCatalog.forEach(function (item) {
-      const opt = document.createElement("option");
-      opt.value = item.modelo;
-      opt.textContent = item.modelo;
-      opt.dataset.longitud = String(item.longitud_mm ?? "");
-      els.selectModelo.appendChild(opt);
-    });
+    const current = els.selectModelo ? String(els.selectModelo.value || "").trim() : "";
     if (current) syncModelSelect(current);
+    else syncModeloDesc("");
+    renderModelComboList(modelComboFilter, false);
+  }
+
+  function filteredModelos(query) {
+    const q = String(query || "").trim().toLowerCase();
+    if (!q) return modelosCatalog.slice();
+    return modelosCatalog.filter(function (item) {
+      const modelo = String(item.modelo || "").toLowerCase();
+      const desc = String(item.desc || "").toLowerCase();
+      return modelo.indexOf(q) >= 0 || desc.indexOf(q) >= 0;
+    });
+  }
+
+  function setModelComboOpen(open) {
+    modelComboOpen = !!open;
+    if (els.selectModelo) els.selectModelo.setAttribute("aria-expanded", modelComboOpen ? "true" : "false");
+    if (els.modelComboList) els.modelComboList.hidden = !modelComboOpen;
+    if (!modelComboOpen) modelComboActive = -1;
+  }
+
+  function renderModelComboList(query, open) {
+    if (!els.modelComboList) return;
+    modelComboFilter = String(query || "");
+    const items = filteredModelos(modelComboFilter);
+    els.modelComboList.innerHTML = "";
+    if (!items.length) {
+      const empty = document.createElement("li");
+      empty.className = "model-combo__empty";
+      empty.textContent = "Sin coincidencias";
+      els.modelComboList.appendChild(empty);
+      modelComboActive = -1;
+    } else {
+      if (modelComboActive >= items.length) modelComboActive = items.length - 1;
+      items.forEach(function (item, idx) {
+        const li = document.createElement("li");
+        li.setAttribute("role", "option");
+        li.id = "modelComboOpt-" + idx;
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "model-combo__option" + (idx === modelComboActive ? " is-active" : "");
+        btn.textContent = item.modelo;
+        btn.title = item.desc || item.modelo;
+        btn.dataset.modelo = item.modelo;
+        btn.addEventListener("mousedown", function (ev) {
+          ev.preventDefault();
+          pickModeloFromCombo(item.modelo);
+        });
+        li.appendChild(btn);
+        els.modelComboList.appendChild(li);
+      });
+      if (els.selectModelo && modelComboActive >= 0) {
+        els.selectModelo.setAttribute("aria-activedescendant", "modelComboOpt-" + modelComboActive);
+      }
+    }
+    if (open) setModelComboOpen(true);
+  }
+
+  function clearModeloSelection(persist) {
+    setModelComboOpen(false);
+    syncingModelSelect = true;
+    if (els.selectModelo) els.selectModelo.value = "";
+    syncingModelSelect = false;
+    syncModeloDesc("");
+    if (persist === false) return;
+    selectModelo("", true);
+  }
+
+  function pickModeloFromCombo(modeloId) {
+    const mid = String(modeloId || "").trim();
+    if (!mid || !findModeloInCatalog(mid)) {
+      clearModeloSelection(true);
+      return;
+    }
+    setModelComboOpen(false);
+    syncingModelSelect = true;
+    if (els.selectModelo) els.selectModelo.value = mid;
+    syncingModelSelect = false;
+    syncModeloDesc(mid);
+    selectModelo(mid, true);
+  }
+
+  function hasModeloSeleccionado(state) {
+    const mid = String(
+      (state && state.numero_modelo) ||
+        (els.selectModelo && els.selectModelo.value) ||
+        ""
+    ).trim();
+    return !!findModeloInCatalog(mid);
   }
 
   async function loadModelos() {
@@ -1703,7 +1948,7 @@
       const res = await fetch("/api/modelo", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ modelo: modeloId }),
+        body: JSON.stringify({ modelo: modeloId || "" }),
       });
       const data = await res.json();
       if (!data.ok) {
@@ -1712,14 +1957,14 @@
       }
       if (persist) {
         try {
-          if (modeloId) localStorage.setItem(STORAGE_MODEL, modeloId);
+          const saved = (data.state && data.state.numero_modelo) || modeloId || "";
+          if (saved) localStorage.setItem(STORAGE_MODEL, saved);
           else localStorage.removeItem(STORAGE_MODEL);
         } catch (e) {
           /* ignore */
         }
       }
       if (data.state) applyState(data.state);
-      if (data.motion_data) motionApplyDataFields(data.motion_data);
     } catch (err) {
       pushLocalEvent("Error al guardar el modelo.", "error");
     }
@@ -1751,6 +1996,8 @@
     const steps = Number(data.steps_per_mm);
     if (Number.isFinite(steps) && steps > 0) motionStepsPerMm = steps;
     if (data.puu_sign === 1 || data.puu_sign === -1) motionPuuSign = data.puu_sign;
+    const res = Number(data.mm_res);
+    if (Number.isFinite(res) && res > 0) motionMmRes = res;
     const shaft = Number(data.feed_shaft_inc_per_rev);
     if (Number.isFinite(shaft) && shaft > 0) motionFeedShaftIncPerRev = shaft;
   }
@@ -1764,8 +2011,17 @@
     return String(Number.isFinite(rpm) ? rpm : 0);
   }
 
+  function motionSnapMm(mm) {
+    const res = motionMmRes || 0.1;
+    const n = Number(mm);
+    if (!Number.isFinite(n)) return NaN;
+    return Math.round(n / res) * res;
+  }
+
   function motionMmToPuu(mm) {
-    return Math.round(motionPuuSign * mm * motionStepsPerMm);
+    const snapped = motionSnapMm(mm);
+    if (!Number.isFinite(snapped)) return 0;
+    return Math.round(motionPuuSign * snapped * motionStepsPerMm);
   }
 
   function motionRefreshPuuReadout() {
@@ -1784,11 +2040,17 @@
   function motionFormatMm(puu) {
     const mm = Math.abs(Number(puu)) / (motionStepsPerMm || 1);
     if (!Number.isFinite(mm)) return "";
-    return String(Math.round(mm * 1000) / 1000);
+    const snapped = motionSnapMm(mm);
+    if (!Number.isFinite(snapped)) return "";
+    // Siempre un decimal: 500 → "500.0" (evita stepMismatch del input).
+    return snapped.toFixed(1);
   }
 
   function motionFormFromTune(tune) {
     if (!els.motionTuneForm || !tune) return;
+    if (motionTuneDirty) return;
+    const active = document.activeElement;
+    if (active && els.motionTuneForm.contains(active)) return;
     els.motionTuneForm.querySelectorAll("[data-motion-path]").forEach(function (input) {
       const path = input.getAttribute("data-motion-path");
       const val = getByPath(tune, path);
@@ -1831,24 +2093,13 @@
         return;
       }
       const unit = input.getAttribute("data-motion-unit");
-      if (unit === "mm") num = motionMmToPuu(num);
+      if (unit === "mm") {
+        num = motionMmToPuu(motionSnapMm(num));
+      }
       if (unit === "feed_rpm") num = feedRpmToPps(num);
       setByPath(tune, path, num);
     });
     return tune;
-  }
-
-  function motionApplyDataFields(data) {
-    if (!data) return;
-    if (els.motionDataModelo) els.motionDataModelo.value = data.modelo_id || "";
-    if (els.motionDataTargetMm) {
-      els.motionDataTargetMm.value =
-        data.target_length_mm != null ? String(data.target_length_mm) : "";
-    }
-    if (els.motionDataToleranceMm) {
-      els.motionDataToleranceMm.value =
-        data.tolerance_mm != null ? String(data.tolerance_mm) : "2";
-    }
   }
 
   async function loadMotionTune() {
@@ -1860,13 +2111,6 @@
       if (data.tune) motionFormFromTune(data.tune);
     } catch (err) {
       pushLocalEvent("No se pudo cargar ajustes Motion.", "error");
-    }
-    try {
-      const resData = await fetch("/api/motion/data");
-      const payload = await resData.json();
-      if (payload.ok && payload.data) motionApplyDataFields(payload.data);
-    } catch (err) {
-      /* ignore */
     }
   }
 
@@ -1895,7 +2139,10 @@
   async function sendMotionOp(op, extra) {
     const urgent = op === "lmguide_stop";
     if (motionCommandInFlight && !urgent) {
-      pushLocalEvent("Motion está ejecutando otra orden. Usa Paro o espera a que termine.", "error");
+      pushLocalEvent(
+        "Motion está ejecutando otra orden. Usa Paro de emergencia o espera a que termine.",
+        "error"
+      );
       return null;
     }
     if (!urgent) motionCommandInFlight = true;
@@ -1943,6 +2190,14 @@
 
   async function saveMotionTune(ev) {
     if (ev && ev.preventDefault) ev.preventDefault();
+    const lmInput = document.getElementById("lmMoveMm");
+    if (lmInput && lmInput.value.trim() !== "") {
+      const snapped = motionSnapMm(lmInput.value.trim());
+      if (Number.isFinite(snapped)) {
+        lmInput.value = snapped.toFixed(1);
+        motionRefreshPuuReadout();
+      }
+    }
     const tune = motionTuneFromForm();
     try {
       const res = await fetch("/api/motion/tune", {
@@ -1955,6 +2210,7 @@
         pushLocalEvent(data.error || "No se guardaron ajustes Motion.", "error");
         return;
       }
+      motionTuneDirty = false;
       motionApplyScale(data);
       if (data.tune) motionFormFromTune(data.tune);
       pushLocalEvent("Ajustes Motion guardados.");
@@ -1992,26 +2248,35 @@
       return;
     }
     if (op === "motion_hw_init") {
+      if (motionCommandInFlight) {
+        await sendMotionOp(op);
+        return;
+      }
+      applyActuatorsStatus({ state: "initializing", stage: "feeder" });
       const data = await sendMotionOp(op);
       if (data && data.command_ok === true) {
         latchLmServo(true);
         latchFeederServo(true);
+        applyActuatorsStatus({ state: "online", stage: "ready" });
+      } else {
+        applyActuatorsStatus({ state: "offline", stage: "" });
       }
-      return;
-    }
-    if (op === "feeder_init") {
-      const data = await sendMotionOp(op);
-      if (data && data.command_ok === true) latchFeederServo(true);
+      fetchState();
       return;
     }
     if (op === "lmguide_move") {
       const raw = (document.getElementById("lmMoveMm") || {}).value || "";
-      const mm = Number(String(raw).trim());
+      const mm = motionSnapMm(String(raw).trim());
       if (!Number.isFinite(mm)) {
         pushLocalEvent("Escribe la posición del LM Guide en mm.", "error");
         return;
       }
       extra.mm = mm;
+      const input = document.getElementById("lmMoveMm");
+      if (input) {
+        input.value = mm.toFixed(1);
+        motionRefreshPuuReadout();
+      }
     }
     if (op === "encoder_reset") {
       extra.side = btn.getAttribute("data-motion-side") || "R";
@@ -2026,13 +2291,12 @@
       return;
     }
     if (op === "lmguide_jog") {
-      const raw = (document.getElementById("lmJogDeltaMm") || {}).value || "";
-      const mm = Number(String(raw).trim());
+      const mm = Math.abs(Number(btn.getAttribute("data-jog-mm") || 0));
       if (!Number.isFinite(mm) || mm === 0) {
-        pushLocalEvent("Escribe un jog en mm distinto de cero.", "error");
+        pushLocalEvent("Paso de jog no válido.", "error");
         return;
       }
-      extra.jog_mm = Math.abs(mm);
+      extra.jog_mm = mm;
       extra.dir = Number(btn.getAttribute("data-motion-dir") || 1);
     }
     await sendMotionOp(op, extra);
@@ -2123,6 +2387,9 @@
     if (tabId === "motion") {
       loadMotionTune();
     }
+    if (tabId === "plc") {
+      restorePlcBlowerMs();
+    }
     if (tabId === "prefeeder") {
       loadPrefeederTune();
     }
@@ -2149,7 +2416,7 @@
       step_next: "Siguiente paso",
       resume: "Reanudar",
       pause: "Pausa",
-      stop: "Stop",
+      stop: "Detener",
       reset: "Reset",
       parametros: "Parámetros",
       mantenimiento: "Mantenimiento",
@@ -2164,8 +2431,6 @@
       iniciar: "Iniciar (PreAlimentador)",
       alimentar_izquierda: "JOG - L",
       alimentar_derecha: "JOG - R",
-      omitir_holgura_izquierda: "Omitir alimentación izquierda",
-      omitir_holgura_derecha: "Omitir alimentación derecha",
       recovery_confirm_piezas: "Piezas bien",
       recovery_confirm_manguera: "Continuar recuperación",
       recovery_safe_zone: "Safe zone",
@@ -2198,8 +2463,10 @@
     const checklistReady = !!ch.ok || !!state.checklist_bypass;
 
     if (els.cycleStepStart) {
+      const modeloOk = hasModeloSeleccionado(state);
       els.cycleStepStart.disabled =
         !checklistReady ||
+        !modeloOk ||
         rutina ||
         running ||
         (paused && enCurso) ||
@@ -2207,13 +2474,15 @@
         postErrorPurga;
       els.cycleStepStart.title = !checklistReady
         ? "Completa la revisión de arranque."
-        : running || (paused && enCurso)
-          ? "Hay un ciclo en curso."
-          : enError
-            ? "Corrige el error y pulsa Reset."
-            : postErrorPurga
-              ? "Tras un error debes completar la purga."
-              : "Inicia una pieza y pausa al terminar cada paso.";
+        : !modeloOk
+          ? "Selecciona un modelo antes de Iniciar."
+          : running || (paused && enCurso)
+            ? "Hay un ciclo en curso."
+            : enError
+              ? "Corrige el error y pulsa Reset."
+              : postErrorPurga
+                ? "Tras un error debes completar la purga."
+                : "Inicia una pieza y pausa al terminar cada paso.";
     }
     if (els.cycleStepNext) {
       const canNext =
@@ -2302,7 +2571,6 @@
       ) {
         openRecoveryModal();
       }
-      if (data.motion_data) motionApplyDataFields(data.motion_data);
     } catch (err) {
       pushLocalEvent("Sin conexión con el servidor.", "error");
     } finally {
@@ -2355,6 +2623,7 @@
       name: "Motion",
       select: function () { return els.selectMotionPort; },
       status: function () { return els.serialMotionStatus; },
+      badge: function () { return els.serialMotionBadge; },
       button: function () { return els.btnMotionTest; },
       required: true,
     },
@@ -2363,6 +2632,7 @@
       name: "PLC",
       select: function () { return els.selectPlcPort; },
       status: function () { return els.serialPlcStatus; },
+      badge: function () { return els.serialPlcBadge; },
       button: function () { return els.btnPlcTest; },
       required: true,
     },
@@ -2371,6 +2641,7 @@
       name: "Andon",
       select: function () { return els.selectAndonPort; },
       status: function () { return els.serialAndonStatus; },
+      badge: function () { return els.serialAndonBadge; },
       button: function () { return els.btnAndonTest; },
       required: true,
       extraNone: function () {
@@ -2382,6 +2653,7 @@
       name: "PreAlimentador",
       select: function () { return els.selectPrefeederPort; },
       status: function () { return els.serialPrefeederStatus; },
+      badge: function () { return els.serialPrefeederBadge; },
       button: function () { return els.btnPrefeederTest; },
       required: false,
     },
@@ -2392,6 +2664,41 @@
     el.textContent = text;
     el.classList.toggle("is-error", ok === false);
     el.classList.toggle("is-ok", ok === true);
+    el.classList.toggle("is-offline", ok == null);
+  }
+
+  function setModuleLinkState(mod, state, detail) {
+    const card = document.querySelector(
+      '.conexion-module[data-serial-module="' + mod.key + '"]'
+    );
+    const badge = mod.badge ? mod.badge() : null;
+    const linkState = state === "online" || state === "error" || state === "testing"
+      ? state
+      : "offline";
+    if (card) card.setAttribute("data-link-state", linkState);
+    if (badge) {
+      badge.textContent =
+        linkState === "online"
+          ? "Online"
+          : linkState === "error"
+            ? "Error"
+            : linkState === "testing"
+              ? "Probando"
+              : "Offline";
+    }
+    const assign = serialUi.assign[mod.key] || "";
+    const portLabel =
+      assign && assign !== andonNoneToken ? assign : "sin puerto";
+    let text = detail || "";
+    if (!text) {
+      if (linkState === "online") text = "Online · " + portLabel;
+      else if (linkState === "error") text = "Error · " + portLabel;
+      else if (linkState === "testing") text = "Probando · " + portLabel + "…";
+      else text = "Offline · " + portLabel;
+    }
+    const ok =
+      linkState === "online" ? true : linkState === "error" ? false : null;
+    setLinkStatus(mod.status(), text, ok);
   }
 
   function showComErrorInBanner(message) {
@@ -2435,16 +2742,19 @@
       }
       out.push({ device: port.device, label: label });
     });
-    if (mine && mine !== andonNoneToken && !seen[mine]) {
-      out.push({ device: mine, label: mine + " — asignado (no detectado ahora)" });
-    }
     return out;
   }
 
   function fillOnePortSelect(mod) {
     const select = mod.select();
     if (!select) return;
-    const current = serialUi.assign[mod.key] || "";
+    let current = serialUi.assign[mod.key] || "";
+    // COM ausente → Sin puerto (sin opciones fantasma).
+    if (current && current !== andonNoneToken && !portIsPresent(current)) {
+      current = "";
+      serialUi.assign[mod.key] = "";
+      if (serialUi.online[mod.key]) delete serialUi.online[mod.key];
+    }
     const extraNone = mod.extraNone ? mod.extraNone() : null;
     select.innerHTML = "";
     if (extraNone && extraNone.value) {
@@ -2464,13 +2774,7 @@
       select.appendChild(opt);
     });
     select.value = current;
-    if (select.value !== current && current) {
-      const missing = document.createElement("option");
-      missing.value = current;
-      missing.textContent = current + " — no listado";
-      select.appendChild(missing);
-      select.value = current;
-    }
+    if (select.value !== current) select.value = "";
   }
 
   function rebuildAllPortSelects() {
@@ -2482,39 +2786,66 @@
     }
   }
 
+  function portIsPresent(device) {
+    if (!device || device === andonNoneToken) return false;
+    const want = String(device).toUpperCase();
+    return (serialUi.ports || []).some(function (port) {
+      return port && String(port.device || "").toUpperCase() === want;
+    });
+  }
+
   function paintModuleStatus(mod) {
-    const statusEl = mod.status();
-    if (!statusEl) return;
+    if (!mod.status()) return;
     if (serialTesting[mod.key]) {
-      setLinkStatus(statusEl, "Probando…", null);
+      setModuleLinkState(mod, "testing");
       return;
     }
     const assign = serialUi.assign[mod.key] || "";
     if (mod.key === "andon") {
       const hint = andonConnectionStatusText();
       if (hint) {
-        setLinkStatus(statusEl, hint, null);
+        setModuleLinkState(mod, "offline", hint);
         return;
       }
     }
-    const online = serialUi.online[mod.key];
-    if (online && assign && online.port === assign) {
-      setLinkStatus(
-        statusEl,
-        online.message || (online.ok ? mod.name + " en línea." : mod.name + ": sin respuesta."),
-        online.ok ? true : false
-      );
-      return;
-    }
-    if (!assign) {
+    if (!assign || (assign !== andonNoneToken && !portIsPresent(assign))) {
+      if (assign && assign !== andonNoneToken) {
+        serialUi.assign[mod.key] = "";
+        if (serialUi.online[mod.key]) delete serialUi.online[mod.key];
+      }
       if (mod.required) {
-        setLinkStatus(statusEl, mod.name + ": sin puerto. El ciclo no arranca.", false);
+        setModuleLinkState(
+          mod,
+          "error",
+          "Error · sin puerto. El ciclo no arranca."
+        );
       } else {
-        setLinkStatus(statusEl, mod.name + ": sin puerto (opcional).", null);
+        setModuleLinkState(mod, "offline", "Offline · sin puerto (opcional).");
       }
       return;
     }
-    setLinkStatus(statusEl, mod.name + ": " + assign + " asignado. Pulsa Probar.", null);
+    const online = serialUi.online[mod.key];
+    if (online && online.port === assign) {
+      if (online.ok) {
+        setModuleLinkState(
+          mod,
+          "online",
+          "Online · " + assign + (online.message ? " — " + online.message : "")
+        );
+      } else {
+        setModuleLinkState(
+          mod,
+          "error",
+          "Error · " + assign + (online.message ? " — " + online.message : "")
+        );
+      }
+      return;
+    }
+    setModuleLinkState(
+      mod,
+      "offline",
+      "Offline · " + assign + ". Pulsa Probar."
+    );
   }
 
   function paintAllModuleStatus() {
@@ -2748,7 +3079,36 @@
     }
   }
 
+  let serialTestAllBusy = false;
+
+  async function testAllModuleCom() {
+    if (serialTestAllBusy) return;
+    serialTestAllBusy = true;
+    if (els.btnTestAllPorts) els.btnTestAllPorts.disabled = true;
+    try {
+      for (let i = 0; i < SERIAL_MODULES.length; i++) {
+        const mod = SERIAL_MODULES[i];
+        if (mod.key === "andon" && serialAndonSkipped) continue;
+        const assign = serialUi.assign[mod.key] || "";
+        if (!assign || assign === andonNoneToken) {
+          paintModuleStatus(mod);
+          continue;
+        }
+        await testModuleCom(mod.key);
+      }
+      pushLocalEvent("Prueba de puertos terminada.");
+    } finally {
+      serialTestAllBusy = false;
+      if (els.btnTestAllPorts) els.btnTestAllPorts.disabled = false;
+    }
+  }
+
   if (els.btnRefreshPorts) els.btnRefreshPorts.addEventListener("click", loadSerialPorts);
+  if (els.btnTestAllPorts) {
+    els.btnTestAllPorts.addEventListener("click", function () {
+      testAllModuleCom();
+    });
+  }
   if (els.btnMotionTest) {
     els.btnMotionTest.addEventListener("click", function () {
       testModuleCom("motion");
@@ -2772,7 +3132,11 @@
   /* --- fin ANDON_SKIP_OPCIONAL (serial / conexión Andon en JS) — TODO_BORRAR --- */
 
   if (els.prefeederTuneReload) {
-    els.prefeederTuneReload.addEventListener("click", loadPrefeederTune);
+    els.prefeederTuneReload.addEventListener("click", function () {
+      prefeederDirty.L = false;
+      prefeederDirty.R = false;
+      loadPrefeederTune(true);
+    });
   }
   if (els.prefeederStatusRefresh) {
     els.prefeederStatusRefresh.addEventListener("click", pollPrefeeder);
@@ -3038,15 +3402,42 @@
 
   if (els.motionTuneForm) {
     els.motionTuneForm.addEventListener("submit", saveMotionTune);
+    els.motionTuneForm.addEventListener("input", function (ev) {
+      const t = ev.target;
+      if (t && t.hasAttribute && t.hasAttribute("data-motion-path")) {
+        motionTuneDirty = true;
+      }
+    });
   }
   if (els.motionTuneReload) {
-    els.motionTuneReload.addEventListener("click", loadMotionTune);
+    els.motionTuneReload.addEventListener("click", function () {
+      motionTuneDirty = false;
+      loadMotionTune();
+    });
   }
   if (els.motionStatusRefresh) {
     els.motionStatusRefresh.addEventListener("click", pollEncoder);
   }
   if (els.cycleParamsForm) {
     els.cycleParamsForm.addEventListener("submit", saveCycleParams);
+    els.cycleParamsForm.addEventListener("input", function (ev) {
+      const t = ev.target;
+      if (t && t.hasAttribute && t.hasAttribute("data-cycle-param")) {
+        cycleParamsDirty = true;
+      }
+    });
+  }
+  if (els.prefeederTuneForm) {
+    els.prefeederTuneForm.addEventListener("input", function (ev) {
+      const t = ev.target;
+      if (!t || !t.getAttribute) return;
+      const side = t.getAttribute("data-pf-side");
+      if (side === "L" || side === "R") prefeederDirty[side] = true;
+    });
+  }
+  if (els.plcBlowerMs) {
+    els.plcBlowerMs.addEventListener("change", persistPlcBlowerMs);
+    els.plcBlowerMs.addEventListener("blur", persistPlcBlowerMs);
   }
   if (els.cycleStepStart) {
     els.cycleStepStart.addEventListener("click", function () {
@@ -3067,6 +3458,14 @@
   const lmMoveMm = document.getElementById("lmMoveMm");
   if (lmMoveMm) {
     lmMoveMm.addEventListener("input", motionRefreshPuuReadout);
+    lmMoveMm.addEventListener("change", function () {
+      const raw = lmMoveMm.value.trim();
+      if (raw === "") return;
+      const snapped = motionSnapMm(raw);
+      if (!Number.isFinite(snapped)) return;
+      lmMoveMm.value = snapped.toFixed(1);
+      motionRefreshPuuReadout();
+    });
   }
 
   if (els.motionTuneForm) {
@@ -3074,6 +3473,11 @@
       btn.addEventListener("click", function () {
         runMotionButton(btn);
       });
+    });
+  }
+  if (els.btnInitActuators) {
+    els.btnInitActuators.addEventListener("click", function () {
+      runMotionButton(els.btnInitActuators);
     });
   }
 
@@ -3109,11 +3513,11 @@
       ? els.plcManualForm.querySelector('[data-plc-op="blower"]')
       : null;
     if (typeof status.blower === "boolean") setPlcPressed(blowerBtn, status.blower);
-    if (status.pulse_busy) return;
     PLC_OUTPUTS.forEach(function (pair) {
       if (typeof status[pair[0]] === "boolean") setPlcPressed(plcButton(pair[1]), status[pair[0]]);
     });
     syncPlcHolderEncoderButton(status);
+    syncMotionCuttersButton(status);
   }
 
   function clearPlcOutputs() {
@@ -3125,6 +3529,7 @@
       : null;
     setPlcPressed(blowerBtn, false);
     setPlcPressed(plcHolderEncoderButton(), false);
+    setPlcPressed(motionCuttersButton(), false);
   }
 
   async function sendPlcOp(op, extra) {
@@ -3180,12 +3585,21 @@
         await sendPlcOp("blower_off");
         return;
       }
-      const raw = els.plcBlowerMs ? String(els.plcBlowerMs.value).trim() : "2000";
-      const ms = raw === "" ? 2000 : Number(raw);
+      persistPlcBlowerMs();
+      const raw = els.plcBlowerMs ? String(els.plcBlowerMs.value).trim() : "";
+      let saved = "";
+      try {
+        saved = localStorage.getItem(STORAGE_PLC_BLOWER_MS) || "";
+      } catch (err) {
+        saved = "";
+      }
+      const ms = Number(raw !== "" ? raw : saved || "2000");
       if (!Number.isFinite(ms)) {
         pushLocalEvent("El tiempo del blower tiene que ser un número.", "error");
         return;
       }
+      if (els.plcBlowerMs) els.plcBlowerMs.value = String(Math.round(ms));
+      persistPlcBlowerMs();
       await sendPlcOp("blower_on", { ms: ms });
       return;
     }
@@ -3220,11 +3634,14 @@
     els.prefeederEsp32Hint.textContent = text || "";
   }
 
-  function prefeederFormFromTune(tune) {
+  function prefeederFormFromTune(tune, force) {
     if (!els.prefeederTuneForm || !tune) return;
+    const active = document.activeElement;
+    const editing = !!(active && els.prefeederTuneForm.contains(active));
     els.prefeederTuneForm.querySelectorAll("[data-pf-side][data-pf-key]").forEach(function (input) {
       const side = input.getAttribute("data-pf-side");
       const key = input.getAttribute("data-pf-key");
+      if (!force && (prefeederDirty[side] || (editing && active === input))) return;
       const block = tune[side];
       if (!block || block[key] == null) return;
       input.value = String(block[key]);
@@ -3283,19 +3700,17 @@
       pfPaintSensor(document.getElementById("pfLim" + side), !!sen.limit, true);
       if (block && block.cfg) tuneFromMaster[side] = block.cfg;
     });
-    // Leer actuales del maestro sin pisar si el operador está editando.
+    // No pisar valores que el operador está editando o aún no guardó.
     if (els.prefeederTuneForm && Object.keys(tuneFromMaster).length) {
-      const active = document.activeElement;
-      const editing = !!(active && els.prefeederTuneForm.contains(active));
-      if (!editing) prefeederFormFromTune(tuneFromMaster);
+      prefeederFormFromTune(tuneFromMaster);
     }
   }
 
-  async function loadPrefeederTune() {
+  async function loadPrefeederTune(force) {
     try {
       const res = await fetch("/api/prefeeder/tune");
       const data = await res.json();
-      if (data.ok && data.tune) prefeederFormFromTune(data.tune);
+      if (data.ok && data.tune) prefeederFormFromTune(data.tune, !!force);
     } catch (err) {
       pushLocalEvent("No se pudo cargar parámetros del PreAlimentador.", "error");
     }
@@ -3316,7 +3731,8 @@
         pushLocalEvent(data.error || "No se guardó el lado " + side + ".", "error");
         return;
       }
-      if (data.tune) prefeederFormFromTune(data.tune);
+      prefeederDirty[side] = false;
+      if (data.tune) prefeederFormFromTune(data.tune, true);
       const pushed = data.pushed && data.pushed[side];
       const applied = data.applied && data.applied[side];
       if (applied === false) {
@@ -3335,6 +3751,32 @@
       await pollPrefeeder();
     } catch (err) {
       pushLocalEvent("Error al guardar PreAlimentador " + side + ".", "error");
+    }
+  }
+
+  function restorePlcBlowerMs() {
+    if (!els.plcBlowerMs) return;
+    let saved = "";
+    try {
+      saved = localStorage.getItem(STORAGE_PLC_BLOWER_MS) || "";
+    } catch (err) {
+      saved = "";
+    }
+    if (!saved) return;
+    const ms = Number(saved);
+    if (!Number.isFinite(ms) || ms < 200) return;
+    els.plcBlowerMs.value = String(Math.round(ms));
+  }
+
+  function persistPlcBlowerMs() {
+    if (!els.plcBlowerMs) return;
+    const raw = String(els.plcBlowerMs.value).trim();
+    const ms = Number(raw);
+    if (!Number.isFinite(ms) || ms < 200) return;
+    try {
+      localStorage.setItem(STORAGE_PLC_BLOWER_MS, String(Math.round(ms)));
+    } catch (err) {
+      /* ignore */
     }
   }
 
@@ -3369,6 +3811,14 @@
     });
   }
 
+  if (els.motionTuneForm) {
+    els.motionTuneForm.querySelectorAll("[data-plc-op]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        runPlcButton(btn);
+      });
+    });
+  }
+
   if (els.statusBannerActions) {
     els.statusBannerActions.querySelectorAll("[data-plc-op]").forEach(function (btn) {
       btn.addEventListener("click", function () {
@@ -3378,17 +3828,83 @@
   }
 
   if (els.selectModelo) {
-    els.selectModelo.addEventListener("change", function () {
+    els.selectModelo.addEventListener("focus", function () {
       if (syncingModelSelect) return;
-      selectModelo(els.selectModelo.value, true);
+      modelComboActive = -1;
+      try {
+        els.selectModelo.select();
+      } catch (e) {
+        /* ignore */
+      }
+      renderModelComboList("", true);
+    });
+    els.selectModelo.addEventListener("input", function () {
+      if (syncingModelSelect) return;
+      modelComboActive = 0;
+      renderModelComboList(els.selectModelo.value, true);
+      const hit = findModeloInCatalog(els.selectModelo.value);
+      if (hit) syncModeloDesc(hit.modelo);
+      else if (els.metricModeloDesc) {
+        els.metricModeloDesc.textContent = "—";
+        els.metricModeloDesc.title = "";
+      }
+    });
+    els.selectModelo.addEventListener("keydown", function (ev) {
+      if (syncingModelSelect) return;
+      const filter = modelComboOpen ? modelComboFilter : els.selectModelo.value;
+      const items = filteredModelos(filter);
+      if (ev.key === "ArrowDown") {
+        ev.preventDefault();
+        if (!modelComboOpen) renderModelComboList(els.selectModelo.value, true);
+        modelComboActive = Math.min(items.length - 1, modelComboActive + 1);
+        if (modelComboActive < 0 && items.length) modelComboActive = 0;
+        renderModelComboList(filter, true);
+      } else if (ev.key === "ArrowUp") {
+        ev.preventDefault();
+        if (!modelComboOpen) renderModelComboList(els.selectModelo.value, true);
+        modelComboActive = Math.max(0, modelComboActive - 1);
+        renderModelComboList(filter, true);
+      } else if (ev.key === "Enter") {
+        ev.preventDefault();
+        if (modelComboOpen && modelComboActive >= 0 && items[modelComboActive]) {
+          pickModeloFromCombo(items[modelComboActive].modelo);
+        } else {
+          const typed = String(els.selectModelo.value || "").trim();
+          const hit = findModeloInCatalog(typed);
+          if (hit) pickModeloFromCombo(hit.modelo);
+          else clearModeloSelection(true);
+        }
+      } else if (ev.key === "Escape") {
+        setModelComboOpen(false);
+      }
+    });
+    els.selectModelo.addEventListener("blur", function () {
+      window.setTimeout(function () {
+        if (!els.modelCombo || els.modelCombo.contains(document.activeElement)) return;
+        setModelComboOpen(false);
+        const typed = String(els.selectModelo.value || "").trim();
+        const hit = findModeloInCatalog(typed);
+        if (hit && !syncingModelSelect) {
+          pickModeloFromCombo(hit.modelo);
+          return;
+        }
+        // Texto vacío o inválido (p. ej. "00"): vuelve a Sin selección.
+        if (!syncingModelSelect) clearModeloSelection(true);
+      }, 120);
     });
   }
+
+  document.addEventListener("mousedown", function (ev) {
+    if (!modelComboOpen || !els.modelCombo) return;
+    if (els.modelCombo.contains(ev.target)) return;
+    setModelComboOpen(false);
+  });
 
   if (els.metricCantidad) {
     els.metricCantidad.addEventListener("change", function () {
       const n = parseInt(String(els.metricCantidad.value).trim(), 10);
       if (!Number.isFinite(n) || n < 1) {
-        pushLocalEvent("La cantidad del lote tiene que ser un entero de 1 o más.", "error");
+        pushLocalEvent("El Kanban tiene que ser un entero de 1 o más.", "error");
         return;
       }
       saveCantidad(n);
@@ -3425,15 +3941,6 @@
     btn.classList.remove("is-vivid");
   }
 
-  function syncHolgura(action, on, lado) {
-    const btn = actionButton(action);
-    if (!btn) return;
-    setButtonOn(btn, on);
-    btn.textContent = on
-      ? "Restaurar alimentación " + lado
-      : "Omitir alimentación " + lado;
-  }
-
   function syncRoutine(state) {
     const rutina = state.rutina || "";
     const fase = state.rutina_fase || "";
@@ -3461,9 +3968,6 @@
       home.disabled = !!state.rutina_manos || cicloCorriendo || (!!rutina && rutina !== "purga");
       setButtonOn(home, rutina === "posicion_inicial");
     }
-    syncHolgura("omitir_holgura_izquierda", !!state.omitir_holgura_l, "izquierda");
-    syncHolgura("omitir_holgura_derecha", !!state.omitir_holgura_r, "derecha");
-
     const pfIniciar = document.querySelector('[data-block="prealimentador"] [data-action="iniciar"]');
     if (pfIniciar) {
       const pf = state.prefeeder || {};
@@ -3750,12 +4254,6 @@
           closeSettings();
           return;
         }
-        if (action === "omitir_holgura_izquierda" || action === "omitir_holgura_derecha") {
-          askEmpleado(function (empleado) {
-            sendAction(block, action, { empleado: empleado });
-          });
-          return;
-        }
         if (action === "side_bypass") {
           openSideBypassModal();
           return;
@@ -3772,6 +4270,7 @@
 
   loadThemePreference();
   loadEventsPreference();
+  restorePlcBlowerMs();
   loadModelos()
     .then(fetchState)
     .then(function (state) {

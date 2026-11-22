@@ -1,6 +1,7 @@
 /*
  * MCU_PLC.ino — MCU PLC (ESP32)
- * Válvulas por pulso KEEP, blower por nivel, sensores con debounce.
+ * Válvulas por nivel: orden → ejecuta (settle/ms) → confirma con estado.
+ * Blower por nivel; sensores con debounce.
  * Referencia: PlcIo_Uso.h. Parámetros: Parameters.h.
  *
  * Sin bus hacia el PLC físico. Órdenes por Serial (JSON, una línea).
@@ -29,37 +30,17 @@ static const uint8_t kValvePin[PLC_VALVE_COUNT] = {
     PLC_PIN_OUT_ENCODER,
 };
 
-static const uint8_t kAllOffOrder[] = {
-    PLC_VALVE_CUTTER_R,
-    PLC_VALVE_CUTTER_L,
-    PLC_VALVE_GRIPPER,
-    PLC_VALVE_ENCODER,
-    PLC_VALVE_HOLDER,
-};
-static const uint8_t kAllOffCount = sizeof(kAllOffOrder) / sizeof(kAllOffOrder[0]);
+static bool gTimedCutActive = false;
+static uint8_t gTimedCutMask = 0;
+static uint32_t gTimedCutT0 = 0;
+static uint32_t gTimedCutMs = 0;
 
-struct PulseJob {
-  uint8_t pins[2];
-  uint8_t nPins;
-  uint8_t valveIndex[2];
-  uint8_t nValves;
-  bool wantOn;
-};
+static bool gSettleActive = false;
+static uint32_t gSettleT0 = 0;
+static uint32_t gSettleMs = 0;
 
-static const uint8_t PLC_PHASE_IDLE = 0;
-static const uint8_t PLC_PHASE_HIGH = 1;
-static const uint8_t PLC_PHASE_GAP  = 2;
-static const uint8_t PLC_PULSE_QUEUE_LEN = 8;
-
-static PulseJob gQ[PLC_PULSE_QUEUE_LEN];
-static uint8_t gQHead = 0;
-static uint8_t gQCount = 0;
-static PulseJob gActive;
-static uint8_t gPhase = PLC_PHASE_IDLE;
-static uint32_t gPhaseMs = 0;
-
-static bool gTarget[PLC_VALVE_COUNT];
-static bool gLogical[PLC_VALVE_COUNT];
+static bool gResetActive = false;
+static uint32_t gResetT0 = 0;
 
 static bool gBlowerOn = false;
 static uint32_t gBlowerT0 = 0;
@@ -75,6 +56,9 @@ static uint32_t gBootMs = 0;
 
 static char gSerialLine[192];
 static size_t gSerialLineLen = 0;
+
+static void replyOk(const char* op, bool ok);
+static void replyValveDone(bool ok);
 
 // ── JSON plano (Serial) ─────────────────────────────────────────────────────
 
@@ -123,7 +107,7 @@ static void valveOutputsIdle() {
       PLC_PIN_OUT_HOLDER,   PLC_PIN_OUT_ENCODER,  PLC_PIN_OUT_RESET,
   };
   for (uint8_t i = 0; i < sizeof(pins); i++) {
-    PLC_VALVE_GPIO_OFF(pins[i]);
+    digitalWrite(pins[i], LOW);
   }
 }
 
@@ -145,43 +129,12 @@ static void initIo() {
   pinMode(PLC_PIN_IN_ENCODER, INPUT);
 }
 
-static bool enqueueJob(const PulseJob& job) {
-  if (gQCount >= PLC_PULSE_QUEUE_LEN) return false;
-  uint8_t tail = (uint8_t)((gQHead + gQCount) % PLC_PULSE_QUEUE_LEN);
-  gQ[tail] = job;
-  gQCount++;
-  return true;
-}
-
-static void abortPulses() {
-  if (gPhase == PLC_PHASE_HIGH) {
-    for (uint8_t i = 0; i < gActive.nPins; i++) {
-      PLC_VALVE_GPIO_OFF(gActive.pins[i]);
-    }
-  }
-  gPhase = PLC_PHASE_IDLE;
-  gQCount = 0;
-  gQHead = 0;
-}
-
-// Un solo pulso paralelo para los pines cuyo estado pedido aún no es wantOn.
-static bool requestValves(const uint8_t* ids, uint8_t n, bool wantOn) {
-  PulseJob job = {};
-  job.wantOn = wantOn;
+static bool setValves(const uint8_t* ids, uint8_t n, bool wantOn) {
   for (uint8_t i = 0; i < n; i++) {
-    uint8_t id = ids[i];
-    if (id >= PLC_VALVE_COUNT) return false;
-    if (gTarget[id] == wantOn) continue;
-    if (job.nPins >= 2) return false;
-    job.pins[job.nPins] = kValvePin[id];
-    job.valveIndex[job.nValves] = id;
-    job.nPins++;
-    job.nValves++;
+    if (ids[i] >= PLC_VALVE_COUNT) return false;
   }
-  if (job.nPins == 0) return true;
-  if (!enqueueJob(job)) return false;
-  for (uint8_t i = 0; i < job.nValves; i++) {
-    gTarget[job.valveIndex[i]] = wantOn;
+  for (uint8_t i = 0; i < n; i++) {
+    digitalWrite(kValvePin[ids[i]], wantOn ? HIGH : LOW);
   }
   return true;
 }
@@ -189,62 +142,83 @@ static bool requestValves(const uint8_t* ids, uint8_t n, bool wantOn) {
 static bool applyValveName(const char* name, bool wantOn) {
   if (tokenIs(name, "holder_encoder")) {
     const uint8_t ids[] = {PLC_VALVE_HOLDER, PLC_VALVE_ENCODER};
-    return requestValves(ids, 2, wantOn);
+    return setValves(ids, 2, wantOn);
   }
   if (tokenIs(name, "cutter_r")) {
     const uint8_t id = PLC_VALVE_CUTTER_R;
-    return requestValves(&id, 1, wantOn);
+    return setValves(&id, 1, wantOn);
   }
   if (tokenIs(name, "cutter_l")) {
     const uint8_t id = PLC_VALVE_CUTTER_L;
-    return requestValves(&id, 1, wantOn);
+    return setValves(&id, 1, wantOn);
   }
   if (tokenIs(name, "cutters")) {
     const uint8_t ids[] = {PLC_VALVE_CUTTER_R, PLC_VALVE_CUTTER_L};
-    return requestValves(ids, 2, wantOn);
+    return setValves(ids, 2, wantOn);
   }
   if (tokenIs(name, "gripper")) {
     const uint8_t id = PLC_VALVE_GRIPPER;
-    return requestValves(&id, 1, wantOn);
+    return setValves(&id, 1, wantOn);
   }
   if (tokenIs(name, "holder")) {
     const uint8_t id = PLC_VALVE_HOLDER;
-    return requestValves(&id, 1, wantOn);
+    return setValves(&id, 1, wantOn);
   }
   if (tokenIs(name, "encoder")) {
     const uint8_t id = PLC_VALVE_ENCODER;
-    return requestValves(&id, 1, wantOn);
+    return setValves(&id, 1, wantOn);
   }
   return false;
 }
 
-static void servicePulses(uint32_t now) {
-  if (gPhase == PLC_PHASE_HIGH) {
-    if ((uint32_t)(now - gPhaseMs) >= PLC_VALVE_PULSE_MS) {
-      for (uint8_t i = 0; i < gActive.nPins; i++) {
-        PLC_VALVE_GPIO_OFF(gActive.pins[i]);
-      }
-      for (uint8_t i = 0; i < gActive.nValves; i++) {
-        gLogical[gActive.valveIndex[i]] = gActive.wantOn;
-      }
-      gPhase = PLC_PHASE_GAP;
-      gPhaseMs = now;
-    }
-    return;
+static bool startTimedCut(const char* name, uint32_t ms) {
+  if (gTimedCutActive || gSettleActive || ms == 0 || ms > PLC_CUTTER_MAX_MS) return false;
+  if (tokenIs(name, "cutters")) {
+    gTimedCutMask = (1 << PLC_VALVE_CUTTER_R) | (1 << PLC_VALVE_CUTTER_L);
+  } else if (tokenIs(name, "cutter_r")) {
+    gTimedCutMask = (1 << PLC_VALVE_CUTTER_R);
+  } else if (tokenIs(name, "cutter_l")) {
+    gTimedCutMask = (1 << PLC_VALVE_CUTTER_L);
+  } else {
+    return false;
   }
-  if (gPhase == PLC_PHASE_GAP) {
-    if ((uint32_t)(now - gPhaseMs) < PLC_VALVE_PULSE_GAP_MS) return;
-    gPhase = PLC_PHASE_IDLE;
+  if (!applyValveName(name, true)) return false;
+  gTimedCutActive = true;
+  gTimedCutT0 = millis();
+  gTimedCutMs = ms;
+  return true;
+}
+
+static bool startSettle(uint32_t ms) {
+  if (gTimedCutActive || gSettleActive) return false;
+  if (ms == 0) {
+    replyValveDone(true);
+    return true;
   }
-  if (gQCount == 0) return;
-  gActive = gQ[gQHead];
-  gQHead = (uint8_t)((gQHead + 1) % PLC_PULSE_QUEUE_LEN);
-  gQCount--;
-  for (uint8_t i = 0; i < gActive.nPins; i++) {
-    PLC_VALVE_GPIO_ON(gActive.pins[i]);
+  if (ms > PLC_SETTLE_MAX_MS) return false;
+  gSettleActive = true;
+  gSettleT0 = millis();
+  gSettleMs = ms;
+  return true;
+}
+
+static void serviceSettle(uint32_t now) {
+  if (!gSettleActive) return;
+  if ((uint32_t)(now - gSettleT0) < gSettleMs) return;
+  gSettleActive = false;
+  gSettleMs = 0;
+  replyValveDone(true);
+}
+
+static void serviceTimedCut(uint32_t now) {
+  if (!gTimedCutActive) return;
+  if ((uint32_t)(now - gTimedCutT0) < gTimedCutMs) return;
+  for (uint8_t id = PLC_VALVE_CUTTER_R; id <= PLC_VALVE_CUTTER_L; id++) {
+    if (gTimedCutMask & (1 << id)) digitalWrite(kValvePin[id], LOW);
   }
-  gPhase = PLC_PHASE_HIGH;
-  gPhaseMs = now;
+  gTimedCutActive = false;
+  gTimedCutMask = 0;
+  replyValveDone(true);
 }
 
 static void blowerOff() {
@@ -269,31 +243,32 @@ static void serviceBlower(uint32_t now) {
 
 static bool allOff() {
   blowerOff();
-  uint8_t need = 0;
-  for (uint8_t i = 0; i < kAllOffCount; i++) {
-    if (gTarget[kAllOffOrder[i]]) need++;
+  for (uint8_t id = 0; id < PLC_VALVE_COUNT; id++) {
+    digitalWrite(kValvePin[id], LOW);
   }
-  if (need > (uint8_t)(PLC_PULSE_QUEUE_LEN - gQCount)) return false;
-  for (uint8_t i = 0; i < kAllOffCount; i++) {
-    uint8_t id = kAllOffOrder[i];
-    if (!gTarget[id]) continue;
-    if (!requestValves(&id, 1, false)) return false;
-  }
+  gTimedCutActive = false;
+  gTimedCutMask = 0;
+  gSettleActive = false;
+  gSettleMs = 0;
   return true;
 }
 
 static bool plcReset() {
-  abortPulses();
-  blowerOff();
-  for (uint8_t i = 0; i < PLC_VALVE_COUNT; i++) {
-    gTarget[i] = false;
-    gLogical[i] = false;
-  }
+  allOff();
   valveOutputsIdle();
-  PulseJob job = {};
-  job.pins[0] = PLC_PIN_OUT_RESET;
-  job.nPins = 1;
-  return enqueueJob(job);
+  if (gResetActive) return false;
+  digitalWrite(PLC_PIN_OUT_RESET, HIGH);
+  gResetActive = true;
+  gResetT0 = millis();
+  return true;
+}
+
+static void serviceReset(uint32_t now) {
+  if (!gResetActive) return;
+  if ((uint32_t)(now - gResetT0) < PLC_RESET_PULSE_MS) return;
+  digitalWrite(PLC_PIN_OUT_RESET, LOW);
+  gResetActive = false;
+  replyOk("reset", true);
 }
 
 // ── Sensores ────────────────────────────────────────────────────────────────
@@ -362,26 +337,27 @@ static void serviceSensors(uint32_t now) {
 }
 
 static void printStatusJson() {
-  bool busy = gPhase != PLC_PHASE_IDLE || gQCount != 0;
   bool grace = (uint32_t)(millis() - gBootMs) < PLC_BOOT_GRACE_MS;
   uint8_t sens = gStableValid ? gStable : 0;
   uint8_t faults = grace ? 0 : reportableFaults();
 
   Serial.print(F("{\"op\":\"status\""));
   Serial.print(F(",\"cutter_r\":"));
-  printBool(gLogical[PLC_VALVE_CUTTER_R]);
+  printBool(digitalRead(PLC_PIN_OUT_CUTTER_R) == HIGH);
   Serial.print(F(",\"cutter_l\":"));
-  printBool(gLogical[PLC_VALVE_CUTTER_L]);
+  printBool(digitalRead(PLC_PIN_OUT_CUTTER_L) == HIGH);
   Serial.print(F(",\"gripper\":"));
-  printBool(gLogical[PLC_VALVE_GRIPPER]);
+  printBool(digitalRead(PLC_PIN_OUT_GRIPPER) == HIGH);
   Serial.print(F(",\"holder\":"));
-  printBool(gLogical[PLC_VALVE_HOLDER]);
+  printBool(digitalRead(PLC_PIN_OUT_HOLDER) == HIGH);
   Serial.print(F(",\"encoder\":"));
-  printBool(gLogical[PLC_VALVE_ENCODER]);
+  printBool(digitalRead(PLC_PIN_OUT_ENCODER) == HIGH);
   Serial.print(F(",\"blower\":"));
   printBool(gBlowerOn);
-  Serial.print(F(",\"pulse_busy\":"));
-  printBool(busy);
+  Serial.print(F(",\"timed_cut_busy\":"));
+  printBool(gTimedCutActive);
+  Serial.print(F(",\"settle_busy\":"));
+  printBool(gSettleActive);
   Serial.print(F(",\"sens_mask\":"));
   Serial.print(sens);
   Serial.print(F(",\"sens_cutter\":"));
@@ -431,6 +407,35 @@ static void replyOk(const char* op, bool ok) {
   Serial.println(F("}"));
 }
 
+static void replyValveDone(bool ok) {
+  bool grace = (uint32_t)(millis() - gBootMs) < PLC_BOOT_GRACE_MS;
+  uint8_t faults = grace ? 0 : reportableFaults();
+
+  Serial.print(F("{\"op\":\"valve\",\"ok\":"));
+  printBool(ok);
+  Serial.print(F(",\"cutter_r\":"));
+  printBool(digitalRead(PLC_PIN_OUT_CUTTER_R) == HIGH);
+  Serial.print(F(",\"cutter_l\":"));
+  printBool(digitalRead(PLC_PIN_OUT_CUTTER_L) == HIGH);
+  Serial.print(F(",\"gripper\":"));
+  printBool(digitalRead(PLC_PIN_OUT_GRIPPER) == HIGH);
+  Serial.print(F(",\"holder\":"));
+  printBool(digitalRead(PLC_PIN_OUT_HOLDER) == HIGH);
+  Serial.print(F(",\"encoder\":"));
+  printBool(digitalRead(PLC_PIN_OUT_ENCODER) == HIGH);
+  Serial.print(F(",\"blower\":"));
+  printBool(gBlowerOn);
+  Serial.print(F(",\"fault_cutter\":"));
+  printBool((faults & PLC_BIT_CUTTER) != 0);
+  Serial.print(F(",\"fault_gripper\":"));
+  printBool((faults & PLC_BIT_GRIPPER) != 0);
+  Serial.print(F(",\"fault_holder\":"));
+  printBool((faults & PLC_BIT_HOLDER) != 0);
+  Serial.print(F(",\"fault_encoder\":"));
+  printBool((faults & PLC_BIT_ENCODER) != 0);
+  Serial.println(F("}"));
+}
+
 static void handleSerialLine(char* line) {
   while (*line == ' ' || *line == '\t') line++;
   if (*line == '\0') return;
@@ -447,8 +452,24 @@ static void handleSerialLine(char* line) {
     const char* name = nullptr;
     bool on = false;
     bool ok = jsonFindKey(line, "name", &name) && *name == '"' && jsonReadOn(line, &on);
-    if (ok) ok = applyValveName(name + 1, on);
-    replyOk("valve", ok);
+    uint32_t ms = (uint32_t)jsonReadLong(line, "ms", 0);
+    uint32_t settleMs = (uint32_t)jsonReadLong(line, "settle_ms", 0);
+    if (!ok) {
+      replyValveDone(false);
+      return;
+    }
+    if (on && ms > 0) {
+      ok = (tokenIs(name + 1, "cutters") || tokenIs(name + 1, "cutter_r") ||
+            tokenIs(name + 1, "cutter_l")) &&
+           startTimedCut(name + 1, ms);
+      if (!ok) replyValveDone(false);
+      return;
+    }
+    if (!applyValveName(name + 1, on)) {
+      replyValveDone(false);
+      return;
+    }
+    if (!startSettle(settleMs)) replyValveDone(false);
     return;
   }
   if (strstr(line, "\"op\":\"blower_on\"")) {
@@ -468,7 +489,7 @@ static void handleSerialLine(char* line) {
     return;
   }
   if (strstr(line, "\"op\":\"reset\"")) {
-    replyOk("reset", plcReset());
+    if (!plcReset()) replyOk("reset", false);
     return;
   }
 
@@ -508,7 +529,9 @@ void setup() {
 void loop() {
   pollSerial();
   uint32_t now = millis();
-  servicePulses(now);
+  serviceTimedCut(now);
+  serviceSettle(now);
+  serviceReset(now);
   serviceBlower(now);
   serviceSensors(now);
 }

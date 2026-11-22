@@ -20,7 +20,6 @@ struct FeedParams {
   float pullerRpm = PULLER_RPM;
   uint16_t settleMs = HOLGURA_SETTLE_MS;
   float onSec = HOLGURA_ON_FEED_SEC;
-  float stallFaultSec = HOLGURA_STALL_FAULT_SEC;
 };
 
 struct StatusPod {
@@ -34,7 +33,6 @@ struct StatusPod {
 static FeedParams gFeed;
 static SemaphoreHandle_t paramMux = nullptr;
 static bool gFeedLock = true;
-static bool gOmitHolgura = false;
 static volatile bool gCfgPollUrgent = false;
 static bool gForceFeed = false;  // HMI / maestro (set_force_feed)
 static bool gJogBtn = false;     // Botón físico JOG - L / JOG - R
@@ -59,8 +57,6 @@ static void clampFeed(FeedParams& p) {
   if (p.settleMs > HOLGURA_SETTLE_MS_MAX) p.settleMs = HOLGURA_SETTLE_MS_MAX;
   if (p.onSec < 0.1f) p.onSec = 0.1f;
   if (p.onSec > 120.0f) p.onSec = 120.0f;
-  if (p.stallFaultSec < 0.5f) p.stallFaultSec = 0.5f;
-  if (p.stallFaultSec > 60.0f) p.stallFaultSec = 60.0f;
 }
 
 // --- Motores vía MotorControl: Puller=A (loop, 10:1), Feeder=B (tarea, 1:1). ---
@@ -233,13 +229,13 @@ static void stopHolguraFeedCycle(const SensorSnapshot& s) {
   holguraSawOn = false;
 }
 
-static void serviceHolguraStallFault(uint32_t nowMs, const SensorSnapshot& s, const FeedParams& p) {
+static void serviceHolguraStallFault(uint32_t nowMs, const SensorSnapshot& s) {
   if (fault != FAULT_NONE || s.holguraOn || FeedMotorMoving() || MotorPullerMoving()) {
     holguraStallSinceMs = 0;
     return;
   }
   if (!holguraStallSinceMs) holguraStallSinceMs = nowMs;
-  if ((nowMs - holguraStallSinceMs) >= (uint32_t)(p.stallFaultSec * 1000.0f))
+  if ((nowMs - holguraStallSinceMs) >= HOLGURA_STALL_FAULT_MS)
     enterFault(FAULT_HOLGURA);
 }
 
@@ -313,8 +309,8 @@ static void FeedingMode(uint32_t nowMs) {
 
   if (fault == FAULT_LIMIT && !s.limitActive) fault = FAULT_NONE;
   if (fault == FAULT_CYLINDER && !s.cylinderOpen) fault = FAULT_NONE;
-  // Holgura se limpia con sensor ON o si se omitio alimentacion (IDLE intencional).
-  if (fault == FAULT_HOLGURA && (s.holguraOn || gOmitHolgura)) fault = FAULT_NONE;
+  // Holgura se limpia cuando el sensor vuelve a ON.
+  if (fault == FAULT_HOLGURA && s.holguraOn) fault = FAULT_NONE;
 
   // Limite / cilindro solo afectan el ciclo automatico.
   if (s.limitActive && fault != FAULT_LIMIT) enterFault(FAULT_LIMIT);
@@ -328,21 +324,13 @@ static void FeedingMode(uint32_t nowMs) {
     return;
   }
 
-  // Omitir alimentacion: Holgura OFF && omit ON → IDLE, sin secuencia ni stall.
-  if (gOmitHolgura && !s.holguraOn) {
-    stopFeederDemand();
-    holguraStallSinceMs = 0;
-    applyFeedOutputs(p);
-    return;
-  }
-
   if (fault == FAULT_NONE) {
     if (!feederDemand && !s.holguraOn)
       beginHolguraFeed(s);
     serviceHolguraFeed(nowMs, s, p);
   }
 
-  serviceHolguraStallFault(nowMs, s, p);
+  serviceHolguraStallFault(nowMs, s);
   applyFeedOutputs(p);
 }
 
@@ -458,10 +446,8 @@ static void applyConfigJson(const String& body) {
   if (jsonNum(cfg, "puller_rpm", v)) next.pullerRpm = v;
   if (jsonNum(cfg, "settle_ms", v)) next.settleMs = (uint16_t)v;
   if (jsonNum(cfg, "on_s", v)) next.onSec = v;
-  if (jsonNum(cfg, "stall_fault_s", v)) next.stallFaultSec = v;
   bool bit = false;
   if (jsonBoolCfg(body, "feed_lock", bit)) gFeedLock = bit;
-  if (jsonBoolCfg(body, "omit_holgura", bit)) gOmitHolgura = bit;
   if (jsonBoolCfg(body, "force_feed", bit)) {
     if (bit != gForceFeed) gCfgPollUrgent = true;
     gForceFeed = bit;
@@ -470,8 +456,7 @@ static void applyConfigJson(const String& body) {
   if (!paramMux) return;
   if (xSemaphoreTake(paramMux, portMAX_DELAY)) {
     const bool changed = next.rpm != gFeed.rpm || next.pullerRpm != gFeed.pullerRpm
-      || next.settleMs != gFeed.settleMs || next.onSec != gFeed.onSec
-      || next.stallFaultSec != gFeed.stallFaultSec;
+      || next.settleMs != gFeed.settleMs || next.onSec != gFeed.onSec;
     gFeed = next;
     xSemaphoreGive(paramMux);
     if (changed)

@@ -18,7 +18,6 @@ struct SideLive {
   bool cylinder = false;
   bool holgura = false;
   bool limit = false;
-  bool omitHolgura = false;
   bool forceFeed = false;
 };
 
@@ -76,8 +75,6 @@ static void clampSide(PfSideParams& p) {
   if (p.settleMs > 500) p.settleMs = 500;
   if (p.onSec < 0.1f) p.onSec = 0.1f;
   if (p.onSec > 120.0f) p.onSec = 120.0f;
-  if (p.stallFaultSec < 0.5f) p.stallFaultSec = 0.5f;
-  if (p.stallFaultSec > 60.0f) p.stallFaultSec = 60.0f;
 }
 
 static bool jsonNum(const String& j, const char* key, float& out) {
@@ -122,8 +119,6 @@ static void appendCfg(String& j, const PfSideParams& c) {
   j += String(c.settleMs);
   j += ",\"on_s\":";
   appendFloat(j, c.onSec, 2);
-  j += ",\"stall_fault_s\":";
-  appendFloat(j, c.stallFaultSec, 2);
   j += "}";
 }
 
@@ -134,8 +129,6 @@ static String slaveConfigJson(const SideLive& live) {
   appendCfg(j, live.cfg);
   j += ",\"feed_lock\":";
   j += gFeedLock ? "true" : "false";
-  j += ",\"omit_holgura\":";
-  j += live.omitHolgura ? "true" : "false";
   j += ",\"force_feed\":";
   j += live.forceFeed ? "true" : "false";
   j += "}";
@@ -143,15 +136,10 @@ static String slaveConfigJson(const SideLive& live) {
 }
 
 static uint8_t sideReportedFault(const SideLive& s) {
-  if (s.omitHolgura && s.fault == FAULT_HOLGURA) return FAULT_NONE;
   return s.fault;
 }
 
 static bool sideEffectiveIdle(const SideLive& s) {
-  // Alimentacion omitida: el esclavo puede reportar error/HOLGURA residual;
-  // para listo/estabilizado cuenta como idle.
-  if (s.omitHolgura && (s.fault == FAULT_HOLGURA || strcmp(s.state, "error") == 0))
-    return true;
   return strcmp(s.state, "idle") == 0;
 }
 
@@ -178,14 +166,12 @@ static void appendSide(String& j, const char* name, const SideLive& s, uint32_t 
   const bool on = sideOnline(s, now);
   const uint8_t faultCode = sideReportedFault(s);
   const SystemFault fault = (SystemFault)faultCode;
-  const char* stateOut = s.state;
-  if (s.omitHolgura && s.fault == FAULT_HOLGURA) stateOut = "idle";
   j += "\"";
   j += name;
   j += "\":{\"online\":";
   j += on ? "true" : "false";
   j += ",\"state\":\"";
-  j += stateOut;
+  j += s.state;
   j += "\",\"fault\":";
   j += String(faultCode);
   j += ",\"error\":\"";
@@ -198,8 +184,6 @@ static void appendSide(String& j, const char* name, const SideLive& s, uint32_t 
   j += s.limit ? "true" : "false";
   j += "},";
   appendCfg(j, s.cfg);
-  j += ",\"omit_holgura\":";
-  j += s.omitHolgura ? "true" : "false";
   j += ",\"force_feed\":";
   j += s.forceFeed ? "true" : "false";
   j += "}";
@@ -242,7 +226,7 @@ static void sendStatus() {
 
 static bool cfgSame(const PfSideParams& a, const PfSideParams& b) {
   return a.rpm == b.rpm && a.pullerRpm == b.pullerRpm && a.settleMs == b.settleMs
-    && a.onSec == b.onSec && a.stallFaultSec == b.stallFaultSec;
+    && a.onSec == b.onSec;
 }
 
 static void cfgLoadNvsSide(char side, PfSideParams& dst) {
@@ -255,8 +239,6 @@ static void cfgLoadNvsSide(char side, PfSideParams& dst) {
   dst.settleMs = (uint16_t)gPrefs.getUShort(key, dst.settleMs);
   snprintf(key, sizeof(key), "%c_on", side);
   dst.onSec = gPrefs.getFloat(key, dst.onSec);
-  snprintf(key, sizeof(key), "%c_stall", side);
-  dst.stallFaultSec = gPrefs.getFloat(key, dst.stallFaultSec);
 }
 
 static void cfgSaveNvsSide(char side, const PfSideParams& src) {
@@ -269,8 +251,6 @@ static void cfgSaveNvsSide(char side, const PfSideParams& src) {
   gPrefs.putUShort(key, src.settleMs);
   snprintf(key, sizeof(key), "%c_on", side);
   gPrefs.putFloat(key, src.onSec);
-  snprintf(key, sizeof(key), "%c_stall", side);
-  gPrefs.putFloat(key, src.stallFaultSec);
 }
 
 static void cfgLoadNvs() {
@@ -341,16 +321,6 @@ static void handleStatusPost() {
       live->state[sizeof(live->state) - 1] = 0;
     }
   }
-  // Con omit alimentacion activo no se sostiene ni se reinyecta FAULT_HOLGURA.
-  // También hay que salir de "error": si solo se limpia fault, masterStable
-  // sigue viendo state=error y nunca marca stable/ready (E099 en el HMI).
-  if (live->omitHolgura && live->fault == FAULT_HOLGURA) {
-    live->fault = FAULT_NONE;
-    if (strcmp(live->state, "error") == 0) {
-      strncpy(live->state, "idle", sizeof(live->state) - 1);
-      live->state[sizeof(live->state) - 1] = 0;
-    }
-  }
   if (live->fault != FAULT_NONE) strncpy(live->state, "error", sizeof(live->state));
   live->lastMs = millis();
   live->seen = true;
@@ -366,7 +336,6 @@ static bool readCfg(const String& body, PfSideParams& cfg) {
   if (jsonNum(body, "puller_rpm", v)) { cfg.pullerRpm = v; any = true; }
   if (jsonNum(body, "settle_ms", v)) { cfg.settleMs = (uint16_t)v; any = true; }
   if (jsonNum(body, "on_s", v)) { cfg.onSec = v; any = true; }
-  if (jsonNum(body, "stall_fault_s", v)) { cfg.stallFaultSec = v; any = true; }
   if (any) clampSide(cfg);
   return any;
 }
@@ -389,35 +358,6 @@ static void replySetFeedLockSerial(const String& body) {
   if (jsonBool(body, "locked", locked)) gFeedLock = locked;
   Serial.print(F("{\"op\":\"set_feed_lock\",\"ok\":true,\"locked\":"));
   Serial.print(gFeedLock ? "true" : "false");
-  Serial.println(F("}"));
-}
-
-static void replySetOmitSerial(const String& body) {
-  char side = 0;
-  if (!jsonSide(body, side)) {
-    Serial.println(F("{\"op\":\"set_omit\",\"ok\":false}"));
-    return;
-  }
-  SideLive* live = sideLive(side);
-  if (!live) {
-    Serial.println(F("{\"op\":\"set_omit\",\"ok\":false}"));
-    return;
-  }
-  bool on = live->omitHolgura;
-  if (jsonBool(body, "on", on)) live->omitHolgura = on;
-  // Omitir alimentacion libera FAULT_HOLGURA latcheada (si no, Reset queda bloqueado).
-  if (live->omitHolgura && live->fault == FAULT_HOLGURA) {
-    live->fault = FAULT_NONE;
-    if (strcmp(live->state, "error") == 0) {
-      strncpy(live->state, "idle", sizeof(live->state));
-      live->state[sizeof(live->state) - 1] = 0;
-    }
-    emitPfFault(side, FAULT_NONE);
-  }
-  Serial.print(F("{\"op\":\"set_omit\",\"ok\":true,\"side\":\""));
-  Serial.print(side);
-  Serial.print(F("\",\"on\":"));
-  Serial.print(live->omitHolgura ? "true" : "false");
   Serial.println(F("}"));
 }
 
@@ -503,10 +443,6 @@ static void handleSerialLine(char* line) {
   }
   if (strstr(line, "\"op\":\"set_feed_lock\"")) {
     replySetFeedLockSerial(String(line));
-    return;
-  }
-  if (strstr(line, "\"op\":\"set_omit\"")) {
-    replySetOmitSerial(String(line));
     return;
   }
   if (strstr(line, "\"op\":\"set_force_feed\"")) {

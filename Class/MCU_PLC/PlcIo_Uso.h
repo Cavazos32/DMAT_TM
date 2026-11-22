@@ -1,19 +1,19 @@
 #pragma once
 
 /*
- * PlcIo_Uso.h — MCU PLCA (ESP32) ↔ sensores + válvulas neumáticas (GPIO)
+ * PlcIo_Uso.h — MCU PLC (ESP32) ↔ sensores + válvulas neumáticas (GPIO)
  *
- * No hay Modbus ni CAN hacia el PLC: entradas digitales y salidas por pulso.
+ * No hay Modbus ni CAN hacia el PLC: entradas y salidas digitales por nivel.
  * Órdenes por Serial. Sin WiFi.
  * Referencia: Parameters.h · PlcStates.h · MCU_PLC.ino
  *
  * Segmentos:
  *   [1] Enlace físico (pines entrada/salida)
  *   [2] Códigos lógicos (bytes PlcStates — solo etiqueta, no trama serial)
- *   [3] Salidas válvulas — protocolo de pulso
+ *   [3] Salidas válvulas — nivel sostenido
  *   [4] Entradas sensores — lectura y debounce
  *   [5] Blower y reset
- *   [6] Home / all off
+ *   [6] All off
  *   [7] Ejemplos numéricos
  */
 
@@ -23,7 +23,7 @@
 // [1] Enlace físico — MCU ↔ I/O
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// VALVE_ACTIVE_HIGH = 1 (Parameters.h): pulso activo = GPIO HIGH.
+// Salidas: GPIO HIGH = válvula activa; GPIO LOW = válvula desactivada.
 //
 // Entradas (sensor cerrado / falla → lectura LOW → bit en máscara):
 //
@@ -37,7 +37,7 @@
 // * GPIO 26, 27 y 32: pull-up interno. Activo en LOW.
 // * GPIO34: input-only, sin pull-up interno — pull-up externa en PCB.
 //
-// Salidas (válvula / relé — pulso KEEP neumático):
+// Salidas (válvula / relé por nivel sostenido):
 //
 // | Función     | GPIO | Byte cmd (referencia) |
 // |-------------|------|------------------------|
@@ -49,9 +49,9 @@
 // | Reset PLC   |  33  | 0x1E                   |
 // | Blower      |   4  | 0x23 (nivel temporal)  |
 //
-// Combinados (un solo pulso paralelo en varios GPIO):
-//   0x2A — Holder + Encoder (pines 17 y 21 a la vez)
-//   0x2B — Cutter R + L (pines 25 y 14) — uso interno setOut "CUTTERS"
+// Combinados (actualización simultánea en varios GPIO):
+//   0x2A — Holder + Encoder (pines 17 y 21)
+//   0x2B — Cutter R + L (pines 25 y 14)
 
 // Si Parameters.h ya definió estos nombres, se usan esos (una sola fuente).
 
@@ -97,39 +97,17 @@ static const uint8_t PLC_ERR_ENCODER = 0x22;
 #endif
 
 // ═══════════════════════════════════════════════════════════════════════════
-// [3] Válvulas — protocolo de pulso (MCU → coil/driver)
+// [3] Válvulas — nivel sostenido (MCU → PLC/driver)
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// Las válvulas NO se dejan en HIGH continuo: cada cambio lógico ON↔OFF genera
-// un impulso en el GPIO (KEEP neumático enclava en el relé).
+// VALVE_SET(name, true/false): GPIO HIGH/LOW sostenido.
+// El ack de valve incluye el estado GPIO y fallas (mismo patrón que Motion:
+// orden → trabajo → confirma al terminar).
 //
-// Parámetros (Parameters.h):
-#ifndef PLC_VALVE_PULSE_MS
-static const unsigned long PLC_VALVE_PULSE_MS     = 100;
-static const unsigned long PLC_VALVE_PULSE_GAP_MS = 50;
-#endif
-
-// Operación VALVE_SET(logicalName, wantOn):
-//   1) Si estado lógico ya == wantOn → no pulso (opcional no-op).
-//   2) Si no: encolar pulso → GPIO HIGH durante PLC_VALVE_PULSE_MS → LOW.
-//   3) Esperar ≥ PLC_VALVE_PULSE_GAP_MS antes del siguiente pulso (otro GPIO).
-//   4) Actualizar estado lógico interno (stCutterR, stGrippers, …).
+// settle_ms (opcional): espera N ms tras cambiar el GPIO y luego responde.
+// ms (solo cortadores on): HIGH N ms → LOW → responde.
 //
-// Integrador en otro MCU: replicar máquina IDLE → GAP → HIGH(100ms) → LOW.
-
-#ifndef VALVE_ACTIVE_HIGH
-#define VALVE_ACTIVE_HIGH 1
-#endif
-
-#if VALVE_ACTIVE_HIGH
-#define PLC_VALVE_GPIO_ON(pin)  digitalWrite((pin), HIGH)
-#define PLC_VALVE_GPIO_OFF(pin) digitalWrite((pin), LOW)
-#else
-#define PLC_VALVE_GPIO_ON(pin)  digitalWrite((pin), LOW)
-#define PLC_VALVE_GPIO_OFF(pin) digitalWrite((pin), HIGH)
-#endif
-
-// Boot: todas las salidas válvula en idle OFF; estados lógicos en false.
+// Boot: todas las salidas de válvula quedan en LOW.
 
 // ═══════════════════════════════════════════════════════════════════════════
 // [4] Sensores — lectura (drive → MCU)
@@ -162,8 +140,7 @@ static const unsigned long PLC_BOOT_GRACE_MS      = 15000;
 //   BLOWER_OFF(): GPIO LOW de inmediato.
 //
 // RESET (0x1E, GPIO 33):
-//   Abortar pulsos pendientes; estados lógicos válvulas → false; blower off;
-//   encolar pulso 100 ms en PIN_OUT_RESET (mismo timing [3]).
+//   Todas las válvulas y blower → LOW; GPIO 33 HIGH durante 100 ms y luego LOW.
 
 #ifndef PLC_BLOWER_DEFAULT_MS
 static const unsigned long PLC_BLOWER_DEFAULT_MS = 2000;
@@ -172,44 +149,32 @@ static const unsigned long PLC_BLOWER_MAX_MS     = 300000;
 #endif
 
 // ═══════════════════════════════════════════════════════════════════════════
-// [6] Home / all off (desactivar todo lo que esté ON lógico)
+// [6] All off
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// Para cada válvula con estado lógico ON: encolar pulso OFF (mismo [3]), una
-// tras otra respetando GAP. Orden típico: Cutter R/L, Gripper, Encoder tray, Holder.
-// Blower: stop inmediato sin pulso KEEP.
+// Todas las salidas de válvula y blower pasan a LOW de inmediato.
 
 // ═══════════════════════════════════════════════════════════════════════════
 // [7] Ejemplos numéricos
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// ── Ejemplo A: Gripper ON (cmd 0x1B, wantOn = true) ──
-//   Estado previo: stGrippers = false
-//   Acción MCU:
-//     t=0 ms:    digitalWrite(16, HIGH)     // PLC_VALVE_GPIO_ON
-//     t=100 ms:  digitalWrite(16, LOW)
-//     stGrippers = true
-//   No mantener HIGH después de 100 ms.
+// ── Ejemplo A: Gripper ON ──
+//   digitalWrite(16, HIGH); reply valve+estado de inmediato.
 //
-// ── Ejemplo B: Gripper OFF ──
-//   Estado previo: stGrippers = true
-//   Mismo pulso 100 ms en GPIO 16; stGrippers = false.
+// ── Ejemplo B: Holder+Encoder con settle_ms=100 ──
+//   GPIO 17 y 21 HIGH; espera 100 ms; reply valve con holder/encoder true.
 //
-// ── Ejemplo C: Holder + Encoder juntos (0x2A, wantOn = true) ──
-//   t=0 ms:    GPIO 17 y 21 HIGH simultáneos
-//   t=100 ms:  ambos LOW
-//   stHolder = true; stEncoder = true
-//   Si otro pulso sigue: esperar ≥ 50 ms desde fin del anterior.
+// ── Ejemplo C: Cutters ms=50 ──
+//   GPIO 25/14 HIGH → 50 ms → LOW → reply valve (cortadores false).
 //
 // ── Ejemplo D: Blower 3 s ──
-//   GPIO 4 HIGH; mantener 3000 ms; GPIO 4 LOW (no usa pulso 100 ms).
+//   GPIO 4 HIGH; ack blower_on inmediato; LOW al vencer ms o blower_off.
 //
-// ── Ejemplo E: Leer sensor Cutter ──
+// ── Ejemplo F: Leer sensor Cutter ──
 //   digitalRead(26) == LOW  →  falla cortador activa (bit Cutter en mask)
 //   Tras debounce 150 ms estable → asociar a PLC_ERR_CUTTER (0x1F) en lógica HMI.
 //
-// ── Ejemplo F: Reset ──
-//   Todas válvulas lógicas false; pulso 100 ms GPIO 33; salidas 25/14/16/17/21 en LOW.
+// ── Ejemplo G: Reset ──
+//   Salidas 25/14/16/17/21 LOW; GPIO 33 HIGH 100 ms y después LOW.
 //
-// Integración sin TubeCutter: implementar [3]+[4] en loop(); los bytes 0x19…
-// son solo IDs para alinear nombres con PlcStates.h si comparten documentación con HMI.
+// Los bytes 0x19… son solo IDs para alinear nombres con PlcStates.h.

@@ -24,7 +24,6 @@ CATALOG: dict[str, tuple[str, str]] = {
     "E013": ("PLC", "Pinzas no confirmadas activas."),
     "E014": ("PLC", "Holder no confirmado liberado."),
     "E015": ("PLC", "Encoder no confirmado liberado."),
-    "E016": ("PLC", "Cola de pulsos aún ocupada (pulse_busy)."),
     "E017": ("PLC", "No hay puerto seleccionado. Elígelo en Parámetros, pestaña Conexión."),
     "E018": ("PLC", "El puerto seleccionado no es el MCU PLC."),
     "E019": ("PLC", "El puerto no respondió. Revisa el cable, la placa o cierra el monitor serial."),

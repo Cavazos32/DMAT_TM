@@ -57,6 +57,7 @@ static const uint16_t ASDA_REG_P6_002 = 0x0604;
 static const uint16_t ASDA_REG_P6_003 = 0x0606;
 
 static const uint16_t ASDA_DO_BIT_ZSPD = 0x0004;
+static const uint16_t ASDA_DO_BIT_TPOS = 0x0010;  // P0.046 bit4 — target position reached
 static const uint16_t ASDA_DO_BIT_HOME = 0x0100;
 
 static const float ASDA_FACTORY_STEPS_PER_MM = 770.0f / 45.0f;
@@ -244,6 +245,8 @@ static bool lmguideIssueMovePr1(int32_t targetPuu) {
   return modbusWriteReg16(ASDA_REG_P5_007, 1);
 }
 
+// Espera DO.TPOS (P0.046). Más rápido que ZSPD + P5.016 en cada vuelta:
+// un solo registro 16-bit hasta llegar; P5.016 solo una vez al confirmar.
 static bool lmguideWaitForTarget(int32_t targetPuu, float tolMm, uint32_t timeoutMs) {
   uint32_t t0 = millis();
   while (millis() - t0 < timeoutMs) {
@@ -252,14 +255,13 @@ static bool lmguideWaitForTarget(int32_t targetPuu, float tolMm, uint32_t timeou
     if (lmSafetyActive()) return false;
     uint16_t dwo = 0;
     if (!modbusReadReg16(ASDA_REG_P0_046, &dwo)) return false;
-    if ((dwo & ASDA_DO_BIT_ZSPD) == 0) {
-      delay(10);
+    if ((dwo & ASDA_DO_BIT_TPOS) == 0) {
+      delay(5);
       continue;
     }
     int32_t pos = 0;
     if (!modbusReadReg32(ASDA_REG_P5_016, &pos)) return false;
-    if (lmPositionWithinTol(pos, targetPuu, tolMm)) return true;
-    delay(15);
+    return lmPositionWithinTol(pos, targetPuu, tolMm);
   }
   return false;
 }

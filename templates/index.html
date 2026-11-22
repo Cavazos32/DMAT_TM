@@ -59,7 +59,7 @@
             <button type="button" class="btn btn-start" data-action="start">Iniciar</button>
             <button type="button" class="btn btn-resume" data-action="resume">Reanudar</button>
             <button type="button" class="btn btn-pause" data-action="pause">Pausa</button>
-            <button type="button" class="btn btn-stop" data-action="stop">Stop</button>
+            <button type="button" class="btn btn-stop" data-action="stop">Detener</button>
           </div>
           <div class="btn-grid btn-grid--process-reset">
             <button type="button" class="btn btn-reset" data-action="reset">Reset</button>
@@ -79,7 +79,7 @@
       <section class="center-hub" aria-label="Monitor de producción">
         <div class="progress-block">
           <div class="progress-block__header">
-            <span class="progress-block__title">Progreso de lote</span>
+            <span class="progress-block__title">Progreso</span>
             <span class="progress-block__pct" id="progressPct">0 %</span>
           </div>
           <div class="progress-track" aria-hidden="true">
@@ -87,71 +87,80 @@
           </div>
         </div>
 
-        <div class="metrics-grid">
-          <article class="metric-card metric-card--wide metric-card--piece">
-            <span class="metric-label">Pieza en fabricación</span>
-            <div class="piece-visual" id="pieceVisual" aria-live="polite">
-              <div class="piece-figure" id="pieceTube" style="--piece-scale: 0.35">
-                <div class="piece-tube" aria-hidden="true"></div>
-                <div class="piece-cota" title="Longitud nominal con tolerancia">
-                  <span class="piece-cota__ext piece-cota__ext--l" aria-hidden="true"></span>
-                  <span class="piece-cota__ext piece-cota__ext--r" aria-hidden="true"></span>
-                  <span class="piece-cota__dim" aria-hidden="true">
-                    <span class="piece-cota__arrow piece-cota__arrow--l"></span>
-                    <span class="piece-cota__bar"></span>
-                    <span class="piece-cota__arrow piece-cota__arrow--r"></span>
-                  </span>
-                  <span class="piece-cota__label">
-                    <span class="piece-cota__value" id="metricLongitud">—</span>
-                    <span class="piece-cota__tol">±3</span>
-                    <span class="piece-cota__unit">mm</span>
-                  </span>
-                </div>
+        <article class="piece-block" aria-label="Pieza en fabricación">
+          <span class="metric-label">Pieza en fabricación</span>
+          <div class="piece-visual" id="pieceVisual" aria-live="polite">
+            <div class="piece-figure" id="pieceTube" style="--piece-scale: 0.35">
+              <div class="piece-tube" aria-hidden="true"></div>
+              <div class="piece-cota" title="Longitud nominal con tolerancia">
+                <span class="piece-cota__ext piece-cota__ext--l" aria-hidden="true"></span>
+                <span class="piece-cota__ext piece-cota__ext--r" aria-hidden="true"></span>
+                <span class="piece-cota__dim" aria-hidden="true">
+                  <span class="piece-cota__arrow piece-cota__arrow--l"></span>
+                  <span class="piece-cota__bar"></span>
+                  <span class="piece-cota__arrow piece-cota__arrow--r"></span>
+                </span>
+                <span class="piece-cota__label">
+                  <span class="piece-cota__value" id="metricLongitud">—</span>
+                  <span class="piece-cota__tol">±3</span>
+                  <span class="piece-cota__unit">mm</span>
+                </span>
               </div>
             </div>
-            <div class="piece-meta">
-              <label class="piece-meta__item" for="selectModelo">
-                <span class="piece-meta__key">Modelo</span>
-                <select id="selectModelo" class="piece-meta__select" aria-label="Seleccionar número de modelo">
-                  <option value="">— Seleccionar —</option>
-                </select>
+          </div>
+          <div class="prod-row prod-row--setup" aria-label="Modelo y compensaciones">
+            <div class="prod-setup__model">
+              <label class="prod-item prod-item--modelo" for="selectModelo">
+                <span class="prod-item__key">Modelo</span>
+                <div class="model-combo" id="modelCombo">
+                  <input type="text" id="selectModelo" class="prod-item__input prod-item__input--modelo" role="combobox" aria-expanded="false" aria-autocomplete="list" aria-controls="modelComboList" aria-haspopup="listbox" autocomplete="off" spellcheck="false" placeholder="Sin selección" aria-label="Buscar o seleccionar número de modelo">
+                  <ul id="modelComboList" class="model-combo__list" role="listbox" hidden></ul>
+                </div>
+              </label>
+              <span class="prod-dot" aria-hidden="true">·</span>
+              <span class="prod-item prod-item--desc" aria-label="Descripción del modelo">
+                <span class="prod-item__key">Desc</span>
+                <span class="prod-item__desc" id="metricModeloDesc">—</span>
+              </span>
+            </div>
+            <div class="prod-setup__comps" aria-label="Compensaciones de corte">
+              <label class="prod-item" for="metricCutCompR">
+                <span class="prod-item__key">Comp. R</span>
+                <input type="number" step="0.01" id="metricCutCompR" class="prod-item__input" value="0" inputmode="decimal" aria-label="Compensación de corte lado derecho en milímetros">
+                <span class="prod-item__unit">mm</span>
+              </label>
+              <span class="prod-dot" aria-hidden="true">·</span>
+              <label class="prod-item" for="metricCutCompL">
+                <span class="prod-item__key">Comp. L</span>
+                <input type="number" step="0.01" id="metricCutCompL" class="prod-item__input" value="0" inputmode="decimal" aria-label="Compensación de corte lado izquierdo en milímetros">
+                <span class="prod-item__unit">mm</span>
               </label>
             </div>
-          </article>
+          </div>
+        </article>
+
+        <div class="prod-blocks" aria-label="Kanban, cantidad y tiempos">
           <article class="metric-card">
-            <label class="metric-label" for="metricCantidad">Cantidad del lote</label>
-            <input type="number" min="1" step="1" id="metricCantidad" class="metric-input" value="1" inputmode="numeric" aria-label="Piezas del lote">
+            <label class="metric-label" for="metricCantidad">Kanban</label>
+            <input type="number" min="1" step="1" id="metricCantidad" class="metric-input" value="1" inputmode="numeric" aria-label="Kanban: piezas objetivo del lote">
             <span class="metric-unit">piezas</span>
           </article>
-          <article class="metric-card metric-card--comps">
-            <div class="metric-comps">
-              <div class="metric-comp">
-                <label class="metric-label" for="metricCutCompR">Compensación R</label>
-                <input type="number" step="0.01" id="metricCutCompR" class="metric-input" value="0" inputmode="decimal" aria-label="Compensación de corte lado derecho en milímetros">
-                <span class="metric-unit">mm</span>
-              </div>
-              <div class="metric-comp">
-                <label class="metric-label" for="metricCutCompL">Compensación L</label>
-                <input type="number" step="0.01" id="metricCutCompL" class="metric-input" value="0" inputmode="decimal" aria-label="Compensación de corte lado izquierdo en milímetros">
-                <span class="metric-unit">mm</span>
-              </div>
+          <article class="metric-card">
+            <span class="metric-label">Cantidad</span>
+            <div class="metric-dual" aria-live="polite">
+              <span class="metric-value" id="metricPiezasProducidas">0</span>
+              <span class="metric-sep">/</span>
+              <span class="metric-value metric-value--accent" id="metricPiezasTotal">0</span>
             </div>
+            <span class="metric-unit">piezas</span>
           </article>
           <article class="metric-card">
             <span class="metric-label">Tiempo de ciclo</span>
             <span class="metric-value" id="metricTiempoCiclo">—</span>
           </article>
           <article class="metric-card">
-            <span class="metric-label">Piezas R/L / total</span>
-            <div class="metric-dual">
-              <span class="metric-value" id="metricPiezasProducidas">—</span>
-              <span class="metric-sep">/</span>
-              <span class="metric-value metric-value--accent" id="metricPiezasTotal">—</span>
-            </div>
-          </article>
-          <article class="metric-card metric-card--wide">
-            <span class="metric-label">Tiempo estimado / tiempo corriendo</span>
-            <div class="metric-dual">
+            <span class="metric-label">Restante / transcurrido</span>
+            <div class="metric-dual" title="Tiempo restante estimado / tiempo transcurrido">
               <span class="metric-value" id="metricTiempoEstimado">—</span>
               <span class="metric-sep">/</span>
               <span class="metric-value metric-value--accent" id="metricTiempoCorriendo">—</span>
@@ -167,8 +176,6 @@
             <button type="button" class="btn btn-feeder" data-action="iniciar">Iniciar</button>
             <button type="button" class="btn btn-feeder" data-pf-hold="L" data-action="alimentar_izquierda">JOG - L</button>
             <button type="button" class="btn btn-feeder" data-pf-hold="R" data-action="alimentar_derecha">JOG - R</button>
-            <button type="button" class="btn btn-feeder btn-secondary" data-action="omitir_holgura_izquierda">Omitir alimentación izquierda</button>
-            <button type="button" class="btn btn-feeder btn-secondary" data-action="omitir_holgura_derecha">Omitir alimentación derecha</button>
           </div>
         </section>
       </aside>
@@ -291,9 +298,6 @@
               <label class="motion-field">Separación (mm)
                 <input type="number" step="0.01" data-cycle-param="deposit_stack_gap_mm">
               </label>
-              <label class="motion-field">Carrera máxima (mm)
-                <input type="number" min="0" step="0.01" data-cycle-param="deposit_max_travel_mm">
-              </label>
               <label class="motion-field">Despeje de pinzas (mm)
                 <input type="number" min="0" step="0.01" data-cycle-param="gripper_clearance_mm">
               </label>
@@ -305,7 +309,24 @@
           </form>
         </section>
         <section class="tab-panel" role="tabpanel" id="tabPanelMotion" aria-labelledby="tabBtnMotion" data-tab-panel="motion" hidden>
-          <form class="motion-params" id="motionTuneForm" autocomplete="off">
+          <div class="actuators-strip actuators-strip--motion" id="actuatorsStrip" data-actuators-state="offline" data-actuators-stage="">
+            <div class="actuators-strip__main">
+              <div class="actuators-strip__status" role="status" aria-live="polite">
+                <span class="actuators-strip__dot" id="actuatorsStatusDot" aria-hidden="true"></span>
+                <span class="actuators-strip__label" id="actuatorsStatusLabel">Offline</span>
+              </div>
+              <ol class="actuators-strip__stages" aria-label="Etapas de inicialización">
+                <li class="actuators-strip__stage" data-stage="feeder">Feeder</li>
+                <li class="actuators-strip__stage" data-stage="lmguide">LM Guide</li>
+                <li class="actuators-strip__stage" data-stage="home">Home</li>
+                <li class="actuators-strip__stage" data-stage="ready">Listo</li>
+              </ol>
+            </div>
+            <button type="button" class="btn btn-config" id="btnInitActuators" data-motion-op="motion_hw_init">
+              Inicializar
+            </button>
+          </div>
+          <form class="motion-params" id="motionTuneForm" autocomplete="off" novalidate>
             <div class="motion-params__actions">
               <button type="button" class="btn btn-config" id="motionTuneReload">Recargar</button>
               <button type="button" class="btn btn-config" id="motionStatusRefresh">Actualizar estado</button>
@@ -367,82 +388,59 @@
                 </div>
               </fieldset>
 
-              <fieldset class="motion-fieldset motion-fieldset--wide">
-                <legend>ALIMENTADORES</legend>
-                <div class="motion-fieldset__actions">
-                  <button type="button" class="btn btn-feeder" data-motion-op="motion_hw_init">Preparar equipos</button>
-                  <button type="button" class="btn btn-feeder btn-feeder--secondary" data-motion-op="feeder_init">Solo alimentadores</button>
-                  <button type="button" class="btn btn-manual" id="feederServoToggle" data-motion-op="feeder_servo" aria-pressed="false">Suelto</button>
-                </div>
-                <div class="motion-side">
-                  <p class="motion-side__title">Lado R</p>
-                  <div class="motion-fieldset__row">
-                    <label class="motion-field">Velocidad (RPM)
+              <div class="motion-split motion-split--feed-lm">
+                <fieldset class="motion-fieldset motion-fieldset--feeders">
+                  <legend>ALIMENTADORES</legend>
+                  <div class="motion-fieldset__actions">
+                    <button type="button" class="btn btn-power btn--compact" id="feederServoToggle" data-motion-op="feeder_servo" aria-pressed="false">Disable</button>
+                  </div>
+                  <div class="feeder-cut-layout">
+                    <p class="motion-side__title feeder-cut-layout__title-r">Lado R</p>
+                    <label class="motion-field motion-field--compact feeder-cut-layout__vel-r">Vel. RPM
                       <input type="number" step="1" min="0" data-motion-path="feeder.R.profile_velocity_pps" data-motion-unit="feed_rpm">
                     </label>
-                    <label class="motion-field">Compensación (mm)
-                      <input type="number" step="0.01" data-motion-path="feeder.R.compensation_mm">
-                    </label>
-                    <button type="button" class="btn btn-manual" data-motion-op="feeder_test" data-motion-side="R">Probar R</button>
-                  </div>
-                </div>
-                <div class="motion-side">
-                  <p class="motion-side__title">Lado L</p>
-                  <div class="motion-fieldset__row">
-                    <label class="motion-field">Velocidad (RPM)
+                    <button type="button" class="btn btn-manual btn--compact feeder-cut-layout__test-r" data-motion-op="feeder_test" data-motion-side="R">Probar R</button>
+                    <button type="button" class="btn btn-manual feeder-cut-layout__cut" data-plc-op="valve" data-plc-name="cutters" data-plc-keep-label aria-pressed="false" title="Activar o desactivar cortadores R y L juntos">Cortar</button>
+                    <p class="motion-side__title feeder-cut-layout__title-l">Lado L</p>
+                    <label class="motion-field motion-field--compact feeder-cut-layout__vel-l">Vel. RPM
                       <input type="number" step="1" min="0" data-motion-path="feeder.L.profile_velocity_pps" data-motion-unit="feed_rpm">
                     </label>
-                    <label class="motion-field">Compensación (mm)
-                      <input type="number" step="0.01" data-motion-path="feeder.L.compensation_mm">
-                    </label>
-                    <button type="button" class="btn btn-manual" data-motion-op="feeder_test" data-motion-side="L">Probar L</button>
+                    <button type="button" class="btn btn-manual btn--compact feeder-cut-layout__test-l" data-motion-op="feeder_test" data-motion-side="L">Probar L</button>
                   </div>
-                </div>
-              </fieldset>
+                </fieldset>
 
-              <fieldset class="motion-fieldset motion-fieldset--wide motion-fieldset--lm">
-                <legend>EJE (LM GUIDE)</legend>
-                <div class="lm-guide">
-                  <div class="lm-guide__row lm-guide__row--servo">
-                    <button type="button" class="btn btn-manual" id="lmServoToggle" data-motion-op="lmguide_servo" aria-pressed="false">Apagado</button>
-                    <button type="button" class="btn btn-manual" data-motion-op="lmguide_home">Buscar Home</button>
-                    <button type="button" class="btn btn-manual" data-motion-op="lmguide_stop">Paro</button>
+                <fieldset class="motion-fieldset motion-fieldset--lm">
+                  <legend>EJE (LM GUIDE)</legend>
+                  <div class="lm-guide">
+                    <div class="lm-guide__row lm-guide__row--jog" role="group" aria-label="Jog LM Guide en mm">
+                      <button type="button" class="btn btn-manual" data-motion-op="lmguide_jog" data-motion-dir="1" data-jog-mm="1">+1</button>
+                      <button type="button" class="btn btn-manual" data-motion-op="lmguide_jog" data-motion-dir="1" data-jog-mm="5">+5</button>
+                      <button type="button" class="btn btn-manual" data-motion-op="lmguide_jog" data-motion-dir="1" data-jog-mm="100">+100</button>
+                      <span class="lm-guide__jog-label" aria-hidden="true">JOG</span>
+                      <button type="button" class="btn btn-manual" data-motion-op="lmguide_jog" data-motion-dir="-1" data-jog-mm="100">−100</button>
+                      <button type="button" class="btn btn-manual" data-motion-op="lmguide_jog" data-motion-dir="-1" data-jog-mm="5">−5</button>
+                      <button type="button" class="btn btn-manual" data-motion-op="lmguide_jog" data-motion-dir="-1" data-jog-mm="1">−1</button>
+                    </div>
+                    <div class="lm-guide__row lm-guide__row--pos">
+                      <label class="motion-field">Posición (mm)
+                        <input type="number" step="0.1" id="lmMoveMm" data-motion-path="lmguide.pos_puu" data-motion-unit="mm" placeholder="mm">
+                      </label>
+                      <label class="motion-field">RPM
+                        <input type="number" step="0.1" min="0" data-motion-path="lmguide.pr_speed_rpm">
+                      </label>
+                      <span class="lm-guide__puu" id="lmMovePuu" aria-hidden="true">0</span>
+                      <button type="button" class="btn btn-manual" data-motion-op="lmguide_move">Mover</button>
+                      <button type="button" class="btn btn-manual" data-motion-op="lmguide_move_home">Ir a cero</button>
+                    </div>
+                    <div class="lm-guide__row lm-guide__row--servo">
+                      <button type="button" class="btn btn-power" id="lmServoToggle" data-motion-op="lmguide_servo" aria-pressed="false">Apagado</button>
+                      <button type="button" class="btn btn-manual" data-motion-op="lmguide_home">Buscar Home</button>
+                      <button type="button" class="btn btn-estop" data-motion-op="lmguide_stop">Paro de emergencia</button>
+                    </div>
                   </div>
-                  <div class="lm-guide__row lm-guide__row--jog">
-                    <label class="motion-field">Jog (mm)
-                      <input type="number" step="0.01" id="lmJogDeltaMm" value="1">
-                    </label>
-                    <button type="button" class="btn btn-manual" data-motion-op="lmguide_jog" data-motion-dir="1">Jog +</button>
-                    <button type="button" class="btn btn-manual" data-motion-op="lmguide_jog" data-motion-dir="-1">Jog −</button>
-                  </div>
-                  <div class="lm-guide__row lm-guide__row--pos">
-                    <label class="motion-field">Posición (mm)
-                      <input type="number" step="0.01" id="lmMoveMm" data-motion-path="lmguide.pos_puu" data-motion-unit="mm" placeholder="mm">
-                    </label>
-                    <label class="motion-field">RPM
-                      <input type="number" step="0.1" min="0" data-motion-path="lmguide.pr_speed_rpm">
-                    </label>
-                    <span class="lm-guide__puu" id="lmMovePuu" aria-hidden="true">0</span>
-                    <button type="button" class="btn btn-manual" data-motion-op="lmguide_move">Mover</button>
-                    <button type="button" class="btn btn-manual" data-motion-op="lmguide_move_home">Ir a cero</button>
-                  </div>
-                </div>
-              </fieldset>
+                </fieldset>
+              </div>
 
-              <fieldset class="motion-fieldset motion-fieldset--wide motion-fieldset--readonly">
-                <legend>DATOS DEL MODELO</legend>
-                <div class="motion-fieldset__row">
-                  <label class="motion-field">Modelo
-                    <input type="text" readonly id="motionDataModelo">
-                  </label>
-                  <label class="motion-field">Longitud objetivo (mm)
-                    <input type="number" readonly id="motionDataTargetMm">
-                  </label>
-                  <label class="motion-field">Tolerancia (mm)
-                    <input type="number" readonly id="motionDataToleranceMm">
-                  </label>
-                </div>
-              </fieldset>
             </div>
           </form>
         </section>
@@ -459,7 +457,7 @@
                       <span class="motion-laser__led" aria-hidden="true"></span>
                       <span class="plc-fault__tag">Falla</span>
                     </span>
-                    <button type="button" class="btn btn-manual" data-plc-op="valve" data-plc-name="holder" aria-pressed="false">Apagado</button>
+                    <button type="button" class="btn btn-power" data-plc-op="valve" data-plc-name="holder" aria-pressed="false">Apagado</button>
                   </div>
                   <div class="plc-io__row">
                     <span class="plc-io__name">Encoder</span>
@@ -467,7 +465,7 @@
                       <span class="motion-laser__led" aria-hidden="true"></span>
                       <span class="plc-fault__tag">Falla</span>
                     </span>
-                    <button type="button" class="btn btn-manual" data-plc-op="valve" data-plc-name="encoder" aria-pressed="false">Apagado</button>
+                    <button type="button" class="btn btn-power" data-plc-op="valve" data-plc-name="encoder" aria-pressed="false">Apagado</button>
                   </div>
                   <div class="plc-io__group plc-io__group--cutters">
                     <span class="plc-io__name plc-io__cutter-r-name">Cortador R</span>
@@ -475,9 +473,9 @@
                       <span class="motion-laser__led" aria-hidden="true"></span>
                       <span class="plc-fault__tag">Falla</span>
                     </span>
-                    <button type="button" class="btn btn-manual plc-io__cutter-r-btn" data-plc-op="valve" data-plc-name="cutter_r" aria-pressed="false">Apagado</button>
+                    <button type="button" class="btn btn-power plc-io__cutter-r-btn" data-plc-op="valve" data-plc-name="cutter_r" aria-pressed="false">Apagado</button>
                     <span class="plc-io__name plc-io__cutter-l-name">Cortador L</span>
-                    <button type="button" class="btn btn-manual plc-io__cutter-l-btn" data-plc-op="valve" data-plc-name="cutter_l" aria-pressed="false">Apagado</button>
+                    <button type="button" class="btn btn-power plc-io__cutter-l-btn" data-plc-op="valve" data-plc-name="cutter_l" aria-pressed="false">Apagado</button>
                   </div>
                   <div class="plc-io__row">
                     <span class="plc-io__name">Pinzas</span>
@@ -485,7 +483,7 @@
                       <span class="motion-laser__led" aria-hidden="true"></span>
                       <span class="plc-fault__tag">Falla</span>
                     </span>
-                    <button type="button" class="btn btn-manual" data-plc-op="valve" data-plc-name="gripper" aria-pressed="false">Apagado</button>
+                    <button type="button" class="btn btn-power" data-plc-op="valve" data-plc-name="gripper" aria-pressed="false">Apagado</button>
                   </div>
                   <div class="plc-io__row plc-io__row--blower">
                     <span class="plc-io__name">Blower</span>
@@ -493,12 +491,12 @@
                     <label class="motion-field plc-io__blower-ms">Tiempo (ms)
                       <input type="number" id="plcBlowerMs" min="200" max="300000" step="1" value="2000">
                     </label>
-                    <button type="button" class="btn btn-manual" data-plc-op="blower" aria-pressed="false">Apagado</button>
+                    <button type="button" class="btn btn-power" data-plc-op="blower" aria-pressed="false">Apagado</button>
                   </div>
                 </div>
                 <div class="motion-fieldset__actions">
-                  <button type="button" class="btn btn-manual" data-plc-op="all_off">Apagar salidas</button>
-                  <button type="button" class="btn btn-stop" data-plc-op="reset">Borrar falla</button>
+                  <button type="button" class="btn btn-stop" data-plc-op="all_off">Apagar salidas</button>
+                  <button type="button" class="btn btn-reset" data-plc-op="reset">Reset</button>
                 </div>
                 <p class="motion-params__note" id="plcGraceNote" hidden>Recién encendido: espera unos segundos antes de revisar las fallas.</p>
               </fieldset>
@@ -535,7 +533,7 @@
                     </p>
                   </div>
                 </div>
-                <div class="motion-fieldset__row">
+                <div class="pf-tune-row">
                   <label class="motion-field">RPM
                     <input type="number" min="1" max="3000" step="1" data-pf-side="L" data-pf-key="rpm">
                   </label>
@@ -548,11 +546,10 @@
                   <label class="motion-field">Tras flanco ON (s)
                     <input type="number" min="0.1" max="120" step="0.1" data-pf-side="L" data-pf-key="on_s">
                   </label>
-                  <label class="motion-field">Fallo quieto (s)
-                    <input type="number" min="0.5" max="60" step="0.5" data-pf-side="L" data-pf-key="stall_fault_s">
-                  </label>
                 </div>
-                <button type="button" class="btn btn-config" data-pf-save="L">Guardar L</button>
+                <div class="motion-fieldset__actions motion-fieldset__actions--save">
+                  <button type="button" class="btn btn-config" data-pf-save="L">Guardar L</button>
+                </div>
               </fieldset>
               <fieldset class="motion-fieldset motion-fieldset--wide">
                 <legend>LADO R</legend>
@@ -576,7 +573,7 @@
                     </p>
                   </div>
                 </div>
-                <div class="motion-fieldset__row">
+                <div class="pf-tune-row">
                   <label class="motion-field">RPM
                     <input type="number" min="1" max="3000" step="1" data-pf-side="R" data-pf-key="rpm">
                   </label>
@@ -589,11 +586,10 @@
                   <label class="motion-field">Tras flanco ON (s)
                     <input type="number" min="0.1" max="120" step="0.1" data-pf-side="R" data-pf-key="on_s">
                   </label>
-                  <label class="motion-field">Fallo quieto (s)
-                    <input type="number" min="0.5" max="60" step="0.5" data-pf-side="R" data-pf-key="stall_fault_s">
-                  </label>
                 </div>
-                <button type="button" class="btn btn-config" data-pf-save="R">Guardar R</button>
+                <div class="motion-fieldset__actions motion-fieldset__actions--save">
+                  <button type="button" class="btn btn-config" data-pf-save="R">Guardar R</button>
+                </div>
               </fieldset>
             </div>
           </form>
@@ -601,32 +597,44 @@
         <section class="tab-panel" role="tabpanel" id="tabPanelConexion" aria-labelledby="tabBtnConexion" data-tab-panel="conexion" hidden>
           <p class="modal__hint">Elige el puerto COM de cada módulo. Sin conexión, la máquina no arranca el ciclo.</p>
           <div class="conexion-grid">
-            <article class="conexion-module">
-              <h3 class="conexion-module__title">Motion</h3>
+            <article class="conexion-module" data-serial-module="motion" data-link-state="offline">
+              <div class="conexion-module__head">
+                <h3 class="conexion-module__title">Motion</h3>
+                <span class="conexion-module__badge" id="serialMotionBadge">Offline</span>
+              </div>
               <label class="motion-field" for="selectMotionPort">Puerto
                 <select id="selectMotionPort"></select>
               </label>
               <p class="conexion-module__status" id="serialMotionStatus" role="status"></p>
               <button type="button" class="btn btn-config" id="btnMotionTest">Probar</button>
             </article>
-            <article class="conexion-module">
-              <h3 class="conexion-module__title">PLC</h3>
+            <article class="conexion-module" data-serial-module="plc" data-link-state="offline">
+              <div class="conexion-module__head">
+                <h3 class="conexion-module__title">PLC</h3>
+                <span class="conexion-module__badge" id="serialPlcBadge">Offline</span>
+              </div>
               <label class="motion-field" for="selectPlcPort">Puerto
                 <select id="selectPlcPort"></select>
               </label>
               <p class="conexion-module__status" id="serialPlcStatus" role="status"></p>
               <button type="button" class="btn btn-config" id="btnPlcTest">Probar</button>
             </article>
-            <article class="conexion-module">
-              <h3 class="conexion-module__title">Andon</h3>
+            <article class="conexion-module" data-serial-module="andon" data-link-state="offline">
+              <div class="conexion-module__head">
+                <h3 class="conexion-module__title">Andon</h3>
+                <span class="conexion-module__badge" id="serialAndonBadge">Offline</span>
+              </div>
               <label class="motion-field" for="selectAndonPort">Puerto
                 <select id="selectAndonPort"></select>
               </label>
               <p class="conexion-module__status" id="serialAndonStatus" role="status"></p>
               <button type="button" class="btn btn-config" id="btnAndonTest">Probar</button>
             </article>
-            <article class="conexion-module">
-              <h3 class="conexion-module__title">PreAlimentador (maestro)</h3>
+            <article class="conexion-module" data-serial-module="prefeeder" data-link-state="offline">
+              <div class="conexion-module__head">
+                <h3 class="conexion-module__title">PreAlimentador (maestro)</h3>
+                <span class="conexion-module__badge" id="serialPrefeederBadge">Offline</span>
+              </div>
               <label class="motion-field" for="selectPrefeederPort">Puerto
                 <select id="selectPrefeederPort"></select>
               </label>
@@ -634,7 +642,10 @@
               <button type="button" class="btn btn-config" id="btnPrefeederTest">Probar</button>
             </article>
           </div>
-          <button type="button" class="btn btn-config conexion-refresh" id="btnRefreshPorts">Actualizar puertos</button>
+          <div class="conexion-actions">
+            <button type="button" class="btn btn-config" id="btnRefreshPorts">Actualizar puertos</button>
+            <button type="button" class="btn btn-config" id="btnTestAllPorts">Probar todos</button>
+          </div>
         </section>
       </div>
     </div>

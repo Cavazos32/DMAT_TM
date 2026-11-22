@@ -3,14 +3,12 @@
     "rpm": 50.0,
     "puller_rpm": 35.0,
     "settle_ms": 150,
-    "on_s": 0.5,
-    "stall_fault_s": 2.0
+    "on_s": 0.5
   },
   "R": {
     "rpm": 50.0,
     "puller_rpm": 35.0,
     "settle_ms": 150,
-    "on_s": 0.5,
-    "stall_fault_s": 2.0
+    "on_s": 0.5
   }
 }
