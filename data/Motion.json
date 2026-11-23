@@ -10,16 +10,44 @@
     }
   },
   "lmguide": {
-    "pr_speed_rpm": 1500.0,
-    "accel_ms": 450,
-    "decel_ms": 2000,
-    "pos_puu": -9377
+    "pr_speed_rpm": 1200.0,
+    "accel_ms": 150,
+    "decel_ms": 1500,
+    "pos_puu": -9403
   },
   "feed_stage": {
-    "validate_encoder": true
+    "validate_encoder": false
   },
   "experimental": {
-    "reverse_rpm": 30,
-    "reverse_ms": 200
+    "R": {
+      "before_pull": {
+        "holder": false,
+        "encoder": false
+      },
+      "before_cut": {
+        "holder": true,
+        "encoder": false
+      },
+      "correction": {
+        "enabled": false,
+        "rpm": 10,
+        "ms": 80
+      }
+    },
+    "L": {
+      "before_pull": {
+        "holder": false,
+        "encoder": false
+      },
+      "before_cut": {
+        "holder": true,
+        "encoder": false
+      },
+      "correction": {
+        "enabled": false,
+        "rpm": 10,
+        "ms": 80
+      }
+    }
   }
 }

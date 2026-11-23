@@ -421,7 +421,16 @@ static int feederProbe(MotionSide side) {
   return 3;
 }
 
+/* Servo ya en Operation Enabled (p. ej. tras reinicio del ESP con ejes vivos). */
+static bool feederAdoptReady(MotionSide side) {
+  if (!gFeederReady) return false;
+  gFeederReady[side] = true;
+  feederMarkServoOn(side, true);
+  return true;
+}
+
 static bool feederBringUp(MotionSide side, int probe) {
+  if (probe == 1) return feederAdoptReady(side);
   if (probe == 2) {
     if (!canSdoDownloadU16(feederNode(side), SERVO_OD_CONTROL_WORD, 0, 0x0080)) return false;
     feederYield(SERVO_CAN_FAULT_RESET_MS);
@@ -449,6 +458,14 @@ static bool feederInitBus() {
 
   int probeR = feederProbe(MOTION_SIDE_R);
   int probeL = feederProbe(MOTION_SIDE_L);
+
+  /* Ambos ya Operation Enabled: adoptar sin rehacer CiA402 ni NMT. */
+  if (probeR == 1 && probeL == 1) {
+    bool okR = feederAdoptReady(MOTION_SIDE_R);
+    bool okL = feederAdoptReady(MOTION_SIDE_L);
+    feederPrintInitResult(okR, okL);
+    return okR && okL;
+  }
 
   if (probeR != 0 || probeL != 0) {
     if (!canNmt(0x01)) {

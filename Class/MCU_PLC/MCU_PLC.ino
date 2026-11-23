@@ -358,9 +358,8 @@ static void printStatusJson() {
 
 // ── Serial ──────────────────────────────────────────────────────────────────
 
-static bool jsonReadOn(const char* json, bool* out) {
-  const char* p = nullptr;
-  if (!jsonFindKey(json, "on", &p) || !out) return false;
+static bool jsonReadBoolAt(const char* p, bool* out) {
+  if (!p || !out) return false;
   if (strncmp(p, "true", 4) == 0 || *p == '1') {
     *out = true;
     return true;
@@ -370,6 +369,38 @@ static bool jsonReadOn(const char* json, bool* out) {
     return true;
   }
   return false;
+}
+
+static bool jsonReadBoolKey(const char* json, const char* key, bool* out) {
+  const char* p = nullptr;
+  if (!jsonFindKey(json, key, &p)) return false;
+  return jsonReadBoolAt(p, out);
+}
+
+static bool jsonReadOn(const char* json, bool* out) {
+  return jsonReadBoolKey(json, "on", out);
+}
+
+// Una sola orden: aplica gripper/holder/encoder presentes en el JSON.
+static bool applyValveStates(const char* json) {
+  bool any = false;
+  bool want = false;
+  if (jsonReadBoolKey(json, "gripper", &want)) {
+    const uint8_t id = PLC_VALVE_GRIPPER;
+    if (!setValves(&id, 1, want)) return false;
+    any = true;
+  }
+  if (jsonReadBoolKey(json, "holder", &want)) {
+    const uint8_t id = PLC_VALVE_HOLDER;
+    if (!setValves(&id, 1, want)) return false;
+    any = true;
+  }
+  if (jsonReadBoolKey(json, "encoder", &want)) {
+    const uint8_t id = PLC_VALVE_ENCODER;
+    if (!setValves(&id, 1, want)) return false;
+    any = true;
+  }
+  return any;
 }
 
 static void replyOk(const char* op, bool ok) {
@@ -422,17 +453,22 @@ static void handleSerialLine(char* line) {
   if (strstr(line, "\"op\":\"valve\"")) {
     const char* name = nullptr;
     bool on = false;
-    bool ok = jsonFindKey(line, "name", &name) && *name == '"' && jsonReadOn(line, &on);
+    bool hasName = jsonFindKey(line, "name", &name) && *name == '"' && jsonReadOn(line, &on);
     uint32_t ms = (uint32_t)jsonReadLong(line, "ms", 0);
     uint32_t settleMs = (uint32_t)jsonReadLong(line, "settle_ms", 0);
-    if (!ok) {
-      replyValveDone(false);
+    // Multi-estado (p. ej. pinzas + antes de jalar): sin "name", con bools.
+    if (!hasName) {
+      if (!applyValveStates(line)) {
+        replyValveDone(false);
+        return;
+      }
+      if (!startSettle(settleMs)) replyValveDone(false);
       return;
     }
     if (on && ms > 0) {
-      ok = (tokenIs(name + 1, "cutters") || tokenIs(name + 1, "cutter_r") ||
-            tokenIs(name + 1, "cutter_l")) &&
-           startTimedCut(name + 1, ms);
+      bool ok = (tokenIs(name + 1, "cutters") || tokenIs(name + 1, "cutter_r") ||
+                 tokenIs(name + 1, "cutter_l")) &&
+                startTimedCut(name + 1, ms);
       if (!ok) replyValveDone(false);
       return;
     }

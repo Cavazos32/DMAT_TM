@@ -34,7 +34,7 @@ static const uint32_t PARAM_MS_AT_HOME_END        = 50;
 static const float PARAM_DATA_TOLERANCE_MM_DEFAULT = 2.0f;
 
 // ── [A] Blower Dual (GPIO en Motion; pin provisional, cableable) ───────────
-static const int      PARAM_PIN_BLOWER       = 27;
+static const int      PARAM_PIN_BLOWER       = 33;
 static const uint32_t PARAM_BLOWER_MIN_MS    = 200;
 static const uint32_t PARAM_BLOWER_MAX_MS    = 300000;
 static const uint32_t PARAM_BLOWER_DEFAULT_MS = 2000;
@@ -58,14 +58,16 @@ static const bool  PARAM_LASER_ACTIVE_HIGH  = false;
 static const int   PARAM_PIN_JOINT_R        = 12;
 static const int   PARAM_PIN_JOINT_L        = 13;
 static const bool  PARAM_JOINT_ACTIVE_HIGH  = false;
-// Evita falsos ON cruzados por ruido/acoplamiento entre GPIO 12/13.
-static const uint32_t PARAM_JOINT_DEBOUNCE_MS = 25;
+// Debounce asimétrico: ON corto captura uniones que pasan rápido;
+// OFF más largo filtra rebote y falsos cruzados GPIO 12/13 al soltar.
+static const uint32_t PARAM_JOINT_DEBOUNCE_ON_MS  = 2;
+static const uint32_t PARAM_JOINT_DEBOUNCE_OFF_MS = 25;
 static const int   PARAM_PIN_SAFETY         = 26;
 
 // ── [A] FeedStage (solo firmware) ─────────────────────────────────────────
 
 static const uint32_t PARAM_FEED_STAGE_LASER_TIMEOUT_MS = 4000u;
-static const bool     PARAM_FEED_VALIDATE_ENCODER       = true;
+static const bool     PARAM_FEED_VALIDATE_ENCODER       = false;
 /* Diagnóstico de parada por láser: asiento de encoder + lectura corta de status. */
 static const uint32_t PARAM_LASER_STOP_SETTLE_MS   = 80u;
 static const uint32_t PARAM_LASER_STOP_STABLE_MS   = 10u;

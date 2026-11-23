@@ -346,7 +346,7 @@
               <fieldset class="motion-fieldset motion-fieldset--wide motion-fieldset--validate">
                 <legend>MEDICIÓN</legend>
                 <label class="settings-toggle settings-toggle--in-field">
-                  <input type="checkbox" data-motion-path="feed_stage.validate_encoder">
+                  <input type="checkbox" id="motionValidateEncoder" data-motion-path="feed_stage.validate_encoder">
                   <span class="settings-toggle__switch" aria-hidden="true"></span>
                   <span class="settings-toggle__text">Validar longitud con encoder</span>
                 </label>
@@ -460,19 +460,131 @@
 
               <fieldset class="motion-fieldset motion-fieldset--wide motion-fieldset--experimental">
                 <legend>EXPERIMENTAL</legend>
+                <p class="motion-params__note motion-params__note--tight">En ciclo: alimentar siempre con holder+encoder cerrados. Al cerrar pinzas (paso 4) se aplica «antes de jalar» en la misma orden PLC. Paso 6 usa «antes de cortar» → corrección (si activa y holder cerrado, con enable) → corte. Probar sigue en manual.</p>
                 <div class="motion-experimental">
-                  <label class="motion-field motion-field--compact">RPM
-                    <input type="number" step="1" min="1" max="3000" data-motion-path="experimental.reverse_rpm">
-                  </label>
-                  <label class="motion-field motion-field--compact">Tiempo (ms)
-                    <input type="number" step="1" min="50" max="30000" data-motion-path="experimental.reverse_ms">
-                  </label>
-                  <button type="button" class="btn btn-manual btn--compact" data-motion-op="feeder_reverse" data-motion-side="R">Probar R</button>
-                  <button type="button" class="btn btn-manual btn--compact" data-motion-op="feeder_reverse" data-motion-side="L">Probar L</button>
-                  <p class="motion-laser motion-experimental__status" id="feederReverseStatus" role="status" aria-label="Inverso sin ejecutar" data-state="idle">
-                    <span class="motion-laser__led" aria-hidden="true"></span>
-                    <span class="motion-laser__state">Sin ejecutar</span>
-                  </p>
+                  <section class="motion-exp-side" data-exp-side="R" aria-labelledby="expSideTitleR">
+                    <header class="motion-exp-side__head">
+                      <span class="motion-validate__mark" aria-hidden="true">R</span>
+                      <h3 class="motion-exp-side__title" id="expSideTitleR">Lado R</h3>
+                    </header>
+
+                    <div class="motion-exp-stage">
+                      <p class="motion-exp-stage__title">Antes de jalar</p>
+                      <div class="motion-exp-stage__switches">
+                        <label class="settings-toggle settings-toggle--compact">
+                          <input type="checkbox" data-motion-path="experimental.R.before_pull.holder">
+                          <span class="settings-toggle__switch" aria-hidden="true"></span>
+                          <span class="settings-toggle__text">Holder</span>
+                        </label>
+                        <label class="settings-toggle settings-toggle--compact">
+                          <input type="checkbox" data-motion-path="experimental.R.before_pull.encoder">
+                          <span class="settings-toggle__switch" aria-hidden="true"></span>
+                          <span class="settings-toggle__text">Encoder</span>
+                        </label>
+                      </div>
+                    </div>
+
+                    <div class="motion-exp-stage">
+                      <p class="motion-exp-stage__title">Antes de cortar</p>
+                      <div class="motion-exp-stage__switches">
+                        <label class="settings-toggle settings-toggle--compact">
+                          <input type="checkbox" data-exp-before-cut-holder data-motion-path="experimental.R.before_cut.holder">
+                          <span class="settings-toggle__switch" aria-hidden="true"></span>
+                          <span class="settings-toggle__text">Holder</span>
+                        </label>
+                        <label class="settings-toggle settings-toggle--compact">
+                          <input type="checkbox" data-motion-path="experimental.R.before_cut.encoder">
+                          <span class="settings-toggle__switch" aria-hidden="true"></span>
+                          <span class="settings-toggle__text">Encoder</span>
+                        </label>
+                      </div>
+                    </div>
+
+                    <div class="motion-exp-stage motion-exp-stage--correction" data-exp-correction>
+                      <p class="motion-exp-stage__title">Corrección servo</p>
+                      <p class="motion-exp-correction__hint" data-exp-correction-hint hidden>Requiere holder cerrado antes de cortar.</p>
+                      <div class="motion-exp-correction">
+                        <label class="settings-toggle settings-toggle--compact">
+                          <input type="checkbox" data-exp-correction-enabled data-motion-path="experimental.R.correction.enabled">
+                          <span class="settings-toggle__switch" aria-hidden="true"></span>
+                          <span class="settings-toggle__text">Activar</span>
+                        </label>
+                        <label class="motion-field motion-field--compact">RPM
+                          <input type="number" step="1" min="1" max="3000" data-motion-path="experimental.R.correction.rpm">
+                        </label>
+                        <label class="motion-field motion-field--compact">Tiempo (ms)
+                          <input type="number" step="1" min="50" max="30000" data-motion-path="experimental.R.correction.ms">
+                        </label>
+                        <button type="button" class="btn btn-manual btn--compact" data-motion-op="feeder_reverse" data-motion-side="R">Probar</button>
+                        <p class="motion-laser motion-experimental__status" id="feederReverseStatusR" role="status" aria-label="Corrección R sin ejecutar" data-state="idle">
+                          <span class="motion-laser__led" aria-hidden="true"></span>
+                          <span class="motion-laser__state">Sin ejecutar</span>
+                        </p>
+                      </div>
+                    </div>
+                  </section>
+
+                  <section class="motion-exp-side" data-exp-side="L" aria-labelledby="expSideTitleL">
+                    <header class="motion-exp-side__head">
+                      <span class="motion-validate__mark" aria-hidden="true">L</span>
+                      <h3 class="motion-exp-side__title" id="expSideTitleL">Lado L</h3>
+                    </header>
+
+                    <div class="motion-exp-stage">
+                      <p class="motion-exp-stage__title">Antes de jalar</p>
+                      <div class="motion-exp-stage__switches">
+                        <label class="settings-toggle settings-toggle--compact">
+                          <input type="checkbox" data-motion-path="experimental.L.before_pull.holder">
+                          <span class="settings-toggle__switch" aria-hidden="true"></span>
+                          <span class="settings-toggle__text">Holder</span>
+                        </label>
+                        <label class="settings-toggle settings-toggle--compact">
+                          <input type="checkbox" data-motion-path="experimental.L.before_pull.encoder">
+                          <span class="settings-toggle__switch" aria-hidden="true"></span>
+                          <span class="settings-toggle__text">Encoder</span>
+                        </label>
+                      </div>
+                    </div>
+
+                    <div class="motion-exp-stage">
+                      <p class="motion-exp-stage__title">Antes de cortar</p>
+                      <div class="motion-exp-stage__switches">
+                        <label class="settings-toggle settings-toggle--compact">
+                          <input type="checkbox" data-exp-before-cut-holder data-motion-path="experimental.L.before_cut.holder">
+                          <span class="settings-toggle__switch" aria-hidden="true"></span>
+                          <span class="settings-toggle__text">Holder</span>
+                        </label>
+                        <label class="settings-toggle settings-toggle--compact">
+                          <input type="checkbox" data-motion-path="experimental.L.before_cut.encoder">
+                          <span class="settings-toggle__switch" aria-hidden="true"></span>
+                          <span class="settings-toggle__text">Encoder</span>
+                        </label>
+                      </div>
+                    </div>
+
+                    <div class="motion-exp-stage motion-exp-stage--correction" data-exp-correction>
+                      <p class="motion-exp-stage__title">Corrección servo</p>
+                      <p class="motion-exp-correction__hint" data-exp-correction-hint hidden>Requiere holder cerrado antes de cortar.</p>
+                      <div class="motion-exp-correction">
+                        <label class="settings-toggle settings-toggle--compact">
+                          <input type="checkbox" data-exp-correction-enabled data-motion-path="experimental.L.correction.enabled">
+                          <span class="settings-toggle__switch" aria-hidden="true"></span>
+                          <span class="settings-toggle__text">Activar</span>
+                        </label>
+                        <label class="motion-field motion-field--compact">RPM
+                          <input type="number" step="1" min="1" max="3000" data-motion-path="experimental.L.correction.rpm">
+                        </label>
+                        <label class="motion-field motion-field--compact">Tiempo (ms)
+                          <input type="number" step="1" min="50" max="30000" data-motion-path="experimental.L.correction.ms">
+                        </label>
+                        <button type="button" class="btn btn-manual btn--compact" data-motion-op="feeder_reverse" data-motion-side="L">Probar</button>
+                        <p class="motion-laser motion-experimental__status" id="feederReverseStatusL" role="status" aria-label="Corrección L sin ejecutar" data-state="idle">
+                          <span class="motion-laser__led" aria-hidden="true"></span>
+                          <span class="motion-laser__state">Sin ejecutar</span>
+                        </p>
+                      </div>
+                    </div>
+                  </section>
                 </div>
               </fieldset>
 

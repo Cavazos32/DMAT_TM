@@ -412,12 +412,13 @@ html[data-theme="light"] body {
 }
 
 .status-banner {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(12rem, 0.9fr) auto;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 0.85rem 1.25rem;
+  column-gap: 1rem;
+  row-gap: 0.7rem;
   border-radius: var(--radius);
-  padding: 1rem 1.25rem;
+  padding: 0.85rem 1.15rem;
   border: 1px solid var(--border);
   border-left: 5px solid var(--text-muted);
   background: var(--surface);
@@ -457,10 +458,10 @@ html[data-theme="light"] body {
 }
 
 .status-banner--error .status-banner__detail {
-  color: var(--stop);
-  font-weight: 800;
-  letter-spacing: 0.04em;
-  font-size: 1.15rem;
+  color: color-mix(in srgb, var(--stop) 88%, #7f1d1d);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  font-size: 0.95rem;
 }
 
 .status-banner--warning {
@@ -471,31 +472,31 @@ html[data-theme="light"] body {
 .status-banner__lead {
   display: flex;
   flex-direction: column;
-  gap: 0.35rem;
-  min-width: 11rem;
+  justify-content: center;
+  gap: 0.28rem;
+  min-width: 0;
+  grid-column: 1;
 }
 
 .status-banner__eyebrow {
-  font-size: 0.72rem;
+  font-size: 0.7rem;
   font-weight: 700;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.05em;
   text-transform: uppercase;
   color: var(--text-muted);
+  line-height: 1.2;
 }
 
 .status-banner__main {
   display: flex;
   align-items: center;
-  gap: 0.65rem;
+  gap: 0.6rem;
   margin-bottom: 0;
+  min-width: 0;
 }
 
 .status-banner__divider {
-  width: 1px;
-  align-self: stretch;
-  min-height: 2.5rem;
-  background: var(--border);
-  flex-shrink: 0;
+  display: none;
 }
 
 .status-banner__dot {
@@ -539,53 +540,66 @@ html[data-theme="light"] body {
 }
 
 .status-banner__label {
-  font-size: 1.55rem;
+  font-size: 1.35rem;
   font-weight: 800;
   letter-spacing: -0.02em;
   text-transform: none;
   color: var(--navy, var(--text));
+  line-height: 1.25;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .status-banner__row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem;
-  flex-wrap: wrap;
-  flex: 1 1 14rem;
-  min-width: 0;
+  display: contents;
 }
 
 .status-banner__detail {
   margin: 0;
-  font-size: 0.98rem;
+  font-size: 0.95rem;
   color: var(--text-muted);
-  line-height: 1.45;
-  flex: 1 1 12rem;
+  line-height: 1.4;
+  min-width: 0;
+  align-self: center;
+  grid-column: 2;
+  overflow-wrap: anywhere;
 }
 
 .status-banner__detail.is-warn {
-  color: var(--stop);
-  font-weight: 800;
-  letter-spacing: 0.04em;
-  font-size: 1.15rem;
+  color: color-mix(in srgb, var(--stop) 88%, #7f1d1d);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  font-size: 0.95rem;
 }
 
 .status-banner__open-error {
+  grid-column: 3;
+  justify-self: end;
+  align-self: center;
   flex: 0 0 auto;
-  min-width: 8.5rem;
+  min-width: 8.25rem;
+  white-space: nowrap;
+}
+
+.status-banner__open-error[hidden] {
+  display: none !important;
 }
 
 .status-banner__actions {
   display: flex;
   flex-wrap: wrap;
   gap: 0.5rem;
-  margin-top: 0.15rem;
-  flex: 1 1 100%;
+  grid-column: 1 / -1;
+  margin-top: 0.1rem;
 }
 
 .status-banner__actions[hidden] {
   display: none;
+}
+
+/* Sin botón: título + mensaje en dos columnas equilibradas */
+.status-banner:not(:has(.status-banner__open-error:not([hidden]))) {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
 }
 
 .progress-block {
@@ -2422,18 +2436,109 @@ html[data-theme="light"] body {
 }
 
 .motion-experimental {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 0.85rem;
+}
+
+.motion-exp-side {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  min-width: 0;
+}
+
+.motion-exp-side__head {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.motion-exp-side__title {
+  margin: 0;
+  font-size: 0.88rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text);
+}
+
+.motion-exp-stage {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  padding-top: 0.55rem;
+  border-top: 1px dashed var(--border);
+}
+
+.motion-exp-stage__title {
+  margin: 0;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+
+.motion-exp-stage__switches,
+.motion-exp-correction {
   display: flex;
   flex-wrap: wrap;
   align-items: flex-end;
-  gap: 0.65rem 0.75rem;
+  gap: 0.55rem 0.75rem;
 }
 
-.motion-experimental .motion-field--compact {
+.motion-exp-correction__hint {
+  margin: 0;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.motion-exp-stage--correction.is-blocked {
+  opacity: 0.72;
+}
+
+.motion-exp-stage--correction.is-blocked .motion-exp-correction__hint {
+  color: #b45309;
+}
+
+.motion-exp-correction .motion-field--compact {
   min-width: 6.5rem;
 }
 
-.motion-experimental .btn {
+.motion-exp-correction .btn {
   align-self: flex-end;
+}
+
+.settings-toggle--compact {
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.settings-toggle--compact .settings-toggle__switch {
+  width: 38px;
+  height: 22px;
+  margin-top: 0;
+}
+
+.settings-toggle--compact .settings-toggle__switch::after {
+  width: 16px;
+  height: 16px;
+}
+
+.settings-toggle--compact input:checked + .settings-toggle__switch::after {
+  transform: translateX(16px);
+}
+
+.settings-toggle--compact .settings-toggle__text {
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--text);
 }
 
 .motion-experimental__status {
@@ -2445,7 +2550,7 @@ html[data-theme="light"] body {
   padding: 0.35rem 0.7rem;
   border: 1px solid var(--border);
   border-radius: 8px;
-  background: var(--bg);
+  background: var(--surface-elevated);
   align-self: flex-end;
 }
 
@@ -3592,8 +3697,24 @@ html:not([data-theme="light"]) .theme-toggle__icon--moon {
     grid-template-columns: 1fr;
   }
 
-  .status-banner__divider {
-    display: none;
+  .status-banner {
+    grid-template-columns: 1fr;
+    row-gap: 0.55rem;
+  }
+
+  .status-banner:not(:has(.status-banner__open-error:not([hidden]))) {
+    grid-template-columns: 1fr;
+  }
+
+  .status-banner__lead,
+  .status-banner__detail,
+  .status-banner__open-error,
+  .status-banner__actions {
+    grid-column: 1;
+  }
+
+  .status-banner__open-error {
+    justify-self: start;
   }
 }
 
@@ -3607,7 +3728,7 @@ html:not([data-theme="light"]) .theme-toggle__icon--moon {
   }
 
   .status-banner__label {
-    font-size: 1.25rem;
+    font-size: 1.15rem;
   }
 
   .progress-block__pct {

@@ -151,6 +151,10 @@ static const unsigned long PLC_BOOT_GRACE_MS      = 15000;
 // ── Ejemplo A: Gripper ON ──
 //   digitalWrite(16, HIGH); reply valve+estado de inmediato.
 //
+// ── Ejemplo A2: Gripper + holder/encoder en una sola orden ──
+//   {"op":"valve","gripper":true,"holder":false,"encoder":false,"settle_ms":100}
+//   Aplica los bools presentes y responde una sola vez tras settle_ms.
+//
 // ── Ejemplo B: Holder+Encoder con settle_ms=100 ──
 //   GPIO 17 y 21 HIGH; espera 100 ms; reply valve con holder/encoder true.
 //

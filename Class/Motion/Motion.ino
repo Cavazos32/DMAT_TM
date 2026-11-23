@@ -56,7 +56,8 @@ struct FeedStageResult {
 // Sin "side" y sin "mode" el ciclo usa ambos lados, lee encoder (counts) y el timeout de Parameters.h.
 // "mode":"laser" (purga): cada lado sigue hasta su láser.
 // "mode":"clean" alimenta el tiempo indicado y no se detiene en el láser.
-// Si el láser de un lado ya está activo, ese lado no arranca.
+// Si el láser ya está activo al inicio: con checkEncoder → error de tolerancia (counts≈0);
+// sin checkEncoder (purga) ese lado no arranca y se reporta ok.
 // El servo CAN alimenta en velocidad (PV); no hay compensación por posición.
 struct FeedStageRequest {
   bool useR;
@@ -291,6 +292,7 @@ static bool laserIsOn(MotionSide side) {
 }
 
 static bool gJointOn[MOTION_SIDE_COUNT] = {false, false};
+static bool gJointPulse[MOTION_SIDE_COUNT] = {false, false};
 static uint32_t gJointEdgeMs[MOTION_SIDE_COUNT] = {0, 0};
 
 static bool jointRawOn(MotionSide side) {
@@ -300,7 +302,13 @@ static bool jointRawOn(MotionSide side) {
   return level == LOW;
 }
 
-/** Filtra picos: el joint solo cuenta ON/OFF si el nivel se mantiene PARAM_JOINT_DEBOUNCE_MS. */
+/**
+ * Debounce asimétrico + latch de pulso:
+ * - OFF→ON en PARAM_JOINT_DEBOUNCE_ON_MS (uniones que pasan rápido).
+ * - ON→OFF en PARAM_JOINT_DEBOUNCE_OFF_MS (rebote / crosstalk al soltar).
+ * - gJointPulse queda en true al confirmar ON; FeedStage lo usa aunque el
+ *   sensor ya haya vuelto a OFF antes del siguiente muestreo.
+ */
 static void jointPoll(uint32_t nowMs) {
   for (int i = 0; i < MOTION_SIDE_COUNT; i++) {
     bool raw = jointRawOn((MotionSide)i);
@@ -308,11 +316,13 @@ static void jointPoll(uint32_t nowMs) {
       gJointEdgeMs[i] = 0;
       continue;
     }
+    uint32_t needMs = raw ? PARAM_JOINT_DEBOUNCE_ON_MS : PARAM_JOINT_DEBOUNCE_OFF_MS;
     if (gJointEdgeMs[i] == 0) {
       gJointEdgeMs[i] = nowMs;
-    } else if ((nowMs - gJointEdgeMs[i]) >= PARAM_JOINT_DEBOUNCE_MS) {
+    } else if ((nowMs - gJointEdgeMs[i]) >= needMs) {
       gJointOn[i] = raw;
       gJointEdgeMs[i] = 0;
+      if (raw) gJointPulse[i] = true;
     }
   }
 }
@@ -320,6 +330,17 @@ static void jointPoll(uint32_t nowMs) {
 static bool jointIsOn(MotionSide side) {
   jointPoll(millis());
   return gJointOn[side];
+}
+
+/** True si el joint está ON o hubo un pulso confirmado desde el último clear. */
+static bool jointDetected(MotionSide side) {
+  jointPoll(millis());
+  return gJointOn[side] || gJointPulse[side];
+}
+
+static void jointClearPulses() {
+  gJointPulse[MOTION_SIDE_R] = false;
+  gJointPulse[MOTION_SIDE_L] = false;
 }
 
 static void motionPollEncoders() {
@@ -387,6 +408,7 @@ static FeedStageResult FeedStage(FeedStageRequest req) {
 
   gFeedStageBusy = true;
   laserStopDiagResetAll();
+  jointClearPulses();
 
   bool sideAtLaser[MOTION_SIDE_COUNT] = {false, false};
   if (!req.ignoreLaser) {
@@ -404,20 +426,24 @@ static FeedStageResult FeedStage(FeedStageRequest req) {
   if (req.useR) encoderSetZero(MOTION_SIDE_R);
   if (req.useL) encoderSetZero(MOTION_SIDE_L);
 
+  FeedStageError fail = FEED_STAGE_OK;
+  // Láser ya ON → counts tras set0 ≈ 0: no hubo avance. Siempre enc_ok=false
+  // (el host detecta fantasma aunque checkEncoder esté off). Solo falla el
+  // FeedStage completo si checkEncoder está on; mode laser/purga puede ok.
   if (sideAtLaser[MOTION_SIDE_R]) {
     out.side[MOTION_SIDE_R].laserOn = true;
     out.side[MOTION_SIDE_R].countsMeasured = encoderCountsOfficial(MOTION_SIDE_R);
-    out.side[MOTION_SIDE_R].encOk = true;
+    out.side[MOTION_SIDE_R].encOk = false;
     sideValidated[MOTION_SIDE_R] = true;
+    if (req.checkEncoder) fail = FEED_STAGE_ERR_ENC_R;
   }
   if (sideAtLaser[MOTION_SIDE_L]) {
     out.side[MOTION_SIDE_L].laserOn = true;
     out.side[MOTION_SIDE_L].countsMeasured = encoderCountsOfficial(MOTION_SIDE_L);
-    out.side[MOTION_SIDE_L].encOk = true;
+    out.side[MOTION_SIDE_L].encOk = false;
     sideValidated[MOTION_SIDE_L] = true;
+    if (req.checkEncoder && fail == FEED_STAGE_OK) fail = FEED_STAGE_ERR_ENC_L;
   }
-
-  FeedStageError fail = FEED_STAGE_OK;
   if (runR) {
     if (!feederPreparePv(MOTION_SIDE_R)) fail = FEED_STAGE_ERR_FEEDER;
   }
@@ -463,8 +489,8 @@ static FeedStageResult FeedStage(FeedStageRequest req) {
       break;
     }
 
-    // Joint: detener el lado afectado y abortar FeedStage con error por lado.
-    if (req.useR && jointIsOn(MOTION_SIDE_R)) {
+    // Joint: pulso confirmado (aunque ya esté OFF) → abortar el lado afectado.
+    if (req.useR && jointDetected(MOTION_SIDE_R)) {
       if (!sideFeedStopped[MOTION_SIDE_R]) {
         feederStop(MOTION_SIDE_R);
         canSdoDownloadU32(feederNode(MOTION_SIDE_R), SERVO_OD_TARGET_VELOCITY, 0, 0);
@@ -473,7 +499,7 @@ static FeedStageResult FeedStage(FeedStageRequest req) {
       fail = FEED_STAGE_ERR_JOINT_R;
       break;
     }
-    if (req.useL && jointIsOn(MOTION_SIDE_L)) {
+    if (req.useL && jointDetected(MOTION_SIDE_L)) {
       if (!sideFeedStopped[MOTION_SIDE_L]) {
         feederStop(MOTION_SIDE_L);
         canSdoDownloadU32(feederNode(MOTION_SIDE_L), SERVO_OD_TARGET_VELOCITY, 0, 0);

@@ -64,7 +64,8 @@ static const uint16_t ASDA_DO_BIT_ZSPD = 0x0004;
 static const uint16_t ASDA_DO_BIT_TPOS = 0x0010;  // P0.046 bit4 — target position reached
 static const uint16_t ASDA_DO_BIT_HOME = 0x0100;
 
-static const float ASDA_FACTORY_STEPS_PER_MM = 770.0f / 45.0f;
+// Fábrica 770 PUU / 45 mm; campo: 550 mm pedido → 548 mm reales (app.py igual).
+static const float ASDA_FACTORY_STEPS_PER_MM = (770.0f / 45.0f) * (550.0f / 548.0f);
 
 static HardwareSerial ModbusSerial(2);
 
@@ -261,8 +262,13 @@ static bool lmguideIssueMovePr1(int32_t targetPuu) {
 
 // Espera DO.TPOS (P0.046). Más rápido que ZSPD + P5.016 en cada vuelta:
 // un solo registro 16-bit hasta llegar; P5.016 solo una vez al confirmar.
-static bool lmguideWaitForTarget(int32_t targetPuu, float tolMm, uint32_t timeoutMs) {
+// Moves cortos (2º corte dual ~0.5–1 mm) a veces no bajan TPOS: hay que
+// aceptar por posición si ya no estamos en la partida. No aceptar TPOS+tol
+// pegado en la misma partida (falso “llegué” sin moverse).
+static bool lmguideWaitForTarget(int32_t targetPuu, float tolMm, uint32_t timeoutMs,
+                                 int32_t startPuu, bool haveStart) {
   uint32_t t0 = millis();
+  bool sawLeave = false;
   while (millis() - t0 < timeoutMs) {
     lmPoll();
     if (lmAbortRequested()) return false;
@@ -270,12 +276,20 @@ static bool lmguideWaitForTarget(int32_t targetPuu, float tolMm, uint32_t timeou
     uint16_t dwo = 0;
     if (!modbusReadReg16(ASDA_REG_P0_046, &dwo)) return false;
     if ((dwo & ASDA_DO_BIT_TPOS) == 0) {
+      sawLeave = true;
       delay(5);
       continue;
     }
     int32_t pos = 0;
     if (!modbusReadReg32(ASDA_REG_P5_016, &pos)) return false;
-    return lmPositionWithinTol(pos, targetPuu, tolMm);
+    if (!lmPositionWithinTol(pos, targetPuu, tolMm)) {
+      delay(5);
+      continue;
+    }
+    if (!haveStart || startPuu == targetPuu || sawLeave || pos != startPuu) {
+      return true;
+    }
+    delay(5);
   }
   return false;
 }
@@ -284,9 +298,19 @@ static bool lmguideMovePr1(int32_t targetPuu) {
   if (!gLmRt || !gLmAbort) return false;
   *gLmAbort = false;
   if (targetPuu != 0) gLmRt->lmguideHomed = false;
+  // No saltar el comando por la tol de llegada (0.5 mm): un 2º corte dual con
+  // offset 0.3–0.7 mm debe moverse. Solo omitir si ya está en el PUU pedido.
   for (uint8_t attempt = 1; attempt <= PARAM_LM_MOVE_MAX_ATTEMPTS; attempt++) {
+    int32_t startPuu = 0;
+    bool haveStart = modbusReadReg32(ASDA_REG_P5_016, &startPuu);
+    if (haveStart && startPuu == targetPuu) {
+      gLmRt->lmguideServoOn = true;
+      if (targetPuu == 0) gLmRt->lmguideHomed = true;
+      return true;
+    }
     if (!lmguideIssueMovePr1(targetPuu)) return false;
-    if (lmguideWaitForTarget(targetPuu, PARAM_LM_MOVE_TOLERANCE_MM, PARAM_LM_MOVE_DONE_TIMEOUT_MS)) {
+    if (lmguideWaitForTarget(targetPuu, PARAM_LM_MOVE_TOLERANCE_MM,
+                             PARAM_LM_MOVE_DONE_TIMEOUT_MS, startPuu, haveStart)) {
       gLmRt->lmguideServoOn = true;
       if (targetPuu == 0) gLmRt->lmguideHomed = true;
       return true;
@@ -347,9 +371,26 @@ static bool lmguideJogDelta(int32_t deltaPuu) {
   return ok;
 }
 
+/* Ya en home (HOME+ZSPD, PUU≈0): típico tras reinicio del ESP con LM vivo. */
+static bool lmguideAlreadyAtHome() {
+  if (!gLmRt) return false;
+  int32_t pos = 0;
+  if (!modbusReadReg32(ASDA_REG_P5_016, &pos)) return false;
+  if (!lmPositionWithinTol(pos, 0, PARAM_LM_HOME_TOLERANCE_MM)) return false;
+  uint16_t dwo = 0;
+  if (!modbusReadReg16(ASDA_REG_P0_046, &dwo)) return false;
+  return (dwo & ASDA_DO_BIT_HOME) != 0 && (dwo & ASDA_DO_BIT_ZSPD) != 0;
+}
+
 static bool lmguideHome() {
   if (!gLmRt || !gLmAbort) return false;
   *gLmAbort = false;
+  /* Adoptar home existente; no repetir homing de torque si ya está en cero. */
+  if (lmguideAlreadyAtHome()) {
+    if (!lmguideServoOn()) return false;
+    gLmRt->lmguideHomed = true;
+    return true;
+  }
   gLmRt->lmguideHomed = false;
   if (!lmguideServoOn()) return false;
   int32_t puuStart = 0;

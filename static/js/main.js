@@ -408,10 +408,15 @@
     const estado = state.estado || "idle";
     let bannerEstado = estado;
     const recNow = state.recovery || {};
+    const recStep = String(recNow.step || "");
     const jointWarn = !!recNow.active && recNow.kind === "joint";
+    // listo = recuperación terminada: ya no es banner de error (ni texto rojo al lado).
+    const recoveryErrorActive =
+      !!recNow.active && recNow.kind !== "joint" && recStep !== "listo";
     if (state.rutina_manos) bannerEstado = "stopped";
     else if (state.rutina) bannerEstado = "manual";
     else if (jointWarn) bannerEstado = "warning";
+    else if (recoveryErrorActive || estado === "error") bannerEstado = "error";
     els.statusBanner.className =
       "status-banner status-banner--full " +
       (bannerClassByEstado[bannerEstado] || bannerClassByEstado.idle);
@@ -423,30 +428,25 @@
         "Warning Joint" +
         (sideLabel ? " · Joint " + sideLabel : "") +
         (recNow.code ? " · " + recNow.code : "");
-      // Banner: solo warning fijo. El paso a paso va en el popup.
-      els.statusBannerDetail.textContent =
-        sideLabel
-          ? "Joint " + sideLabel + ". Abre el aviso para continuar."
-          : "Abre el aviso para continuar.";
-      if (els.statusBannerDetail) els.statusBannerDetail.classList.remove("is-warn");
     } else if (
-      (recNow.active && recNow.kind !== "joint") ||
-      (estado === "error" && (recNow.code || state.ciclo_error || state.mensaje))
+      recoveryErrorActive ||
+      (estado === "error" && (recNow.code || state.ciclo_error))
     ) {
       const errCode = recNow.code || state.ciclo_error || "";
       const errMsg = recNow.mensaje || state.mensaje || "";
       const parsed = parseRecoveryError(errCode, errMsg);
       els.statusBannerLabel.textContent = formatErrorBannerTitle(parsed, errCode);
-      const rejection =
-        estado === "error" &&
-        isErrorBannerRejection(state.mensaje, recNow.mensaje || errMsg);
-      els.statusBannerDetail.textContent = rejection
-        ? String(state.mensaje || "").trim()
-        : "Abre el error para dar seguimiento y trabajar seguro.";
-      if (els.statusBannerDetail) els.statusBannerDetail.classList.add("is-warn");
     } else {
       els.statusBannerLabel.textContent = state.estado_label || "En espera";
-      els.statusBannerDetail.textContent = state.mensaje || "";
+    }
+    // Detalle: mensaje de estado normal. Sin textos rojos al lado del ERROR.
+    if (els.statusBannerDetail) {
+      els.statusBannerDetail.classList.toggle("is-warn", !!state.rutina_manos);
+      if (recoveryErrorActive || estado === "error") {
+        els.statusBannerDetail.textContent = "";
+      } else {
+        els.statusBannerDetail.textContent = state.mensaje || "";
+      }
     }
 
     const pct = Math.min(100, Math.max(0, Number(state.progreso_pct) || 0));
@@ -852,16 +852,6 @@
     if (moduleName) title += " " + moduleName;
     if (desc) title += " - " + desc;
     return title;
-  }
-
-  function isErrorBannerRejection(msg, fixedMsg) {
-    const text = String(msg || "").trim();
-    if (!text) return false;
-    if (/Abre el (aviso|error)/i.test(text)) return false;
-    const fixed = String(fixedMsg || "").trim();
-    if (fixed && text === fixed) return false;
-    if (/^E\d+\b/.test(text) && /:\s/.test(text) && text === fixed) return false;
-    return true;
   }
 
   function setRecoveryPoll(on) {
@@ -1550,35 +1540,6 @@
       resume.setAttribute("aria-pressed", "true");
     }
 
-    // No pisar el banner fijo de Continuar / fases de purga en curso.
-    const purgaActiva = String(state.rutina || "") === "purga" || !!state.rutina_manos;
-    if (
-      els.statusBannerDetail &&
-      !enError &&
-      !purgaActiva &&
-      (estado === "idle" || estado === "paused")
-    ) {
-      let hint = "";
-      if (postErrorPurga) {
-        hint = state.mensaje || "Completa la purga para continuar.";
-      } else if (start && start.disabled) {
-        if (!checklistReady) {
-          hint = "Completa la revisión de arranque para poder iniciar el ciclo.";
-        } else if (cantidadImpar) {
-          hint =
-            "Lote en ambos lados (L+R): pon cantidad par de al menos 2 piezas, o cambia el ciclo a un solo lado.";
-        }
-      }
-      if (hint) {
-        els.statusBannerDetail.textContent = hint;
-        els.statusBannerDetail.classList.add("is-warn");
-      } else {
-        els.statusBannerDetail.textContent = state.mensaje || "";
-        if (!state.rutina_manos) {
-          els.statusBannerDetail.classList.remove("is-warn");
-        }
-      }
-    }
   }
 
   function flashButton(btn) {
@@ -1919,6 +1880,25 @@
     return snapped.toFixed(1);
   }
 
+  function syncExperimentalCorrectionGates() {
+    if (!els.motionTuneForm) return;
+    els.motionTuneForm.querySelectorAll("[data-exp-side]").forEach(function (sideEl) {
+      const holder = sideEl.querySelector("[data-exp-before-cut-holder]");
+      const enabled = sideEl.querySelector("[data-exp-correction-enabled]");
+      const stage = sideEl.querySelector("[data-exp-correction]");
+      const hint = sideEl.querySelector("[data-exp-correction-hint]");
+      if (!holder || !enabled) return;
+      const holderClosed = !!holder.checked;
+      if (!holderClosed && enabled.checked) {
+        enabled.checked = false;
+        motionTuneDirty = true;
+      }
+      enabled.disabled = !holderClosed;
+      if (stage) stage.classList.toggle("is-blocked", !holderClosed);
+      if (hint) hint.hidden = holderClosed;
+    });
+  }
+
   function motionFormFromTune(tune) {
     if (!els.motionTuneForm || !tune) return;
     if (motionTuneDirty) return;
@@ -1943,6 +1923,7 @@
       }
       input.value = String(val);
     });
+    syncExperimentalCorrectionGates();
     motionRefreshPuuReadout();
   }
 
@@ -1993,8 +1974,9 @@
     els.motionEsp32Hint.textContent = text || "";
   }
 
-  function setFeederReverseStatus(state, label) {
-    const el = document.getElementById("feederReverseStatus");
+  function setFeederReverseStatus(side, state, label) {
+    const sideKey = String(side || "R").toUpperCase() === "L" ? "L" : "R";
+    const el = document.getElementById("feederReverseStatus" + sideKey);
     if (!el) return;
     const next = state || "idle";
     el.setAttribute("data-state", next);
@@ -2002,7 +1984,7 @@
     if (text) text.textContent = label || "Sin ejecutar";
     el.setAttribute(
       "aria-label",
-      "Inverso " + (label || "sin ejecutar").toLowerCase()
+      "Corrección " + sideKey + " " + (label || "sin ejecutar").toLowerCase()
     );
   }
 
@@ -2180,16 +2162,18 @@
       extra.side = btn.getAttribute("data-motion-side") || "R";
       const tune = motionTuneFromForm();
       const exp = (tune && tune.experimental) || {};
-      if (exp.reverse_rpm != null) extra.rpm = exp.reverse_rpm;
-      if (exp.reverse_ms != null) extra.ms = exp.reverse_ms;
-      setFeederReverseStatus("run", "Ejecutando " + extra.side + "…");
+      const sideCfg = exp[extra.side] || {};
+      const corr = sideCfg.correction || {};
+      if (corr.rpm != null) extra.rpm = corr.rpm;
+      if (corr.ms != null) extra.ms = corr.ms;
+      setFeederReverseStatus(extra.side, "run", "Ejecutando…");
       const data = await sendMotionOp(op, extra);
       if (data && data.sent && data.command_ok === true) {
-        setFeederReverseStatus("done", "Terminado " + extra.side);
+        setFeederReverseStatus(extra.side, "done", "Terminado");
       } else if (data && data.sent && data.command_ok === false) {
-        setFeederReverseStatus("error", "Error " + extra.side);
+        setFeederReverseStatus(extra.side, "error", "Error");
       } else {
-        setFeederReverseStatus("error", "Sin respuesta");
+        setFeederReverseStatus(extra.side, "error", "Sin respuesta");
       }
       return;
     }
@@ -3161,8 +3145,7 @@
       askEmpleado(function (empleado) {
         sendAction("operacion_manual", "recovery_skip", { empleado: empleado }).then(
           function () {
-            recoveryWantOpen = true;
-            openRecoveryModal();
+            closeRecoveryModal();
             fetchState();
           }
         );
@@ -3316,12 +3299,32 @@
 
   if (els.motionTuneForm) {
     els.motionTuneForm.addEventListener("submit", saveMotionTune);
-    els.motionTuneForm.addEventListener("input", function (ev) {
+    function markMotionTuneDirty(ev) {
       const t = ev.target;
       if (t && t.hasAttribute && t.hasAttribute("data-motion-path")) {
         motionTuneDirty = true;
       }
-    });
+      if (
+        t &&
+        t.hasAttribute &&
+        (t.hasAttribute("data-exp-before-cut-holder") ||
+          t.hasAttribute("data-exp-correction-enabled"))
+      ) {
+        syncExperimentalCorrectionGates();
+      }
+    }
+    // checkbox dispara change; number/text también input
+    els.motionTuneForm.addEventListener("input", markMotionTuneDirty);
+    els.motionTuneForm.addEventListener("change", markMotionTuneDirty);
+    const validateEnc = document.getElementById("motionValidateEncoder");
+    if (validateEnc) {
+      // Toggle aplica al instante: guardar + enviar al MCU (no hace falta «Guardar»).
+      validateEnc.addEventListener("change", function () {
+        motionTuneDirty = true;
+        saveMotionTune();
+      });
+    }
+    syncExperimentalCorrectionGates();
   }
   if (els.motionTuneReload) {
     els.motionTuneReload.addEventListener("click", function () {
@@ -4205,15 +4208,8 @@
     }
 
     if (els.statusBannerDetail) {
-      const recBanner = state.recovery || {};
-      const errorBanner =
-        state.estado === "error" ||
-        !!state.ciclo_error ||
-        (!!recBanner.active && recBanner.kind !== "joint");
-      els.statusBannerDetail.classList.toggle(
-        "is-warn",
-        !!state.rutina_manos || errorBanner
-      );
+      // Solo rutina de manos usa aviso rojo; el ERROR va en el título del banner.
+      els.statusBannerDetail.classList.toggle("is-warn", !!state.rutina_manos);
     }
     if (els.statusBannerActions) {
       const showPurge = purga && fase === "espera";
