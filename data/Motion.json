@@ -10,10 +10,16 @@
     }
   },
   "lmguide": {
-    "pr_speed_rpm": 1200.0,
-    "pos_puu": -4363
+    "pr_speed_rpm": 1500.0,
+    "accel_ms": 450,
+    "decel_ms": 2000,
+    "pos_puu": -9377
   },
   "feed_stage": {
     "validate_encoder": true
+  },
+  "experimental": {
+    "reverse_rpm": 30,
+    "reverse_ms": 200
   }
 }

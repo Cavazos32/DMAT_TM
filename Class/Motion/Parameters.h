@@ -9,7 +9,7 @@
  *
  * Claves JSON (data/Motion.json) ↔ tune:
  *   feeder.R/L.profile_velocity_pps, target_position_counts
- *   lmguide.pr_speed_rpm, pos_puu
+ *   lmguide.pr_speed_rpm, accel_ms, decel_ms, pos_puu
  *   set_data: target_length_mm, tolerance_mm, modelo_id, measure_comp_mm
  *
  * FeedStage: timeout láser fijo PARAM_FEED_STAGE_LASER_TIMEOUT_MS;
@@ -106,6 +106,12 @@ static const uint32_t PARAM_FEED_HALT_DECEL_PP           = 8000000u;
 static const uint32_t PARAM_FEED_MAX_PPS =
     (uint32_t)((uint64_t)PARAM_FEED_MAX_RPM * PARAM_FEED_SHAFT_INC_PER_REV / 60u);
 
+/* Experimental: PV inverso por tiempo (feeder_reverse). */
+static const float    PARAM_FEED_REVERSE_RPM_DEFAULT = 30.0f;
+static const uint32_t PARAM_FEED_REVERSE_MS_DEFAULT  = 200u;
+static const uint32_t PARAM_FEED_REVERSE_MS_MIN      = 50u;
+static const uint32_t PARAM_FEED_REVERSE_MS_MAX      = 30000u;
+
 // ── [A] LM Guide Modbus (ASDA-B3) ─────────────────────────────────────────
 
 static const uint8_t  PARAM_MODBUS_SLAVE_ID       = 0x01;
@@ -116,6 +122,11 @@ static const int      PARAM_PIN_MODBUS_TX         = 17;
 static const float    PARAM_LM_PR_SPEED_RPM       = 1200.0f;
 static const float    PARAM_LM_PR_SPEED_RPM_MIN   = 400.0f;
 static const float    PARAM_LM_PR_SPEED_RPM_MAX   = 3000.0f;
+// ASDA P5.020/P5.021: tiempo 0↔3000 rpm (ms). PATH usa #0=accel, #1=decel.
+static const uint16_t PARAM_LM_ACCEL_MS           = 200;
+static const uint16_t PARAM_LM_DECEL_MS           = 500;
+static const uint16_t PARAM_LM_RAMP_MS_MIN        = 1;
+static const uint16_t PARAM_LM_RAMP_MS_MAX        = 65500;
 static const int32_t  PARAM_LM_JOG_DELTA_PUU      = 2000;
 static const uint32_t PARAM_LM_SERVO_ON_SETTLE_MS = 2000;
 
@@ -147,6 +158,8 @@ struct MotionFeederSideTune {
 
 struct MotionLMGuideTune {
   float prSpeedRpm;
+  uint16_t accelMs;
+  uint16_t decelMs;
   int32_t posPuu;
 };
 
@@ -173,6 +186,8 @@ static inline void motionTuneSetDefaults(MotionTune* tune) {
     tune->feeder[i].targetPositionCounts = (int32_t)PARAM_FEED_TARGET_COUNTS_DEFAULT;
   }
   tune->lmguide.prSpeedRpm = PARAM_LM_PR_SPEED_RPM;
+  tune->lmguide.accelMs = PARAM_LM_ACCEL_MS;
+  tune->lmguide.decelMs = PARAM_LM_DECEL_MS;
   tune->lmguide.posPuu = 0;
   tune->validateEncoder = PARAM_FEED_VALIDATE_ENCODER;
 }

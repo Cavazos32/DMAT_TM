@@ -66,6 +66,11 @@ LMGUIDE_PUU_SIGN = -1
 LMGUIDE_MM_RES = 0.1
 LMGUIDE_PR_RPM_MIN = 400.0
 LMGUIDE_PR_RPM_MAX = 3000.0
+# ASDA P5.020/P5.021: ms para 0↔3000 rpm (Parameters.h PARAM_LM_*).
+LMGUIDE_ACCEL_MS_DEFAULT = 200
+LMGUIDE_DECEL_MS_DEFAULT = 500
+LMGUIDE_RAMP_MS_MIN = 1
+LMGUIDE_RAMP_MS_MAX = 65500
 
 # Reset de error: condiciones PLC/Motion despejadas de forma estable (ms).
 _ERROR_RESET_STABLE_MS = 200
@@ -157,20 +162,6 @@ _JOINT = {
     "holder_released": False,
 }
 
-# ByPass de un lado (vía especial): omite el lado malo y sigue solo con work_side.
-# Se habilita ante E021 o Warning Joint de un solo lado. E021 se ignora en ops PLC.
-_SIDE_BYPASS = {
-    "active": False,
-    "work_side": "",  # "R" | "L"
-    "reason": "",  # "E021" | "joint"
-    "empleado": "",
-    "saved_lot_sides": "",
-    "saved_cycle_sides": "",
-    "saved_target_r": None,
-    "saved_target_l": None,
-    "saved_qty_total": None,
-}
-
 # Lote en curso. El batch (montón de la charola) se calcula al pulsar Start.
 # qty_total = piezas del pedido; pieces_r/l = buenas por lado; cycle_sides = lados del ciclo actual
 # (puede ser un solo lado para empatar tras fallo parcial).
@@ -244,7 +235,8 @@ _STEP4_CLOSES = False
 
 # MODO EXPERIMENTAL. En el paso 4 se pone ServoCAN en "Suelto"
 # (feeder_servo_off / Duro apagado). El holder se abre; el encoder neumático
-# permanece cerrado. Al depositar (paso 7) se vuelve a "Duro" (feeder_servo_on).
+# permanece cerrado. Al depositar (paso 7), tras lmguide_move al montón, se
+# dispara feeder_servo_on en paralelo: no bloquea Gripper OFF.
 # Para probar: True. Para desactivar: False.
 EXPERIMENTAL_SERVO_OFF = True
 
@@ -288,57 +280,8 @@ _PROD_STEP_DESC = {
 }
 
 
-def _side_bypass_work_side() -> str:
-    """Lado único de trabajo si ByPass está activo. '' = sin bypass."""
-    if not _SIDE_BYPASS.get("active"):
-        return ""
-    side = str(_SIDE_BYPASS.get("work_side") or "").strip().upper()
-    return side if side in ("R", "L") else ""
-
-
-def _side_bypass_unlock_from(rec: dict | None, ciclo_error: str = "") -> dict:
-    """¿Se puede activar ByPass? Joint RL bloqueado. Requiere E021 o Joint de un lado."""
-    if _SIDE_BYPASS.get("active"):
-        return {
-            "ok": True,
-            "reason": "active",
-            "suggest_side": _side_bypass_work_side(),
-        }
-    rec = rec or {}
-    if rec.get("active") and str(rec.get("kind") or "") == "joint":
-        side = str(rec.get("side") or "").strip().upper()
-        if side in ("RL", "LR"):
-            return {"ok": False, "reason": "", "suggest_side": ""}
-        if side in ("R", "L"):
-            # Sugerir el lado contrario al Joint (el que puede seguir).
-            suggest = "L" if side == "R" else "R"
-            return {"ok": True, "reason": "joint", "suggest_side": suggest}
-        return {"ok": False, "reason": "", "suggest_side": ""}
-    code = str(rec.get("code") or "").strip().upper() if rec.get("active") else ""
-    if not code:
-        code = str(ciclo_error or "").strip().upper()
-    if code == "E021":
-        return {"ok": True, "reason": "E021", "suggest_side": ""}
-    return {"ok": False, "reason": "", "suggest_side": ""}
-
-
-def _side_bypass_unlock_now() -> dict:
-    rec = _recovery_get()
-    with _STATE_LOCK:
-        ciclo_error = str(_MACHINE_STATE.get("ciclo_error") or "")
-    if not str(rec.get("code") or "") and ciclo_error != "E021":
-        # E021 vivo en PLC aunque la recuperación ya avanzó.
-        st = _plc_status_get() if _serial_port("plc") else None
-        if st and "E021" in error_codes.plc_fault_codes(st):
-            return {"ok": True, "reason": "E021", "suggest_side": ""}
-    return _side_bypass_unlock_from(rec, ciclo_error)
-
-
 def _lot_cycle_sides_now() -> str:
     """Lados efectivos del ciclo actual (catch-up puede ser R o L solo)."""
-    by = _side_bypass_work_side()
-    if by:
-        return by
     raw = str(_LOT.get("cycle_sides") or _LOT.get("sides") or "R").strip().upper()
     if raw in ("LR", "RL", "BOTH", "AMBOS"):
         return "LR"
@@ -399,9 +342,6 @@ def _lot_sides_for_counts(pieces_r: int, pieces_l: int) -> str:
 
 
 def _lot_next_cycle_sides() -> str:
-    by = _side_bypass_work_side()
-    if by:
-        return by
     return _lot_sides_for_counts(
         int(_LOT.get("pieces_r") or 0),
         int(_LOT.get("pieces_l") or 0),
@@ -409,9 +349,6 @@ def _lot_next_cycle_sides() -> str:
 
 
 def _lot_predict_next_cycle_sides() -> str:
-    by = _side_bypass_work_side()
-    if by:
-        return by
     r, l = _lot_predict_counts_after_credit()
     return _lot_sides_for_counts(r, l)
 
@@ -447,6 +384,8 @@ def _lot_credit_completed_piece() -> tuple[str, ...]:
                 continue
             _LOT["pieces_l"] = cur + 1
             kept.append("L")
+    for side in kept:
+        _mant_add_side_piece(side)
     return tuple(kept)
 
 
@@ -843,6 +782,9 @@ _MACHINE_STATE = {
         "busy": False,
     },
     "ciclos_mant": 0,
+    # Piezas buenas por lado desde el último reset de mantenimiento (no son el lote).
+    "ciclos_mant_r": 0,
+    "ciclos_mant_l": 0,
     "checklist": {
         "ok": os.environ.get("HMI_CHECKLIST_SKIP", "0").strip() == "1",
         "paso": 1,
@@ -927,6 +869,14 @@ def _clamp_lm_pr_speed_rpm(value) -> float:
     return max(LMGUIDE_PR_RPM_MIN, min(LMGUIDE_PR_RPM_MAX, x))
 
 
+def _clamp_lm_ramp_ms(value, default: int) -> int:
+    try:
+        x = int(round(float(value)))
+    except (TypeError, ValueError):
+        x = int(default)
+    return max(LMGUIDE_RAMP_MS_MIN, min(LMGUIDE_RAMP_MS_MAX, x))
+
+
 def _as_bool(src, path, default=False) -> bool:
     value = _dig(src, path, default)
     if isinstance(value, bool):
@@ -952,10 +902,29 @@ def _canonical_motion_tune(src):
         },
         "lmguide": {
             "pr_speed_rpm": _clamp_lm_pr_speed_rpm(_as_float(src, ("lmguide", "pr_speed_rpm"), 1200.0)),
+            "accel_ms": _clamp_lm_ramp_ms(
+                _dig(src, ("lmguide", "accel_ms"), LMGUIDE_ACCEL_MS_DEFAULT),
+                LMGUIDE_ACCEL_MS_DEFAULT,
+            ),
+            "decel_ms": _clamp_lm_ramp_ms(
+                _dig(src, ("lmguide", "decel_ms"), LMGUIDE_DECEL_MS_DEFAULT),
+                LMGUIDE_DECEL_MS_DEFAULT,
+            ),
             "pos_puu": _as_int(src, ("lmguide", "pos_puu"), 0),
         },
         "feed_stage": {
             "validate_encoder": _as_bool(src, ("feed_stage", "validate_encoder"), True),
+        },
+        # Experimental: PV inverso por tiempo (no está en el ciclo automático).
+        "experimental": {
+            "reverse_rpm": max(
+                1,
+                min(3000, _as_int(src, ("experimental", "reverse_rpm"), 30)),
+            ),
+            "reverse_ms": max(
+                50,
+                min(30000, _as_int(src, ("experimental", "reverse_ms"), 200)),
+            ),
         },
     }
 
@@ -1050,20 +1019,31 @@ _MOTION_DATA = {
 }
 
 
+def _lm_cmd_fields(tune: dict | None = None) -> dict:
+    """Campos LM Guide que van en cada orden de movimiento / set_tune."""
+    lm = _canonical_motion_tune(tune or {})["lmguide"]
+    return {
+        "lm_pr_speed_rpm": lm["pr_speed_rpm"],
+        "lm_accel_ms": lm["accel_ms"],
+        "lm_decel_ms": lm["decel_ms"],
+    }
+
+
 def _motion_tune_flat(tune: dict) -> dict:
     tune = _canonical_motion_tune(tune)
     feed = tune["feeder"]
     lm = tune["lmguide"]
-    return {
+    flat = {
         "op": "set_tune",
         "feed_r_vel_pps": feed["R"]["profile_velocity_pps"],
         "feed_r_target_counts": feed["R"]["target_position_counts"],
         "feed_l_vel_pps": feed["L"]["profile_velocity_pps"],
         "feed_l_target_counts": feed["L"]["target_position_counts"],
-        "lm_pr_speed_rpm": lm["pr_speed_rpm"],
         "lm_pos_puu": lm["pos_puu"],
         "feed_validate_encoder": tune["feed_stage"]["validate_encoder"],
     }
+    flat.update(_lm_cmd_fields(tune))
+    return flat
 
 
 def _compact(obj) -> str:
@@ -1392,9 +1372,6 @@ def _lm_cut_and_discharge(params: dict) -> tuple[float, float] | None:
 def _run_sides() -> str:
     if _MACHINE_STATE.get("rutina") == "checklist":
         return "LR"
-    by = _side_bypass_work_side()
-    if by:
-        return by
     if _LOT["active"]:
         return _lot_cycle_sides_now()
     return _feed_sides_of(_load_cycle_params())
@@ -1460,29 +1437,17 @@ def _build_motion_lines(op: str, tune: dict, body: dict):
     if op == "lmguide_home":
         return tune, ['{"op":"lmguide_home"}']
     if op == "lmguide_move_home":
-        return tune, [
-            _compact(
-                {
-                    "op": "lmguide_move",
-                    "target": "home",
-                    "lm_pr_speed_rpm": tune["lmguide"]["pr_speed_rpm"],
-                }
-            )
-        ]
+        payload = {"op": "lmguide_move", "target": "home"}
+        payload.update(_lm_cmd_fields(tune))
+        return tune, [_compact(payload)]
     if op == "lmguide_move":
         if body.get("mm") is None or body.get("mm") == "":
             raise ValueError("Falta la posición en mm.")
         puu = _mm_to_puu(body.get("mm"))
         tune["lmguide"]["pos_puu"] = puu
-        return tune, [
-            _compact(
-                {
-                    "op": "lmguide_move",
-                    "puu": puu,
-                    "lm_pr_speed_rpm": tune["lmguide"]["pr_speed_rpm"],
-                }
-            )
-        ]
+        payload = {"op": "lmguide_move", "puu": puu}
+        payload.update(_lm_cmd_fields(tune))
+        return tune, [_compact(payload)]
     if op == "lmguide_jog":
         if body.get("jog_mm") is None or body.get("jog_mm") == "":
             raise ValueError("Falta el jog en mm.")
@@ -1491,15 +1456,9 @@ def _build_motion_lines(op: str, tune: dict, body: dict):
             raise ValueError("El jog en mm tiene que ser distinto de cero.")
         direction = 1 if int(body.get("dir") or 1) >= 0 else -1
         delta = _mm_to_puu(direction * abs(jog_mm))
-        return tune, [
-            _compact(
-                {
-                    "op": "lmguide_jog",
-                    "delta_puu": delta,
-                    "lm_pr_speed_rpm": tune["lmguide"]["pr_speed_rpm"],
-                }
-            )
-        ]
+        payload = {"op": "lmguide_jog", "delta_puu": delta}
+        payload.update(_lm_cmd_fields(tune))
+        return tune, [_compact(payload)]
     if op == "lmguide_stop":
         return tune, ['{"op":"lmguide_stop"}']
     if op == "blower_on":
@@ -1512,11 +1471,33 @@ def _build_motion_lines(op: str, tune: dict, body: dict):
         return tune, [_compact({"op": "blower_on", "ms": ms})]
     if op == "blower_off":
         return tune, ['{"op":"blower_off"}']
-    if op == "release_part":
-        payload = {
-            "op": "release_part",
-            "lm_pr_speed_rpm": tune["lmguide"]["pr_speed_rpm"],
+    if op == "feeder_reverse":
+        side = str(body.get("side") or "both").strip().upper()
+        if side not in ("R", "L", "BOTH"):
+            raise ValueError("feeder_reverse pide side R, L o both.")
+        exp = tune.get("experimental") or {}
+        rpm_raw = body.get("rpm")
+        if rpm_raw is None or rpm_raw == "":
+            rpm_raw = exp.get("reverse_rpm", 30)
+        ms_raw = body.get("ms")
+        if ms_raw is None or ms_raw == "":
+            ms_raw = exp.get("reverse_ms", 200)
+        rpm = max(1, min(3000, int(round(float(rpm_raw)))))
+        ms = max(50, min(30000, int(ms_raw)))
+        tune["experimental"] = {
+            "reverse_rpm": rpm,
+            "reverse_ms": ms,
         }
+        payload = {
+            "op": "feeder_reverse",
+            "side": "both" if side == "BOTH" else side,
+            "rpm": rpm,
+            "ms": ms,
+        }
+        return tune, [_compact(payload)]
+    if op == "release_part":
+        payload = {"op": "release_part"}
+        payload.update(_lm_cmd_fields(tune))
         if body.get("clear_puu") is not None:
             payload["clear_puu"] = int(body["clear_puu"])
         for key in ("blower_delay_ms", "blower_ms", "home_settle_ms"):
@@ -1540,6 +1521,13 @@ def _reply_wait_s(line: str) -> float:
         return 55.0
     if "feeder_init" in line or "lmguide_servo_on" in line:
         return 8.0
+    if '"op":"feeder_reverse"' in line:
+        ms = 200
+        try:
+            ms = int(json.loads(line).get("ms") or 200)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
+        return max(2.0, (ms / 1000.0) + 2.0)
     if '"op":"status"' in line:
         return _MOTION_STATUS_TIMEOUT_S
     return 2.0
@@ -3886,11 +3874,8 @@ def _plc_verify_logical(st: dict, expected: dict) -> tuple[bool, str | None]:
 
 
 def _plc_fault_codes_ops(status: dict | None) -> list[str]:
-    """Fallos PLC que bloquean operación. Con ByPass activo, E021 no bloquea."""
-    codes = error_codes.plc_fault_codes(status)
-    if _side_bypass_work_side() and "E021" in codes:
-        return [c for c in codes if c != "E021"]
-    return codes
+    """Fallos PLC que bloquean operación."""
+    return error_codes.plc_fault_codes(status)
 
 
 def _plc_confirm(expected: dict, timeout_s: float = 3.0) -> tuple[bool, str | None]:
@@ -4366,6 +4351,8 @@ def _public_machine_state() -> dict:
         state["lote_cycle_sides"] = _lot_cycle_sides_now() if _LOT.get("active") else _LOT.get("sides")
         state["piezas_r"] = int(_LOT.get("pieces_r") or 0)
         state["piezas_l"] = int(_LOT.get("pieces_l") or 0)
+        state["ciclos_mant_r"] = int(_MACHINE_STATE.get("ciclos_mant_r") or 0)
+        state["ciclos_mant_l"] = int(_MACHINE_STATE.get("ciclos_mant_l") or 0)
         state["piezas_target_r"] = int(_LOT.get("target_r") or 0)
         state["piezas_target_l"] = int(_LOT.get("target_l") or 0)
         qty_total = int(_LOT.get("qty_total") or 0)
@@ -4397,18 +4384,7 @@ def _public_machine_state() -> dict:
         params = _load_cycle_params()
         params = dict(params)
         comps = _cut_comp_params_of(params)
-        by_side = ""
-        if _SIDE_BYPASS.get("active"):
-            raw_by = str(_SIDE_BYPASS.get("work_side") or "").strip().upper()
-            if raw_by in ("R", "L"):
-                by_side = raw_by
-        state["feed_sides"] = by_side or _feed_sides_of(params)
-        state["side_bypass"] = {
-            "active": bool(_SIDE_BYPASS.get("active")),
-            "work_side": by_side,
-            "reason": str(_SIDE_BYPASS.get("reason") or ""),
-            "empleado": str(_SIDE_BYPASS.get("empleado") or ""),
-        }
+        state["feed_sides"] = _feed_sides_of(params)
         state["cut_comp_mode"] = True
         state["cut_comp_r_mm"] = comps["cut_comp_r_mm"]
         state["cut_comp_l_mm"] = comps["cut_comp_l_mm"]
@@ -4428,22 +4404,13 @@ def _public_machine_state() -> dict:
             state["cut_comp_sequential"] = False
         state["ciclo_paso_a_paso"] = bool(_CYCLE_CTRL.get("step_mode"))
         state["recovery"] = dict(_MACHINE_STATE.get("recovery") or _recovery_blank())
-        rec_pub = state["recovery"]
-        ciclo_err = str(state.get("ciclo_error") or "")
         act = _MACHINE_STATE.get("actuators") or {}
         state["actuators"] = {
             "state": str(act.get("state") or "offline"),
             "stage": str(act.get("stage") or ""),
         }
+    state["checklist_log"] = _checklist_log_read()
     state["prefeeder"] = _prefeeder_public_summary()
-    unlock = _side_bypass_unlock_from(rec_pub, ciclo_err)
-    sb = dict(state.get("side_bypass") or {})
-    sb["unlock"] = bool(sb.get("active") or unlock.get("ok"))
-    sb["unlock_reason"] = (
-        "active" if sb.get("active") else str(unlock.get("reason") or "")
-    )
-    sb["suggest_side"] = str(unlock.get("suggest_side") or "")
-    state["side_bypass"] = sb
     return state
 
 
@@ -5098,12 +5065,10 @@ def _encoder_counts_from_msg(msg: dict | None) -> dict:
 def _cycle_move_lm_send(mm: float, inject=None, on_line=None) -> dict:
     tune = _load_motion_tune()
     puu = _mm_to_puu(mm)
+    payload = {"op": "lmguide_move", "puu": puu}
+    payload.update(_lm_cmd_fields(tune))
     return _cycle_motion_send(
-        {
-            "op": "lmguide_move",
-            "puu": puu,
-            "lm_pr_speed_rpm": tune["lmguide"]["pr_speed_rpm"],
-        },
+        payload,
         timeout_s=_MOTION_LM_MOVE_TIMEOUT_S,
         inject=inject,
         on_line=on_line,
@@ -5121,11 +5086,8 @@ def _cycle_lm_home_absolute(*, with_set_data: bool = False) -> bool:
     """
     global _CYCLE_SET_DATA_ON_HOME
     tune = _load_motion_tune()
-    payload = {
-        "op": "lmguide_move",
-        "target": "home",
-        "lm_pr_speed_rpm": tune["lmguide"]["pr_speed_rpm"],
-    }
+    payload = {"op": "lmguide_move", "target": "home"}
+    payload.update(_lm_cmd_fields(tune))
     if with_set_data:
         flat = _motion_data_flat(_MOTION_DATA)
         payload["target_length_mm"] = flat.get("target_length_mm")
@@ -5370,7 +5332,7 @@ def _cycle_run_step(step_id: str, params: dict) -> bool:
         return run_cutter(second_valve, str(plan["second_label"]))
 
     # Step 7. Solape (1+3) al inicio junto con el depósito; luego soltar pinzas.
-    # Experimental: al depositar, volver a habilitar ServoCAN ("Duro").
+    # Experimental: tras llegada al montón, ServoCAN ON en paralelo (no bloquea gripper).
     if step_id == "7":
         pos = _active_cut_deposit()
         if pos is None:
@@ -5390,13 +5352,22 @@ def _cycle_run_step(step_id: str, params: dict) -> bool:
                 return False
         _push_event(f"Depósito montón {stack}: {disc_mm:.2f} mm.")
         feed_inject, feed_line = _overlap_feed_hook()
+        # Gripper OFF solo espera llegada al montón (lmguide_move ok + settle).
+        # ServoCAN ON no bloquea: se dispara después del move, en paralelo.
         if not _cycle_move_lm_mm(disc_mm, inject=feed_inject, on_line=feed_line):
             return False
         if not _cycle_sleep_ms(int(params["ms_lm_at_discharge"])):
             return False
         if EXPERIMENTAL_SERVO_OFF:
-            if not _cycle_feeder_servo(True):
-                return False
+
+            def _feeder_servo_on_bg() -> None:
+                if not _cycle_feeder_servo(True):
+                    _push_event(
+                        "ServoCAN ON (tras depósito) no confirmó; pinzas ya no esperan.",
+                        "warn",
+                    )
+
+            threading.Thread(target=_feeder_servo_on_bg, daemon=True).start()
         # Error en el tramo con pieza sujeta: no abrir pinzas (retención).
         if _cycle_should_abort():
             return False
@@ -5451,8 +5422,8 @@ def _cycle_run_step(step_id: str, params: dict) -> bool:
             "blower_delay_ms": int(params["ms_blower_delay"]),
             "blower_ms": blower_ms,
             "home_settle_ms": int(params["ms_at_home_end"]),
-            "lm_pr_speed_rpm": _load_motion_tune()["lmguide"]["pr_speed_rpm"],
         }
+        payload.update(_lm_cmd_fields(_load_motion_tune()))
         if abs(clear_at - deposit) >= 0.05:
             payload["clear_puu"] = _mm_to_puu(clear_at)
             _push_event(
@@ -6971,31 +6942,87 @@ def _target_length_mm() -> float:
         return 0.0
 
 
-def _mant_write_file(n: int) -> None:
+def _mant_snapshot() -> dict:
+    with _STATE_LOCK:
+        return {
+            "ciclos": int(_MACHINE_STATE.get("ciclos_mant") or 0),
+            "ciclos_r": int(_MACHINE_STATE.get("ciclos_mant_r") or 0),
+            "ciclos_l": int(_MACHINE_STATE.get("ciclos_mant_l") or 0),
+        }
+
+
+def _mant_write_file(data: dict | None = None) -> None:
+    snap = dict(data) if data is not None else _mant_snapshot()
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    MANT_PATH.write_text(json.dumps({"ciclos": int(n)}) + "\n", encoding="utf-8")
+    MANT_PATH.write_text(
+        json.dumps(
+            {
+                "ciclos": int(snap.get("ciclos") or 0),
+                "ciclos_r": int(snap.get("ciclos_r") or 0),
+                "ciclos_l": int(snap.get("ciclos_l") or 0),
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 def _mant_load() -> None:
     n = 0
+    n_r = 0
+    n_l = 0
     if MANT_PATH.exists():
         try:
             data = json.loads(MANT_PATH.read_text(encoding="utf-8"))
             n = max(0, int(data.get("ciclos") or 0))
+            # Contadores por lado: solo si ya existen en archivo (no repartir el global).
+            if "ciclos_r" in data:
+                n_r = max(0, int(data.get("ciclos_r") or 0))
+            if "ciclos_l" in data:
+                n_l = max(0, int(data.get("ciclos_l") or 0))
         except (OSError, json.JSONDecodeError, TypeError, ValueError):
             n = 0
+            n_r = 0
+            n_l = 0
     with _STATE_LOCK:
         _MACHINE_STATE["ciclos_mant"] = n
+        _MACHINE_STATE["ciclos_mant_r"] = n_r
+        _MACHINE_STATE["ciclos_mant_l"] = n_l
 
 
 def _mant_add_cycle() -> None:
+    """Ciclo de máquina (global). No reparte piezas entre R/L."""
     with _STATE_LOCK:
         n = int(_MACHINE_STATE.get("ciclos_mant") or 0) + 1
         _MACHINE_STATE["ciclos_mant"] = n
+        snap = {
+            "ciclos": n,
+            "ciclos_r": int(_MACHINE_STATE.get("ciclos_mant_r") or 0),
+            "ciclos_l": int(_MACHINE_STATE.get("ciclos_mant_l") or 0),
+        }
     try:
-        _mant_write_file(n)
+        _mant_write_file(snap)
     except OSError:
         _push_event("No se pudo guardar el contador de mantenimiento.", "warn")
+
+
+def _mant_add_side_piece(side: str) -> None:
+    """Pieza buena acreditada al lado desde el último reset (independiente del lote)."""
+    key = "ciclos_mant_r" if side == "R" else "ciclos_mant_l" if side == "L" else ""
+    if not key:
+        return
+    with _STATE_LOCK:
+        n = int(_MACHINE_STATE.get(key) or 0) + 1
+        _MACHINE_STATE[key] = n
+        snap = {
+            "ciclos": int(_MACHINE_STATE.get("ciclos_mant") or 0),
+            "ciclos_r": int(_MACHINE_STATE.get("ciclos_mant_r") or 0),
+            "ciclos_l": int(_MACHINE_STATE.get("ciclos_mant_l") or 0),
+        }
+    try:
+        _mant_write_file(snap)
+    except OSError:
+        _push_event("No se pudo guardar el contador por lado.", "warn")
 
 
 def _mant_reset(data) -> tuple[bool, str]:
@@ -7004,12 +7031,26 @@ def _mant_reset(data) -> tuple[bool, str]:
         return False, "Hace falta el número de empleado, cinco dígitos."
     with _STATE_LOCK:
         _MACHINE_STATE["ciclos_mant"] = 0
+        _MACHINE_STATE["ciclos_mant_r"] = 0
+        _MACHINE_STATE["ciclos_mant_l"] = 0
     try:
-        _mant_write_file(0)
+        _mant_write_file({"ciclos": 0, "ciclos_r": 0, "ciclos_l": 0})
     except OSError:
         return False, "No se pudo guardar el contador."
     _push_event(f"Contador de mantenimiento en cero. Empleado {empleado}.")
     return True, "Contador en cero."
+
+
+def _checklist_log_read() -> list:
+    if not CHECKLIST_LOG_PATH.exists():
+        return []
+    try:
+        saved = json.loads(CHECKLIST_LOG_PATH.read_text(encoding="utf-8"))
+        if isinstance(saved, list):
+            return list(saved)
+    except (OSError, json.JSONDecodeError):
+        pass
+    return []
 
 
 def _checklist_log(empleado: str) -> None:
@@ -7019,14 +7060,7 @@ def _checklist_log(empleado: str) -> None:
         "resultado": "ok",
         "ciclos_mant": int(_MACHINE_STATE.get("ciclos_mant") or 0),
     }
-    rows = []
-    if CHECKLIST_LOG_PATH.exists():
-        try:
-            saved = json.loads(CHECKLIST_LOG_PATH.read_text(encoding="utf-8"))
-            if isinstance(saved, list):
-                rows = saved
-        except (OSError, json.JSONDecodeError):
-            rows = []
+    rows = _checklist_log_read()
     rows.append(entry)
     del rows[:-50]
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -7150,14 +7184,8 @@ def _purga_abort_keep_fault() -> None:
         and str(rec.get("step") or "") in ("purga", "purga_error")
     )
     if in_auto and fault:
-        code, msg = fault
-        hint = msg
-        if code == "E021":
-            hint = (
-                msg
-                + " Corrige el encoder o activa ByPass, luego Retry."
-            )
-        _recovery_auto_purga_fail(hint)
+        code, _msg = fault
+        _recovery_auto_purga_fail(code=code)
         return
     _purga_finish(True)
     if fault:
@@ -7196,6 +7224,45 @@ def _feed_once(side: str | None):
         err = error_name or "unknown"
         return False, error_codes.feed_stage_code(err), feed
     return True, "", feed
+
+
+def _feeder_reverse(
+    side: str | None = None, *, rpm=None, ms=None
+) -> tuple[bool, str]:
+    """PV inverso por tiempo. side R/L/None(=both). Listo para meter en ciclo."""
+    busy = _motion_owner_busy()
+    if busy:
+        return False, busy
+    linked, code = _check_module_link("motion")
+    if not linked:
+        return False, error_codes.format_message(code)
+
+    tune = _load_motion_tune()
+    exp = tune.get("experimental") or {}
+    if rpm is None:
+        rpm = exp.get("reverse_rpm", 30)
+    if ms is None:
+        ms = exp.get("reverse_ms", 200)
+    rpm_i = max(1, min(3000, int(round(float(rpm)))))
+    ms_i = max(50, min(30000, int(ms)))
+    side_s = str(side or "both").strip().upper()
+    if side_s not in ("R", "L", "BOTH"):
+        side_s = "BOTH"
+    payload = {
+        "op": "feeder_reverse",
+        "side": "both" if side_s == "BOTH" else side_s,
+        "rpm": rpm_i,
+        "ms": ms_i,
+    }
+    timeout_s = max(2.0, (ms_i / 1000.0) + 2.0)
+    sent = _cycle_motion_send(payload, timeout_s=timeout_s)
+    if not sent.get("sent"):
+        return False, sent.get("reason") or error_codes.format_message(
+            sent.get("code") or "E043"
+        )
+    if not _motion_cmd_ok(sent, "feeder_reverse"):
+        return False, error_codes.format_message("E044")
+    return True, ""
 
 
 def _feeder_test(side: str, tune: dict) -> dict:
@@ -7274,6 +7341,56 @@ def _purge_feed_side() -> str | None:
     return sides if sides in ("R", "L") else None
 
 
+def _purga_alimentar_progress_msg() -> str:
+    side = _purge_feed_side()
+    if side == "R":
+        return (
+            "Se está alimentando el lado derecho hasta que el sensor detecte el material."
+        )
+    if side == "L":
+        return (
+            "Se está alimentando el lado izquierdo hasta que el sensor detecte el material."
+        )
+    return (
+        "Se están alimentando ambos lados hasta que el sensor detecte el material."
+    )
+
+
+def _purga_feed_ok_msg() -> str:
+    return "La alimentación fue exitosa. Pulsa Continuar para terminar de limpiar."
+
+
+def _purga_continuar_banner() -> tuple[str, str]:
+    return "Proceso de limpieza en curso", "NO INTRODUCIR MANOS"
+
+
+def _purga_error_action_guide(code: str = "", *, fallback: str = "") -> str:
+    """Acción concreta para Error en purga (sin repetir el diagnóstico)."""
+    c = str(code or "").strip().upper()
+    if c == "E033":
+        return "Revisa el sensor láser derecho y pulsa Retry."
+    if c == "E034":
+        return "Revisa el sensor láser izquierdo y pulsa Retry."
+    if c == "E021":
+        return "Corrige el encoder y pulsa Retry."
+    if c == "E035":
+        return "Revisa el encoder derecho y pulsa Retry."
+    if c == "E036":
+        return "Revisa el encoder izquierdo y pulsa Retry."
+    if c == "E020":
+        return "Revisa el holder y pulsa Retry."
+    if c == "E022":
+        return "Revisa el cortador y pulsa Retry."
+    if c == "E023":
+        return "Revisa las pinzas y pulsa Retry."
+    if c == "E044":
+        return "Revisa el LM Guide y pulsa Retry."
+    text = str(fallback or "").strip()
+    if text:
+        return text
+    return "Revisa el material y pulsa Retry."
+
+
 def _feed_laser():
     """Purga: lados activos (feed_sides) hasta su láser. Sin encoder ni compensación."""
     side = _purge_feed_side()
@@ -7310,14 +7427,9 @@ def _routine_move_lm_mm(mm: float) -> bool:
     tune = _load_motion_tune()
     if _ROUTINE["stop"].is_set():
         return False
-    move = _cycle_motion_send(
-        {
-            "op": "lmguide_move",
-            "puu": _mm_to_puu(mm),
-            "lm_pr_speed_rpm": tune["lmguide"]["pr_speed_rpm"],
-        },
-        timeout_s=40.0,
-    )
+    payload = {"op": "lmguide_move", "puu": _mm_to_puu(mm)}
+    payload.update(_lm_cmd_fields(tune))
+    move = _cycle_motion_send(payload, timeout_s=40.0)
     return _motion_cmd_ok(move, "lmguide_move")
 
 
@@ -7477,15 +7589,23 @@ def _purga_finish(cancelled: bool) -> None:
             else:
                 _set_machine_ui(
                     estado="idle",
-                    estado_label="En espera",
-                    mensaje="Listo para operar.",
+                    estado_label="Listo para trabajar",
+                    mensaje="",
                     en_curso=False,
                 )
             return
     if from_lote:
         _rearm_piece(msg + " El ciclo queda en pausa y la pieza vuelve al paso 1.")
         return
-    _set_machine_ui(estado="idle", estado_label="En espera", mensaje=msg, en_curso=False)
+    if cancelled:
+        _set_machine_ui(estado="idle", estado_label="En espera", mensaje=msg, en_curso=False)
+    else:
+        _set_machine_ui(
+            estado="idle",
+            estado_label="Listo para trabajar",
+            mensaje="",
+            en_curso=False,
+        )
 
 
 def _purga_prepare() -> None:
@@ -7493,8 +7613,8 @@ def _purga_prepare() -> None:
         rutina="purga",
         rutina_fase="segura",
         rutina_manos=False,
-        estado_label="Purga",
-        mensaje=f"Purga: llevando el eje a parque ({PURGE_PARK_MM:.0f} mm).",
+        estado_label="Proceso de limpieza",
+        mensaje="Llevando el eje a un lugar seguro.",
     )
     if not _routine_try_reset_fault() or _ROUTINE["stop"].is_set():
         if _ROUTINE["stop"].is_set():
@@ -7511,12 +7631,8 @@ def _purga_prepare() -> None:
         return
     _set_routine_ui(
         rutina_fase="espera",
-        mensaje=(
-            f"Eje en parque ({PURGE_PARK_MM:.0f} mm). "
-            "Alimentar y Limpiar cierran holder y encoder. "
-            "Continuar: home, corte, depósito a 100 mm y home. "
-            "Al terminar, holder y encoder quedan cerrados."
-        ),
+        estado_label="Proceso de limpieza",
+        mensaje="Selecciona la opción que deseas utilizar:",
     )
 
 
@@ -7533,7 +7649,13 @@ def _purga_start(_data=None) -> tuple[bool, str]:
     # En ruta post-error se conserva el paso pausado; no rearmar a paso 1 al terminar.
     recovery = bool(_MACHINE_STATE.get("post_error_purga"))
     _ROUTINE["from_lote"] = bool(_MACHINE_STATE.get("ciclo_en_curso")) and not recovery
-    _set_routine_ui(rutina="purga", rutina_fase="segura", rutina_manos=False, estado_label="Purga")
+    _set_routine_ui(
+        rutina="purga",
+        rutina_fase="segura",
+        rutina_manos=False,
+        estado_label="Proceso de limpieza",
+        mensaje="Llevando el eje a un lugar seguro.",
+    )
     ok, err = _start_routine(_purga_prepare)
     if not ok:
         _ROUTINE["from_lote"] = False
@@ -7565,7 +7687,11 @@ def _purga_close_holder() -> bool:
 
 
 def _purga_alimentar_run() -> None:
-    _set_routine_ui(rutina_fase="alimentar", mensaje="Cerrando holder y encoder.")
+    _set_routine_ui(
+        rutina_fase="alimentar",
+        estado_label="Proceso de limpieza",
+        mensaje="Cerrando holder y encoder.",
+    )
     if not _purga_close_holder():
         if _ROUTINE["stop"].is_set():
             _purga_finish(True)
@@ -7576,12 +7702,14 @@ def _purga_alimentar_run() -> None:
             else:
                 _set_routine_ui(
                     rutina_fase="espera",
+                    estado_label="Proceso de limpieza",
                     mensaje="No se cerró holder y encoder.",
                 )
         return
-    side = _purge_feed_side()
-    side_name = {"R": "derecho", "L": "izquierdo"}.get(side or "", "ambos lados")
-    _set_routine_ui(mensaje=f"Alimentación: {side_name} hasta el láser.")
+    _set_routine_ui(
+        estado_label="Proceso de limpieza",
+        mensaje=_purga_alimentar_progress_msg(),
+    )
     ok, code, _feed = _feed_laser()
     if _ROUTINE["stop"].is_set():
         _purga_finish(True)
@@ -7590,23 +7718,26 @@ def _purga_alimentar_run() -> None:
         _push_event(error_codes.format_message(code), "error")
         _set_routine_ui(
             rutina_fase="espera",
+            estado_label="Proceso de limpieza",
             mensaje="No llegó al láser. Puedes repetir, continuar o terminar.",
         )
         return
     _set_routine_ui(
         rutina_fase="espera",
-        mensaje="Alimentación lista. Continuar: home, corte, depósito a 100 mm y home.",
+        estado_label="Proceso de limpieza",
+        mensaje=_purga_feed_ok_msg(),
     )
 
 
 def _purge_cut() -> bool:
     """Solo purga, al pulsar Continuar: home, corte con pinzas, depósito fijo, home."""
     params = _load_cycle_params()
+    label, aviso = _purga_continuar_banner()
     _set_routine_ui(
         rutina_fase="corte",
         rutina_manos=True,
-        estado_label="Purga",
-        mensaje="NO METAS LAS MANOS. Regresando a 0.",
+        estado_label=label,
+        mensaje=aviso,
     )
 
     def sent_ok(sent) -> bool:
@@ -7616,7 +7747,8 @@ def _purge_cut() -> bool:
     if not _routine_move_lm_mm(0.0) or _ROUTINE["stop"].is_set():
         return False
 
-    _set_routine_ui(mensaje="NO METAS LAS MANOS. Corte y pinzas en 0.")
+    # Banner fijo durante cero / corte / descarga / home.
+    _set_routine_ui(estado_label=label, mensaje=aviso)
     ok_g, code_g = _plc_accept_valve(
         _cycle_plc_send({"op": "valve", "name": "gripper", "on": True}),
         {"gripper": True},
@@ -7658,9 +7790,7 @@ def _purge_cut() -> bool:
     if not _routine_sleep_ms(PURGE_AFTER_CUT_MS):
         return False
 
-    _set_routine_ui(
-        mensaje=f"NO METAS LAS MANOS. Depósito a {PURGE_DEPOSIT_MM:.0f} mm.",
-    )
+    _set_routine_ui(estado_label=label, mensaje=aviso)
     if not _routine_move_lm_mm(PURGE_DEPOSIT_MM):
         return False
     if not _routine_sleep_ms(int(params["ms_lm_at_discharge"])):
@@ -7681,18 +7811,16 @@ def _purge_cut() -> bool:
             _push_event(error_codes.format_message(code_off), "error")
         return False
 
-    _set_routine_ui(mensaje="NO METAS LAS MANOS. Regresando a home.")
+    _set_routine_ui(estado_label=label, mensaje=aviso)
     blower_ms = _cycle_blower_duration_ms(params)
-    sent = _cycle_motion_send(
-        {
-            "op": "release_part",
-            "blower_delay_ms": int(params["ms_blower_delay"]),
-            "blower_ms": blower_ms,
-            "home_settle_ms": int(params["ms_at_home_end"]),
-            "lm_pr_speed_rpm": _load_motion_tune()["lmguide"]["pr_speed_rpm"],
-        },
-        timeout_s=40.0,
-    )
+    payload = {
+        "op": "release_part",
+        "blower_delay_ms": int(params["ms_blower_delay"]),
+        "blower_ms": blower_ms,
+        "home_settle_ms": int(params["ms_at_home_end"]),
+    }
+    payload.update(_lm_cmd_fields(_load_motion_tune()))
+    sent = _cycle_motion_send(payload, timeout_s=40.0)
     if _ROUTINE["stop"].is_set():
         _send_motion_urgent(['{"op":"blower_off"}', '{"op":"lmguide_stop"}'])
         return False
@@ -7716,7 +7844,11 @@ def _purga_cut_run() -> None:
 
 
 def _purga_limpiar_run() -> None:
-    _set_routine_ui(rutina_fase="limpiar", mensaje="Cerrando holder y encoder.")
+    _set_routine_ui(
+        rutina_fase="limpiar",
+        estado_label="Proceso de limpieza",
+        mensaje="Cerrando holder y encoder.",
+    )
     if not _purga_close_holder():
         if _ROUTINE["stop"].is_set():
             _purga_finish(True)
@@ -7727,12 +7859,14 @@ def _purga_limpiar_run() -> None:
             else:
                 _set_routine_ui(
                     rutina_fase="espera",
+                    estado_label="Proceso de limpieza",
                     mensaje="No se cerró holder y encoder.",
                 )
         return
-    side = _purge_feed_side()
-    side_name = {"R": "derecho", "L": "izquierdo"}.get(side or "", "ambos lados")
-    _set_routine_ui(mensaje=f"Limpiar ({side_name}): alimentando 3 s sin mirar el láser.")
+    _set_routine_ui(
+        estado_label="Proceso de limpieza",
+        mensaje="Se está expulsando el material residual. Espera a que termine.",
+    )
     ok, code, _feed = _feed_clean()
     if _ROUTINE["stop"].is_set():
         _purga_finish(True)
@@ -7741,12 +7875,14 @@ def _purga_limpiar_run() -> None:
         _push_event(error_codes.format_message(code), "error")
         _set_routine_ui(
             rutina_fase="espera",
-            mensaje="La limpieza no completó los 3 s. Puedes repetir, continuar o terminar.",
+            estado_label="Proceso de limpieza",
+            mensaje="La expulsión no completó. Puedes repetir, continuar o terminar.",
         )
         return
     _set_routine_ui(
         rutina_fase="espera",
-        mensaje="Limpieza lista. Continuar: home, corte, depósito a 100 mm y home.",
+        estado_label="Proceso de limpieza",
+        mensaje=_purga_feed_ok_msg(),
     )
 
 
@@ -7757,15 +7893,27 @@ def _purga_limpiar_action(_data=None) -> tuple[bool, str]:
     if not ok:
         _set_routine_ui(rutina_fase="espera", rutina_manos=False)
         return False, err
-    return True, "Limpiando."
+    return True, "Expulsando."
 
 
 def _purga_continuar_action(_data=None) -> tuple[bool, str]:
     if not _purga_claim("corte"):
         return False, "La purga no está en espera."
+    label, aviso = _purga_continuar_banner()
+    _set_routine_ui(
+        rutina_fase="corte",
+        rutina_manos=True,
+        estado_label=label,
+        mensaje=aviso,
+    )
     ok, err = _start_routine(_purga_cut_run)
     if not ok:
-        _set_routine_ui(rutina_fase="espera", rutina_manos=False)
+        _set_routine_ui(
+            rutina_fase="espera",
+            rutina_manos=False,
+            estado_label="Proceso de limpieza",
+            mensaje="Selecciona la opción que deseas utilizar:",
+        )
         return False, err
     return True, "Purga en corte."
 
@@ -7920,121 +8068,6 @@ def _prealimentador_iniciar(_data=None) -> tuple[bool, str]:
     return True, "PreAlimentador estabilizado y bloqueado."
 
 
-def _side_bypass_apply_lot(work_side: str) -> None:
-    """Congela el lado omitido del lote y mueve el remanente al lado de trabajo."""
-    bad = "L" if work_side == "R" else "R"
-    pr = int(_LOT.get("pieces_r") or 0)
-    pl = int(_LOT.get("pieces_l") or 0)
-    tr = int(_LOT.get("target_r") or 0)
-    tl = int(_LOT.get("target_l") or 0)
-    if work_side == "R":
-        rem = max(0, tl - pl)
-        _LOT["target_l"] = pl
-        _LOT["target_r"] = tr + rem
-    else:
-        rem = max(0, tr - pr)
-        _LOT["target_r"] = pr
-        _LOT["target_l"] = tl + rem
-    _LOT["sides"] = work_side
-    _LOT["cycle_sides"] = work_side
-    _LOT["qty_total"] = int(_LOT.get("target_r") or 0) + int(_LOT.get("target_l") or 0)
-
-
-def _side_bypass_on(data=None) -> tuple[bool, str]:
-    data = data or {}
-    empleado = _empleado(data.get("empleado"))
-    if not empleado:
-        return False, "Hace falta el número de empleado, cinco dígitos."
-    work_side = str(data.get("work_side") or data.get("side") or "").strip().upper()
-    if work_side not in ("R", "L"):
-        return False, "Elige el lado con el que continuar: R o L."
-    if _SIDE_BYPASS.get("active"):
-        return False, "ByPass ya está activo. Apágalo antes de cambiar de lado."
-    unlock = _side_bypass_unlock_now()
-    if not unlock.get("ok"):
-        return False, "ByPass bloqueado. Solo con E021 o Warning Joint de un lado."
-    reason = str(unlock.get("reason") or "") or "E021"
-    with _STATE_LOCK:
-        _SIDE_BYPASS["active"] = True
-        _SIDE_BYPASS["work_side"] = work_side
-        _SIDE_BYPASS["reason"] = reason
-        _SIDE_BYPASS["empleado"] = empleado
-        _SIDE_BYPASS["saved_lot_sides"] = str(_LOT.get("sides") or "")
-        _SIDE_BYPASS["saved_cycle_sides"] = str(_LOT.get("cycle_sides") or "")
-        _SIDE_BYPASS["saved_target_r"] = int(_LOT.get("target_r") or 0)
-        _SIDE_BYPASS["saved_target_l"] = int(_LOT.get("target_l") or 0)
-        _SIDE_BYPASS["saved_qty_total"] = int(_LOT.get("qty_total") or 0)
-        if _LOT.get("active") or _LOT.get("tray_wait") or int(_LOT.get("qty_total") or 0) > 0:
-            _side_bypass_apply_lot(work_side)
-    nombre = "Right" if work_side == "R" else "Left"
-    _push_event(
-        f"ByPass activo. Continuar trabajando con {nombre}. "
-        f"Empleado {empleado}. Motivo {reason}.",
-        "warn",
-    )
-    if reason == "joint":
-        _push_event(
-            "ByPass no sustituye la recuperación Joint. Complétala y luego reanuda.",
-            "warn",
-        )
-    elif reason == "E021":
-        _push_event(
-            "Vía especial E021: el PLC puede seguir en el lado de trabajo. "
-            "Completa Reset/recuperación si aplica.",
-            "warn",
-        )
-    return True, f"ByPass activo · {nombre}."
-
-
-def _side_bypass_off(data=None) -> tuple[bool, str]:
-    data = data or {}
-    empleado = _empleado(data.get("empleado"))
-    if not empleado:
-        return False, "Hace falta el número de empleado, cinco dígitos."
-    if not _SIDE_BYPASS.get("active"):
-        return False, "ByPass no está activo."
-    prev = str(_SIDE_BYPASS.get("work_side") or "")
-    with _STATE_LOCK:
-        saved_sides = str(_SIDE_BYPASS.get("saved_lot_sides") or "")
-        saved_cycle = str(_SIDE_BYPASS.get("saved_cycle_sides") or "")
-        saved_tr = _SIDE_BYPASS.get("saved_target_r")
-        saved_tl = _SIDE_BYPASS.get("saved_target_l")
-        saved_qty = _SIDE_BYPASS.get("saved_qty_total")
-        _SIDE_BYPASS["active"] = False
-        _SIDE_BYPASS["work_side"] = ""
-        _SIDE_BYPASS["reason"] = ""
-        _SIDE_BYPASS["empleado"] = ""
-        _SIDE_BYPASS["saved_lot_sides"] = ""
-        _SIDE_BYPASS["saved_cycle_sides"] = ""
-        _SIDE_BYPASS["saved_target_r"] = None
-        _SIDE_BYPASS["saved_target_l"] = None
-        _SIDE_BYPASS["saved_qty_total"] = None
-        if _LOT.get("active") or _LOT.get("tray_wait") or int(_LOT.get("qty_total") or 0) > 0:
-            if saved_sides:
-                _LOT["sides"] = saved_sides
-            if saved_cycle:
-                _LOT["cycle_sides"] = saved_cycle
-            if saved_tr is not None:
-                _LOT["target_r"] = int(saved_tr)
-            if saved_tl is not None:
-                _LOT["target_l"] = int(saved_tl)
-            if saved_qty is not None:
-                _LOT["qty_total"] = int(saved_qty)
-    nombre = "Right" if prev == "R" else "Left" if prev == "L" else prev or "—"
-    _push_event(f"ByPass apagado ({nombre}). Empleado {empleado}.", "warn")
-    return True, "ByPass apagado."
-
-
-def _side_bypass_action(data=None) -> tuple[bool, str]:
-    data = data or {}
-    on = data.get("on")
-    if on is None:
-        on = not _SIDE_BYPASS.get("active")
-    if on in (True, 1, "1", "true", "True", "on"):
-        return _side_bypass_on(data)
-    return _side_bypass_off(data)
-
-
 def _checklist_motion_free() -> str:
     if _MACHINE_STATE.get("ciclo_en_curso"):
         return "Termina el ciclo antes de este paso de la revisión."
@@ -8045,7 +8078,7 @@ def _checklist_motion_free() -> str:
 
 def _checklist_empezar(data) -> tuple[bool, str]:
     if _checklist_now().get("ok"):
-        return False, "La revisión ya está completa. Usa Nueva revisión para repetirla."
+        return False, "La revisión ya está completa. Puedes cerrar la ventana."
     empleado = _empleado(data.get("empleado"))
     if not empleado:
         return False, "Hace falta el número de empleado, cinco dígitos."
@@ -8057,6 +8090,7 @@ def _checklist_empezar(data) -> tuple[bool, str]:
 
 
 def _checklist_nueva(_data=None) -> tuple[bool, str]:
+    """Conservado por compatibilidad; la HMI ya no ofrece reiniciar tras completar."""
     blocked = _checklist_motion_free()
     if blocked:
         return False, blocked
@@ -8135,14 +8169,9 @@ def _checklist_recorrido_run() -> None:
         _cut_mm, disc = pos
         tune = _load_motion_tune()
         puu = _mm_to_puu(disc)
-        move = _cycle_motion_send(
-            {
-                "op": "lmguide_move",
-                "puu": puu,
-                "lm_pr_speed_rpm": tune["lmguide"]["pr_speed_rpm"],
-            },
-            timeout_s=40.0,
-        )
+        payload = {"op": "lmguide_move", "puu": puu}
+        payload.update(_lm_cmd_fields(tune))
+        move = _cycle_motion_send(payload, timeout_s=40.0)
         if _ROUTINE["stop"].is_set() or not _motion_cmd_ok(move, "lmguide_move"):
             _set_routine_ui(rutina="", mensaje="El recorrido no se completó.")
             return
@@ -8339,7 +8368,7 @@ def _recovery_banner_hint() -> str:
     return f"{code}. Abre el aviso para continuar." if code else "Abre el aviso para continuar."
 
 
-def _recovery_auto_purga_fail(msg: str = "") -> None:
+def _recovery_auto_purga_fail(msg: str = "", *, code: str = "") -> None:
     """Fallo o cancelación de purga automática."""
     user_cancel = bool(_ROUTINE.pop("purga_user_cancel", False))
     _cycle_plc_send({"op": "all_off"})
@@ -8352,10 +8381,30 @@ def _recovery_auto_purga_fail(msg: str = "") -> None:
             mensaje=_recovery_banner_hint(),
         )
         return
-    text = (msg or "Purga automática falló. Corrige y pulsa Retry, o Cancelar.").strip()
-    # No pisar recovery.mensaje (error original); la guía explica el fallo de purga.
-    _recovery_set(step="purga_error", busy=False)
-    _recovery_set_guide(text)
+    fail_code = str(code or "").strip().upper()
+    fail_msg = str(msg or "").strip()
+    # Si el fallo de purga trae código propio, actualizar el recuadro de error.
+    if fail_code:
+        try:
+            fail_msg = error_codes.format_message(fail_code)
+        except Exception:
+            if not fail_msg:
+                fail_msg = fail_code
+        _recovery_set(
+            step="purga_error",
+            busy=False,
+            code=fail_code,
+            mensaje=fail_msg,
+        )
+    else:
+        _recovery_set(step="purga_error", busy=False)
+    # INSTRUCCIONES: solo la acción; el diagnóstico queda en el recuadro.
+    _recovery_set_guide(
+        _purga_error_action_guide(
+            fail_code,
+            fallback="Revisa el material y pulsa Retry.",
+        )
+    )
     _set_machine_ui(
         estado_label="Purga — error",
         mensaje=_recovery_banner_hint(),
@@ -8365,15 +8414,16 @@ def _recovery_auto_purga_fail(msg: str = "") -> None:
 def _recovery_auto_purga_run() -> None:
     """Purga automática post-error: park + holder/encoder + feed + corte."""
     _ROUTINE["from_lote"] = False
+    label, aviso = _purga_continuar_banner()
     _recovery_set(step="purga", busy=True)
     _set_routine_ui(
         rutina="purga",
         rutina_fase="segura",
         rutina_manos=True,
-        estado_label="Purga",
-        mensaje="NO INTRODUCIR MANOS. Proceso de limpieza en curso, espera.",
+        estado_label=label,
+        mensaje=aviso,
     )
-    _recovery_set_guide("NO INTRODUCIR MANOS. Proceso de limpieza en curso, espera.")
+    _recovery_set_guide("")
     _set_machine_ui(mensaje=_recovery_banner_hint())
 
     # Tiempo para leer el aviso antes de mover.
@@ -8387,52 +8437,47 @@ def _recovery_auto_purga_run() -> None:
             _purga_abort_keep_fault()
         return
     if not _cycle_plc_send({"op": "all_off"}).get("sent"):
-        _recovery_auto_purga_fail("No se pudo apagar salidas PLC para la purga.")
+        _recovery_auto_purga_fail(
+            "No se pudo apagar salidas PLC para la purga.",
+        )
         return
     _gripper_holding_set(False)
-    park_msg = f"NO METAS LAS MANOS. Llevando el eje a parque ({PURGE_PARK_MM:.0f} mm)."
-    _set_routine_ui(mensaje=park_msg)
-    _recovery_set_guide(park_msg)
+    # Banner fijo durante toda la limpieza automática.
+    _set_routine_ui(estado_label=label, mensaje=aviso)
     if _ROUTINE["stop"].is_set() or not _routine_move_lm_mm(PURGE_PARK_MM):
-        _recovery_auto_purga_fail("No se alcanzó Park en la purga.")
+        _recovery_auto_purga_fail("No se alcanzó Park en la purga.", code="E044")
         return
 
     # Misma secuencia que Alimentar + Continuar de la purga manual.
-    close_msg = "NO METAS LAS MANOS. Cerrando holder y encoder."
-    _set_routine_ui(rutina_fase="alimentar", mensaje=close_msg)
-    _recovery_set_guide(close_msg)
+    _set_routine_ui(rutina_fase="alimentar", estado_label=label, mensaje=aviso)
     if not _purga_close_holder() or _ROUTINE["stop"].is_set():
         if _ROUTINE["stop"].is_set():
-            _recovery_auto_purga_fail("No se cerró holder/encoder. Revisa y pulsa Retry.")
+            _recovery_auto_purga_fail(
+                "No se cerró holder/encoder.",
+            )
         else:
             fault = _plc_first_active_fault()
             if fault:
-                code, msg = fault
-                hint = msg
-                if code == "E021":
-                    hint = (
-                        msg
-                        + " Corrige el encoder o activa ByPass, luego Retry."
-                    )
-                _recovery_auto_purga_fail(hint)
+                code, _msg = fault
+                _recovery_auto_purga_fail(code=code)
             else:
                 _recovery_auto_purga_fail(
-                    "No se cerró holder/encoder. Revisa y pulsa Retry."
+                    "No se cerró holder/encoder.",
                 )
         return
-    side = _purge_feed_side()
-    side_name = {"R": "derecho", "L": "izquierdo"}.get(side or "", "ambos lados")
-    feed_msg = f"NO METAS LAS MANOS. Alimentación: {side_name} hasta el láser."
-    _set_routine_ui(mensaje=feed_msg)
-    _recovery_set_guide(feed_msg)
+    _set_routine_ui(estado_label=label, mensaje=aviso)
     ok_feed, code, _feed = _feed_laser()
     if _ROUTINE["stop"].is_set():
         _recovery_auto_purga_fail("Purga cancelada durante la alimentación.")
         return
     if not ok_feed:
-        msg = error_codes.format_message(code) if code else "Falló la alimentación hasta el láser."
+        msg = (
+            error_codes.format_message(code)
+            if code
+            else "Falló la alimentación hasta el láser."
+        )
         _push_event(msg, "error")
-        _recovery_auto_purga_fail(msg + " Revisa el sensor láser y pulsa Retry.")
+        _recovery_auto_purga_fail(msg, code=code or "")
         return
 
     ok = False
@@ -8440,7 +8485,9 @@ def _recovery_auto_purga_run() -> None:
         ok = _purge_cut()
     finally:
         if not ok or _ROUTINE["stop"].is_set():
-            _recovery_auto_purga_fail("Falló el corte de purga. Revisa y pulsa Retry.")
+            _recovery_auto_purga_fail(
+                "Falló el corte de purga.",
+            )
         else:
             _purga_finish(False)
 
@@ -8455,21 +8502,27 @@ def _recovery_start_auto_purga() -> tuple[bool, str]:
     if not ready:
         return False, err
     _ROUTINE.pop("purga_user_cancel", None)
+    label, aviso = _purga_continuar_banner()
     _recovery_set(step="purga", busy=True)
     _set_routine_ui(
         rutina="purga",
         rutina_fase="segura",
         rutina_manos=True,
-        estado_label="Purga",
-        mensaje="NO INTRODUCIR MANOS. Proceso de limpieza en curso, espera.",
+        estado_label=label,
+        mensaje=aviso,
     )
-    _recovery_set_guide("NO INTRODUCIR MANOS. Proceso de limpieza en curso, espera.")
+    _recovery_set_guide("")
     _set_machine_ui(mensaje=_recovery_banner_hint())
     ok, start_err = _start_routine(_recovery_auto_purga_run)
     if not ok:
         _set_routine_ui(rutina="", rutina_fase="", rutina_manos=False)
         _recovery_set(step="purga_error", busy=False)
-        _recovery_set_guide(start_err or "No se pudo iniciar la purga. Revisa y pulsa Retry.")
+        _recovery_set_guide(
+            _purga_error_action_guide(
+                "",
+                fallback="No se pudo iniciar la purga. Revisa y pulsa Retry.",
+            )
+        )
         return False, start_err
     return True, "Purga automática iniciada."
 
@@ -8677,7 +8730,6 @@ _ROUTINE_ACTIONS = {
     "purga_terminar": _purga_terminar_action,
     "posicion_inicial": _posicion_inicial,
     "iniciar": _prealimentador_iniciar,
-    "side_bypass": _side_bypass_action,
     "checklist_empezar": _checklist_empezar,
     "checklist_nueva": _checklist_nueva,
     "checklist_aire": _checklist_aire,

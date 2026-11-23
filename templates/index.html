@@ -3,48 +3,65 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>GSW — CORTADORA DE TUBO</title>
+  <title>GSW — Cortadora de tubo</title>
   <script>
     (function () {
       try {
         var t = localStorage.getItem("dmat_theme");
         if (t === "light" || t === "dark") {
           document.documentElement.setAttribute("data-theme", t);
+        } else {
+          document.documentElement.setAttribute("data-theme", "light");
         }
-      } catch (e) {}
+      } catch (e) {
+        document.documentElement.setAttribute("data-theme", "light");
+      }
     })();
   </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@500;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
 </head>
 <body>
   <header class="app-header">
     <div class="brand">
-      <span class="brand-mark" aria-hidden="true"></span>
+      <span class="brand-mark" aria-hidden="true">GSW</span>
       <div class="brand-text">
-        <h1><span class="brand-prefix">GSW —</span> CORTADORA DE TUBO</h1>
-        <p class="subtitle">By. R&amp;D</p>
+        <h1>Cortadora de tubo</h1>
+        <p class="subtitle">By R&amp;D</p>
       </div>
     </div>
-    <button type="button" class="btn-app-settings" id="btnAppSettings" aria-haspopup="dialog" aria-controls="settingsModal">
-      <span class="btn-app-settings__icon" aria-hidden="true">⚙</span>
-      <span>Configuración</span>
-    </button>
+    <div class="header-actions">
+      <button type="button" class="btn-app-settings" id="btnAppSettings" aria-haspopup="dialog" aria-controls="settingsModal">
+        <span class="btn-app-settings__icon" aria-hidden="true">⚙</span>
+        <span>Configuración</span>
+      </button>
+      <button type="button" class="theme-toggle theme-toggle--header" id="themeToggle" aria-label="Activar modo oscuro">
+        <span class="theme-toggle__icon theme-toggle__icon--sun" aria-hidden="true">☀</span>
+        <span class="theme-toggle__icon theme-toggle__icon--moon" aria-hidden="true">☽</span>
+      </button>
+    </div>
   </header>
 
   <div class="main-layout">
     <div class="status-banner status-banner--idle status-banner--full" id="statusBanner" role="status">
-      <div class="status-banner__main">
-        <span class="status-banner__dot" id="statusBannerDot"></span>
-        <span class="status-banner__label" id="statusBannerLabel">En espera</span>
+      <div class="status-banner__lead">
+        <span class="status-banner__eyebrow">Estado de la máquina</span>
+        <div class="status-banner__main">
+          <span class="status-banner__dot" id="statusBannerDot"></span>
+          <span class="status-banner__label" id="statusBannerLabel">En espera</span>
+        </div>
       </div>
+      <div class="status-banner__divider" aria-hidden="true"></div>
       <div class="status-banner__row">
         <p class="status-banner__detail" id="statusBannerDetail">Sistema listo. Sin errores activos.</p>
         <button type="button" class="btn btn-reset status-banner__open-error" id="btnOpenRecovery" hidden>Abrir Error</button>
       </div>
       <div class="status-banner__actions" id="statusBannerActions" hidden>
         <button type="button" class="btn btn-manual" data-action="purga_alimentar">Alimentar</button>
-        <button type="button" class="btn btn-manual" data-action="purga_limpiar">Limpiar</button>
-        <button type="button" class="btn btn-manual" data-plc-op="valve" data-plc-name="holder_encoder" data-plc-keep-label aria-pressed="false" title="Abrir o cerrar holder y encoder juntos">Holder + encoder</button>
+        <button type="button" class="btn btn-manual" data-action="purga_limpiar">Expulsar</button>
+        <button type="button" class="btn btn-manual" data-plc-op="valve" data-plc-name="holder_encoder" data-plc-keep-label aria-pressed="false" title="Abrir o cerrar holder y encoder juntos">Liberar</button>
         <button type="button" class="btn btn-start" data-action="charola_vacia" hidden>Charola vacía</button>
         <button type="button" class="btn btn-resume" data-action="purga_continuar">Continuar</button>
         <button type="button" class="btn btn-secondary" data-action="purga_terminar">Terminar</button>
@@ -53,25 +70,16 @@
 
     <div class="workspace">
       <aside class="sidebar sidebar--left">
-        <section class="panel" data-block="proceso">
+        <section class="panel panel--proceso" data-block="proceso">
           <h2 class="panel-title">Proceso</h2>
-          <div class="btn-grid">
-            <button type="button" class="btn btn-start" data-action="start">Iniciar</button>
-            <button type="button" class="btn btn-resume" data-action="resume">Reanudar</button>
-            <button type="button" class="btn btn-pause" data-action="pause">Pausa</button>
+          <div class="btn-grid btn-grid--proceso">
+            <button type="button" class="btn btn-start btn-start--solid" data-action="start">Iniciar ciclo</button>
+            <button type="button" class="btn btn-neutral" data-action="resume">Reanudar</button>
+            <button type="button" class="btn btn-neutral" data-action="pause">Pausar</button>
             <button type="button" class="btn btn-stop" data-action="stop">Detener</button>
-          </div>
-          <div class="btn-grid btn-grid--process-reset">
-            <button type="button" class="btn btn-reset" data-action="reset">Reset</button>
-          </div>
-          <div class="btn-grid btn-grid--process-bypass">
-            <button type="button" class="btn btn-bypass" id="btnSideBypass" data-action="side_bypass" disabled aria-pressed="false" title="ByPass bloqueado">ByPass</button>
-          </div>
-          <p class="process-hint" id="sideBypassHint" hidden></p>
-          <div class="panel-divider" aria-hidden="true"></div>
-          <div class="btn-grid" data-block="operacion_manual">
+            <button type="button" class="btn btn-neutral" data-action="reset">Reset</button>
             <button type="button" class="btn btn-manual" data-action="purga">Purga</button>
-            <button type="button" class="btn btn-manual" data-action="posicion_inicial">Posición inicial</button>
+            <button type="button" class="btn btn-outline" data-action="posicion_inicial">Posición inicial</button>
           </div>
         </section>
       </aside>
@@ -79,7 +87,14 @@
       <section class="center-hub" aria-label="Monitor de producción">
         <div class="progress-block">
           <div class="progress-block__header">
-            <span class="progress-block__title">Progreso</span>
+            <div class="progress-block__count" aria-live="polite">
+              <span class="progress-block__title">Producción</span>
+              <div class="progress-block__qty">
+                <span class="metric-value" id="metricPiezasProducidas">0</span>
+                <span class="metric-sep">/</span>
+                <span class="metric-value metric-value--muted" id="metricPiezasTotal">0</span>
+              </div>
+            </div>
             <span class="progress-block__pct" id="progressPct">0 %</span>
           </div>
           <div class="progress-track" aria-hidden="true">
@@ -108,74 +123,67 @@
               </div>
             </div>
           </div>
-          <div class="prod-row prod-row--setup" aria-label="Modelo y compensaciones">
-            <div class="prod-setup__model">
-              <label class="prod-item prod-item--modelo" for="selectModelo">
-                <span class="prod-item__key">Modelo</span>
-                <div class="model-combo" id="modelCombo">
-                  <input type="text" id="selectModelo" class="prod-item__input prod-item__input--modelo" role="combobox" aria-expanded="false" aria-autocomplete="list" aria-controls="modelComboList" aria-haspopup="listbox" autocomplete="off" spellcheck="false" placeholder="Sin selección" aria-label="Buscar o seleccionar número de modelo">
-                  <ul id="modelComboList" class="model-combo__list" role="listbox" hidden></ul>
-                </div>
-              </label>
-              <span class="prod-dot" aria-hidden="true">·</span>
-              <span class="prod-item prod-item--desc" aria-label="Descripción del modelo">
-                <span class="prod-item__key">Desc</span>
-                <span class="prod-item__desc" id="metricModeloDesc">—</span>
-              </span>
-            </div>
-            <div class="prod-setup__comps" aria-label="Compensaciones de corte">
-              <label class="prod-item" for="metricCutCompR">
-                <span class="prod-item__key">Comp. R</span>
-                <input type="number" step="0.01" id="metricCutCompR" class="prod-item__input" value="0" inputmode="decimal" aria-label="Compensación de corte lado derecho en milímetros">
-                <span class="prod-item__unit">mm</span>
-              </label>
-              <span class="prod-dot" aria-hidden="true">·</span>
-              <label class="prod-item" for="metricCutCompL">
-                <span class="prod-item__key">Comp. L</span>
-                <input type="number" step="0.01" id="metricCutCompL" class="prod-item__input" value="0" inputmode="decimal" aria-label="Compensación de corte lado izquierdo en milímetros">
-                <span class="prod-item__unit">mm</span>
-              </label>
-            </div>
+          <div class="prod-setup-grid" aria-label="Modelo, kanban y compensaciones">
+            <label class="prod-field" for="selectModelo">
+              <span class="prod-field__key">Modelo</span>
+              <div class="model-combo" id="modelCombo">
+                <input type="text" id="selectModelo" class="prod-field__input prod-field__input--modelo" role="combobox" aria-expanded="false" aria-autocomplete="list" aria-controls="modelComboList" aria-haspopup="listbox" autocomplete="off" spellcheck="false" placeholder="Sin selección" aria-label="Buscar o seleccionar número de modelo">
+                <ul id="modelComboList" class="model-combo__list" role="listbox" hidden></ul>
+              </div>
+              <span class="prod-field__desc" id="metricModeloDesc" hidden></span>
+            </label>
+            <label class="prod-field" for="metricCantidad">
+              <span class="prod-field__key">Kanban (piezas)</span>
+              <input type="number" min="1" step="1" id="metricCantidad" class="prod-field__input" value="1" inputmode="numeric" aria-label="Kanban: piezas objetivo del lote">
+            </label>
+            <label class="prod-field" for="metricCutCompL">
+              <span class="prod-field__key">Compensación izq.</span>
+              <div class="prod-field__with-unit">
+                <input type="number" step="0.01" id="metricCutCompL" class="prod-field__input" value="0" inputmode="decimal" aria-label="Compensación de corte lado izquierdo en milímetros">
+                <span class="prod-field__unit">mm</span>
+              </div>
+            </label>
+            <label class="prod-field" for="metricCutCompR">
+              <span class="prod-field__key">Compensación der.</span>
+              <div class="prod-field__with-unit">
+                <input type="number" step="0.01" id="metricCutCompR" class="prod-field__input" value="0" inputmode="decimal" aria-label="Compensación de corte lado derecho en milímetros">
+                <span class="prod-field__unit">mm</span>
+              </div>
+            </label>
           </div>
         </article>
 
-        <div class="prod-blocks" aria-label="Kanban, cantidad y tiempos">
-          <article class="metric-card">
-            <label class="metric-label" for="metricCantidad">Kanban</label>
-            <input type="number" min="1" step="1" id="metricCantidad" class="metric-input" value="1" inputmode="numeric" aria-label="Kanban: piezas objetivo del lote">
-            <span class="metric-unit">piezas</span>
-          </article>
-          <article class="metric-card">
-            <span class="metric-label">Cantidad</span>
-            <div class="metric-dual" aria-live="polite">
-              <span class="metric-value" id="metricPiezasProducidas">0</span>
-              <span class="metric-sep">/</span>
-              <span class="metric-value metric-value--accent" id="metricPiezasTotal">0</span>
-            </div>
-            <span class="metric-unit">piezas</span>
-          </article>
+        <div class="prod-blocks" aria-label="Tiempos de producción">
           <article class="metric-card">
             <span class="metric-label">Tiempo de ciclo</span>
             <span class="metric-value" id="metricTiempoCiclo">—</span>
           </article>
           <article class="metric-card">
-            <span class="metric-label">Restante / transcurrido</span>
-            <div class="metric-dual" title="Tiempo restante estimado / tiempo transcurrido">
-              <span class="metric-value" id="metricTiempoEstimado">—</span>
-              <span class="metric-sep">/</span>
-              <span class="metric-value metric-value--accent" id="metricTiempoCorriendo">—</span>
-            </div>
+            <span class="metric-label">Tiempo restante</span>
+            <span class="metric-value" id="metricTiempoEstimado">—</span>
+          </article>
+          <article class="metric-card">
+            <span class="metric-label">Tiempo transcurrido</span>
+            <span class="metric-value" id="metricTiempoCorriendo">0.0 s</span>
           </article>
         </div>
       </section>
 
       <aside class="sidebar sidebar--right">
         <section class="panel panel--prefeeder" data-block="prealimentador">
-          <h2 class="panel-title">PreAlimentador</h2>
+          <h2 class="panel-title">Prealimentador</h2>
           <div class="btn-grid">
-            <button type="button" class="btn btn-feeder" data-action="iniciar">Iniciar</button>
-            <button type="button" class="btn btn-feeder" data-pf-hold="L" data-action="alimentar_izquierda">JOG - L</button>
-            <button type="button" class="btn btn-feeder" data-pf-hold="R" data-action="alimentar_derecha">JOG - R</button>
+            <button type="button" class="btn btn-feeder" data-action="iniciar">Iniciar prealimentador</button>
+            <button type="button" class="btn btn-feeder" data-pf-hold="L" data-action="alimentar_izquierda">Mover lado izquierdo</button>
+            <button type="button" class="btn btn-feeder" data-pf-hold="R" data-action="alimentar_derecha">Mover lado derecho</button>
+          </div>
+        </section>
+        <section class="panel panel--andon" data-block="andon">
+          <h2 class="panel-title">Andon</h2>
+          <div class="btn-grid">
+            <button type="button" class="btn btn-andon" data-andon-call="materialista">Materialista</button>
+            <button type="button" class="btn btn-andon" data-andon-call="tecnico">Técnico</button>
+            <button type="button" class="btn btn-andon" data-andon-call="jefe">Jefe de grupo</button>
           </div>
         </section>
       </aside>
@@ -240,7 +248,7 @@
         <button type="button" class="modal-tab is-active" role="tab" id="tabBtnCycle" aria-selected="true" aria-controls="tabPanelCycle" data-tab="cycle">Ciclo</button>
         <button type="button" class="modal-tab" role="tab" id="tabBtnMotion" aria-selected="false" aria-controls="tabPanelMotion" data-tab="motion">Motion</button>
         <button type="button" class="modal-tab" role="tab" id="tabBtnPlc" aria-selected="false" aria-controls="tabPanelPlc" data-tab="plc">PLC</button>
-        <button type="button" class="modal-tab" role="tab" id="tabBtnPrefeeder" aria-selected="false" aria-controls="tabPanelPrefeeder" data-tab="prefeeder">PreAlimentador</button>
+        <button type="button" class="modal-tab" role="tab" id="tabBtnPrefeeder" aria-selected="false" aria-controls="tabPanelPrefeeder" data-tab="prefeeder">Prealimentador</button>
         <button type="button" class="modal-tab" role="tab" id="tabBtnConexion" aria-selected="false" aria-controls="tabPanelConexion" data-tab="conexion">Conexión</button>
       </div>
       <div class="parametros-shell__body">
@@ -432,6 +440,15 @@
                       <button type="button" class="btn btn-manual" data-motion-op="lmguide_move">Mover</button>
                       <button type="button" class="btn btn-manual" data-motion-op="lmguide_move_home">Ir a cero</button>
                     </div>
+                    <div class="lm-guide__row lm-guide__row--ramp">
+                      <label class="motion-field">Accel (ms)
+                        <input type="number" step="1" min="1" max="65500" data-motion-path="lmguide.accel_ms" title="Tiempo 0→3000 rpm (ASDA P5.020)">
+                      </label>
+                      <label class="motion-field">Decel (ms)
+                        <input type="number" step="1" min="1" max="65500" data-motion-path="lmguide.decel_ms" title="Tiempo 3000→0 rpm (ASDA P5.021)">
+                      </label>
+                      <button type="button" class="btn btn-manual" id="lmSimOpen" title="Ver perfil de velocidad y tiempos (no mueve el eje)">Perfil</button>
+                    </div>
                     <div class="lm-guide__row lm-guide__row--servo">
                       <button type="button" class="btn btn-power" id="lmServoToggle" data-motion-op="lmguide_servo" aria-pressed="false">Apagado</button>
                       <button type="button" class="btn btn-manual" data-motion-op="lmguide_home">Buscar Home</button>
@@ -440,6 +457,24 @@
                   </div>
                 </fieldset>
               </div>
+
+              <fieldset class="motion-fieldset motion-fieldset--wide motion-fieldset--experimental">
+                <legend>EXPERIMENTAL</legend>
+                <div class="motion-experimental">
+                  <label class="motion-field motion-field--compact">RPM
+                    <input type="number" step="1" min="1" max="3000" data-motion-path="experimental.reverse_rpm">
+                  </label>
+                  <label class="motion-field motion-field--compact">Tiempo (ms)
+                    <input type="number" step="1" min="50" max="30000" data-motion-path="experimental.reverse_ms">
+                  </label>
+                  <button type="button" class="btn btn-manual btn--compact" data-motion-op="feeder_reverse" data-motion-side="R">Probar R</button>
+                  <button type="button" class="btn btn-manual btn--compact" data-motion-op="feeder_reverse" data-motion-side="L">Probar L</button>
+                  <p class="motion-laser motion-experimental__status" id="feederReverseStatus" role="status" aria-label="Inverso sin ejecutar" data-state="idle">
+                    <span class="motion-laser__led" aria-hidden="true"></span>
+                    <span class="motion-laser__state">Sin ejecutar</span>
+                  </p>
+                </div>
+              </fieldset>
 
             </div>
           </form>
@@ -504,36 +539,34 @@
           </form>
         </section>
         <section class="tab-panel" role="tabpanel" id="tabPanelPrefeeder" aria-labelledby="tabBtnPrefeeder" data-tab-panel="prefeeder" hidden>
-          <form class="motion-params" id="prefeederTuneForm" autocomplete="off">
+          <form class="motion-params pf-params" id="prefeederTuneForm" autocomplete="off">
             <div class="motion-params__actions">
               <button type="button" class="btn btn-config" id="prefeederTuneReload">Recargar</button>
               <button type="button" class="btn btn-config" id="prefeederStatusRefresh">Actualizar estado</button>
             </div>
             <p class="motion-params__serial-hint" id="prefeederEsp32Hint" hidden></p>
-            <div class="motion-params__grid">
-              <fieldset class="motion-fieldset motion-fieldset--wide">
-                <legend>LADO L</legend>
-                <p class="motion-params__note" id="pfBanL" role="status">—</p>
-                <div class="motion-validate">
-                  <div class="motion-validate__row">
-                    <p class="motion-laser" id="pfCylL" role="status" aria-label="Cilindro L">
-                      <span class="motion-laser__led" aria-hidden="true"></span>
-                      <span class="motion-laser__name">Cilindro</span>
-                      <span class="motion-laser__state">—</span>
-                    </p>
-                    <p class="motion-laser" id="pfHolgL" role="status" aria-label="Holgura L">
-                      <span class="motion-laser__led" aria-hidden="true"></span>
-                      <span class="motion-laser__name">Holgura</span>
-                      <span class="motion-laser__state">—</span>
-                    </p>
-                    <p class="motion-laser" id="pfLimL" role="status" aria-label="Límite L">
-                      <span class="motion-laser__led" aria-hidden="true"></span>
-                      <span class="motion-laser__name">Límite</span>
-                      <span class="motion-laser__state">—</span>
-                    </p>
-                  </div>
+            <div class="pf-sides">
+              <fieldset class="pf-side-card">
+                <legend class="pf-side-card__title">Lado Izquierdo (L)</legend>
+                <p class="pf-side-card__banner" id="pfBanL" role="status">—</p>
+                <div class="pf-sensors" aria-label="Sensores lado L">
+                  <p class="pf-sensor" id="pfCylL" role="status" aria-label="Cilindro L">
+                    <span class="pf-sensor__led" aria-hidden="true"></span>
+                    <span class="pf-sensor__name">Cilindro</span>
+                    <span class="motion-laser__state pf-sensor__state">—</span>
+                  </p>
+                  <p class="pf-sensor" id="pfHolgL" role="status" aria-label="Holgura L">
+                    <span class="pf-sensor__led" aria-hidden="true"></span>
+                    <span class="pf-sensor__name">Holgura</span>
+                    <span class="motion-laser__state pf-sensor__state">—</span>
+                  </p>
+                  <p class="pf-sensor" id="pfLimL" role="status" aria-label="Límite L">
+                    <span class="pf-sensor__led" aria-hidden="true"></span>
+                    <span class="pf-sensor__name">Límite</span>
+                    <span class="motion-laser__state pf-sensor__state">—</span>
+                  </p>
                 </div>
-                <div class="pf-tune-row">
+                <div class="pf-tune-grid">
                   <label class="motion-field">RPM
                     <input type="number" min="1" max="3000" step="1" data-pf-side="L" data-pf-key="rpm">
                   </label>
@@ -547,33 +580,31 @@
                     <input type="number" min="0.1" max="120" step="0.1" data-pf-side="L" data-pf-key="on_s">
                   </label>
                 </div>
-                <div class="motion-fieldset__actions motion-fieldset__actions--save">
+                <div class="pf-side-card__actions">
                   <button type="button" class="btn btn-config" data-pf-save="L">Guardar L</button>
                 </div>
               </fieldset>
-              <fieldset class="motion-fieldset motion-fieldset--wide">
-                <legend>LADO R</legend>
-                <p class="motion-params__note" id="pfBanR" role="status">—</p>
-                <div class="motion-validate">
-                  <div class="motion-validate__row">
-                    <p class="motion-laser" id="pfCylR" role="status" aria-label="Cilindro R">
-                      <span class="motion-laser__led" aria-hidden="true"></span>
-                      <span class="motion-laser__name">Cilindro</span>
-                      <span class="motion-laser__state">—</span>
-                    </p>
-                    <p class="motion-laser" id="pfHolgR" role="status" aria-label="Holgura R">
-                      <span class="motion-laser__led" aria-hidden="true"></span>
-                      <span class="motion-laser__name">Holgura</span>
-                      <span class="motion-laser__state">—</span>
-                    </p>
-                    <p class="motion-laser" id="pfLimR" role="status" aria-label="Límite R">
-                      <span class="motion-laser__led" aria-hidden="true"></span>
-                      <span class="motion-laser__name">Límite</span>
-                      <span class="motion-laser__state">—</span>
-                    </p>
-                  </div>
+              <fieldset class="pf-side-card">
+                <legend class="pf-side-card__title">Lado Derecho (R)</legend>
+                <p class="pf-side-card__banner" id="pfBanR" role="status">—</p>
+                <div class="pf-sensors" aria-label="Sensores lado R">
+                  <p class="pf-sensor" id="pfCylR" role="status" aria-label="Cilindro R">
+                    <span class="pf-sensor__led" aria-hidden="true"></span>
+                    <span class="pf-sensor__name">Cilindro</span>
+                    <span class="motion-laser__state pf-sensor__state">—</span>
+                  </p>
+                  <p class="pf-sensor" id="pfHolgR" role="status" aria-label="Holgura R">
+                    <span class="pf-sensor__led" aria-hidden="true"></span>
+                    <span class="pf-sensor__name">Holgura</span>
+                    <span class="motion-laser__state pf-sensor__state">—</span>
+                  </p>
+                  <p class="pf-sensor" id="pfLimR" role="status" aria-label="Límite R">
+                    <span class="pf-sensor__led" aria-hidden="true"></span>
+                    <span class="pf-sensor__name">Límite</span>
+                    <span class="motion-laser__state pf-sensor__state">—</span>
+                  </p>
                 </div>
-                <div class="pf-tune-row">
+                <div class="pf-tune-grid">
                   <label class="motion-field">RPM
                     <input type="number" min="1" max="3000" step="1" data-pf-side="R" data-pf-key="rpm">
                   </label>
@@ -587,7 +618,7 @@
                     <input type="number" min="0.1" max="120" step="0.1" data-pf-side="R" data-pf-key="on_s">
                   </label>
                 </div>
-                <div class="motion-fieldset__actions motion-fieldset__actions--save">
+                <div class="pf-side-card__actions">
                   <button type="button" class="btn btn-config" data-pf-save="R">Guardar R</button>
                 </div>
               </fieldset>
@@ -668,51 +699,51 @@
         <button type="button" class="modal__close" id="mantModalClose" aria-label="Cerrar">×</button>
       </header>
       <div class="modal__body">
-        <p class="modal__hint" id="mantCounter">Ciclos desde el último reset: 0</p>
+        <p class="mant-counter-value" id="mantCounterValue">0</p>
+        <p class="modal__hint" id="mantCounter">Ciclos desde el último reset</p>
         <p class="modal__hint">A los 10 000 ciclos la revisión de arranque no deja continuar hasta resetear este contador.</p>
-        <label class="modal-field" for="mantEmpleado">Empleado (5 dígitos)
-          <input id="mantEmpleado" inputmode="numeric" maxlength="5" autocomplete="off">
-        </label>
         <button type="button" class="btn btn-config" id="mantReset">Resetear contador</button>
-      </div>
-    </div>
-  </div>
-
-  <div class="modal-overlay" id="empleadoModal" hidden role="dialog" aria-modal="true" aria-labelledby="empleadoModalTitle">
-    <div class="modal">
-      <header class="modal__header">
-        <h2 id="empleadoModalTitle">Número de empleado</h2>
-        <button type="button" class="modal__close" id="empleadoModalClose" aria-label="Cerrar">×</button>
-      </header>
-      <div class="modal__body">
-        <p class="modal__hint">Cinco dígitos. Queda en el registro de la acción.</p>
-        <label class="modal-field" for="empleadoInput">Empleado
-          <input id="empleadoInput" inputmode="numeric" maxlength="5" autocomplete="off">
-        </label>
-        <button type="button" class="btn btn-config" id="empleadoConfirm">Confirmar</button>
-      </div>
-    </div>
-  </div>
-
-  <div class="modal-overlay" id="sideBypassModal" hidden role="dialog" aria-modal="true" aria-labelledby="sideBypassModalTitle">
-    <div class="modal">
-      <header class="modal__header">
-        <h2 id="sideBypassModalTitle">ByPass de lado</h2>
-        <button type="button" class="modal__close" id="sideBypassModalClose" aria-label="Cerrar">×</button>
-      </header>
-      <div class="modal__body">
-        <p class="modal__hint" id="sideBypassModalHint">Cinco dígitos. Luego elige el lado con el que continuar.</p>
-        <label class="modal-field" for="sideBypassEmpleado">Empleado
-          <input id="sideBypassEmpleado" inputmode="numeric" maxlength="5" autocomplete="off">
-        </label>
-        <div class="side-bypass-sides" id="sideBypassSideRow">
-          <p class="side-bypass-sides__label">Continuar trabajando con</p>
-          <div class="btn-grid btn-grid--side-bypass">
-            <button type="button" class="btn btn-bypass" id="sideBypassPickR" data-work-side="R">Right</button>
-            <button type="button" class="btn btn-bypass" id="sideBypassPickL" data-work-side="L">Left</button>
+        <div class="mant-reset-form" id="mantResetForm" hidden>
+          <label class="modal-field" for="mantEmpleado">Empleado (5 dígitos)
+            <input id="mantEmpleado" inputmode="numeric" maxlength="5" autocomplete="off">
+          </label>
+          <p class="modal__hint">Confirma el reset con tu número de empleado. Cancelar o cerrar conserva el contador.</p>
+          <div class="checklist-actions">
+            <button type="button" class="btn btn-start" id="mantConfirm">Confirmar reset</button>
+            <button type="button" class="btn btn-secondary" id="mantCancel">Cancelar</button>
           </div>
         </div>
-        <button type="button" class="btn btn-stop" id="sideBypassTurnOff" hidden>Apagar ByPass</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="lmSimModal" hidden role="dialog" aria-modal="true" aria-labelledby="lmSimModalTitle">
+    <div class="modal modal--wide modal--lm-sim">
+      <header class="modal__header">
+        <h2 id="lmSimModalTitle">Simulación LM Guide</h2>
+        <button type="button" class="modal__close" id="lmSimModalClose" aria-label="Cerrar">×</button>
+      </header>
+      <div class="modal__body">
+        <p class="modal__hint">
+          Perfil ASDA (0↔3000&nbsp;rpm) según posición, RPM, accel y decel.
+          Ajusta <strong>mm/rev</strong> al paso del husillo/polea para afinar el tiempo.
+        </p>
+        <div class="lm-sim__meta" id="lmSimMeta"></div>
+        <label class="modal-field lm-sim__mmrev" for="lmSimMmPerRev">mm por revolución del motor
+          <input type="number" id="lmSimMmPerRev" step="0.1" min="0.1" max="200" value="10">
+        </label>
+        <svg class="lm-sim__chart" id="lmSimChart" viewBox="0 0 560 200" role="img" aria-label="Perfil de velocidad">
+          <line class="lm-sim__axis" x1="48" y1="16" x2="48" y2="160"></line>
+          <line class="lm-sim__axis" x1="48" y1="160" x2="536" y2="160"></line>
+          <line class="lm-sim__phase" id="lmSimPhaseAcc" x1="48" y1="16" x2="48" y2="160"></line>
+          <line class="lm-sim__phase" id="lmSimPhaseDec" x1="48" y1="16" x2="48" y2="160"></line>
+          <polyline class="lm-sim__curve" id="lmSimCurve" fill="none" points="48,160"></polyline>
+          <text class="lm-sim__axis-label" x="14" y="24">rpm</text>
+          <text class="lm-sim__axis-label" x="520" y="178">t</text>
+          <text class="lm-sim__axis-label" id="lmSimTimeLabel" x="280" y="190" text-anchor="middle"></text>
+        </svg>
+        <dl class="lm-sim__stats" id="lmSimStats"></dl>
+        <p class="modal__hint" id="lmSimNote" hidden></p>
       </div>
     </div>
   </div>
@@ -721,7 +752,7 @@
     <div class="modal modal--recovery">
       <header class="modal__header">
         <h2 id="recoveryModalTitle">Recuperación</h2>
-        <button type="button" class="modal__close" id="recoveryModalClose" aria-label="Salir">×</button>
+        <button type="button" class="modal__close" id="recoveryModalClose" aria-label="Cerrar">×</button>
       </header>
       <div class="modal__body recovery-body">
         <div class="recovery-step-row">
@@ -781,10 +812,21 @@
     </div>
   </div>
 
-  <button type="button" class="theme-toggle" id="themeToggle" aria-label="Activar modo claro">
-    <span class="theme-toggle__icon theme-toggle__icon--sun" aria-hidden="true">☀</span>
-    <span class="theme-toggle__icon theme-toggle__icon--moon" aria-hidden="true">☽</span>
-  </button>
+  <div class="modal-overlay" id="empleadoModal" hidden role="dialog" aria-modal="true" aria-labelledby="empleadoModalTitle">
+    <div class="modal">
+      <header class="modal__header">
+        <h2 id="empleadoModalTitle">Número de empleado</h2>
+        <button type="button" class="modal__close" id="empleadoModalClose" aria-label="Cerrar">×</button>
+      </header>
+      <div class="modal__body">
+        <p class="modal__hint">Cinco dígitos. Queda en el registro de la acción.</p>
+        <label class="modal-field" for="empleadoInput">Empleado
+          <input id="empleadoInput" inputmode="numeric" maxlength="5" autocomplete="off">
+        </label>
+        <button type="button" class="btn btn-config" id="empleadoConfirm">Confirmar</button>
+      </div>
+    </div>
+  </div>
 
   <script src="{{ url_for('static', filename='js/main.js') }}"></script>
 </body>

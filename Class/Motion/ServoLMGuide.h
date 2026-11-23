@@ -50,7 +50,11 @@ static const uint16_t ASDA_REG_P5_005 = 0x050A;
 static const uint16_t ASDA_REG_P5_006 = 0x050C;
 static const uint16_t ASDA_REG_P5_007 = 0x050E;
 static const uint16_t ASDA_REG_P5_016 = 0x0520;
+static const uint16_t ASDA_REG_P5_020 = 0x0528;  // Accel/decel time #0
+static const uint16_t ASDA_REG_P5_021 = 0x052A;  // Accel/decel time #1
 static const uint16_t ASDA_REG_P5_060 = 0x0578;
+// PATH1: TYPE=SINGLE(2), ACC=#0 (P5.020), DEC=#1 (P5.021), SPD=#0 (P5.060)
+static const uint32_t ASDA_PR1_PATH_DEF = 0x00001002u;
 static const uint16_t ASDA_REG_P6_000 = 0x0600;
 static const uint16_t ASDA_REG_P6_001 = 0x0602;
 static const uint16_t ASDA_REG_P6_002 = 0x0604;
@@ -225,6 +229,12 @@ static float lmClampSpeedRpm(float rpm) {
   return rpm;
 }
 
+static uint16_t lmClampRampMs(long ms) {
+  if (ms < (long)PARAM_LM_RAMP_MS_MIN) return PARAM_LM_RAMP_MS_MIN;
+  if (ms > (long)PARAM_LM_RAMP_MS_MAX) return PARAM_LM_RAMP_MS_MAX;
+  return (uint16_t)ms;
+}
+
 static int32_t lmTolPuuFromMm(float tolMm) {
   return (int32_t)lroundf(tolMm * ASDA_FACTORY_STEPS_PER_MM);
 }
@@ -239,8 +249,12 @@ static bool lmguideIssueMovePr1(int32_t targetPuu) {
   if (!gLmTune) return false;
   float rpm = lmClampSpeedRpm(gLmTune->lmguide.prSpeedRpm);
   int32_t speed01 = (int32_t)(rpm * 10.0f);
+  uint16_t accelMs = lmClampRampMs((long)gLmTune->lmguide.accelMs);
+  uint16_t decelMs = lmClampRampMs((long)gLmTune->lmguide.decelMs);
+  if (!modbusWriteReg16(ASDA_REG_P5_020, accelMs)) return false;
+  if (!modbusWriteReg16(ASDA_REG_P5_021, decelMs)) return false;
   if (!modbusWriteReg32(ASDA_REG_P5_060, speed01)) return false;
-  if (!modbusWriteReg32(ASDA_REG_P6_002, 0x00000002)) return false;
+  if (!modbusWriteReg32(ASDA_REG_P6_002, ASDA_PR1_PATH_DEF)) return false;
   if (!modbusWriteReg32(ASDA_REG_P6_003, targetPuu)) return false;
   return modbusWriteReg16(ASDA_REG_P5_007, 1);
 }

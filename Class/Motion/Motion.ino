@@ -670,6 +670,100 @@ static bool releasePartHomeWithBlower(uint32_t blowerDelayMs, uint32_t blowerMs)
   return false;
 }
 
+/* PV inverso por tiempo: misma ruta que feed, signo contrario, paro por ms. */
+static int32_t feederReverseVelocityFromRpm(MotionSide side, float rpm) {
+  if (rpm < 1.0f) rpm = 1.0f;
+  if (rpm > (float)PARAM_FEED_MAX_RPM) rpm = (float)PARAM_FEED_MAX_RPM;
+  uint32_t pps =
+      (uint32_t)((rpm * (float)PARAM_FEED_SHAFT_INC_PER_REV / 60.0f) + 0.5f);
+  if (pps > PARAM_FEED_MAX_PPS) pps = PARAM_FEED_MAX_PPS;
+  if (pps < 1u) pps = 1u;
+  return -((int32_t)pps) * (int32_t)feederCmdSign(side);
+}
+
+static bool feederReverseStopSide(MotionSide side) {
+  bool ok = feederStop(side);
+  ok = canSdoDownloadU32(feederNode(side), SERVO_OD_TARGET_VELOCITY, 0, 0) && ok;
+  return ok;
+}
+
+static void feederReverseStopRun(bool runR, bool runL) {
+  if (runR) feederReverseStopSide(MOTION_SIDE_R);
+  if (runL) feederReverseStopSide(MOTION_SIDE_L);
+}
+
+static bool feederReverseRun(bool useR, bool useL, float rpm, uint32_t ms) {
+  gFeedAbortRequested = false;
+  const bool runR = useR && gRt.feederReady[MOTION_SIDE_R];
+  const bool runL = useL && gRt.feederReady[MOTION_SIDE_L];
+  if (!runR && !runL) return false;
+
+  if (runR && !feederPreparePv(MOTION_SIDE_R)) {
+    feederReverseStopRun(runR, runL);
+    return false;
+  }
+  if (runL && !feederPreparePv(MOTION_SIDE_L)) {
+    feederReverseStopRun(runR, runL);
+    return false;
+  }
+  motionYieldMs(SERVO_CAN_CIA402_SHORT_MS);
+  if (gLmAbortRequested || gFeedAbortRequested || safetyIsActive()) {
+    feederReverseStopRun(runR, runL);
+    return false;
+  }
+
+  if (runR &&
+      !feederSetPvVelocity(MOTION_SIDE_R,
+                           feederReverseVelocityFromRpm(MOTION_SIDE_R, rpm))) {
+    feederReverseStopRun(runR, runL);
+    return false;
+  }
+  if (runL &&
+      !feederSetPvVelocity(MOTION_SIDE_L,
+                           feederReverseVelocityFromRpm(MOTION_SIDE_L, rpm))) {
+    feederReverseStopRun(runR, runL);
+    return false;
+  }
+  if (runR && !feederReleasePv(MOTION_SIDE_R)) {
+    feederReverseStopRun(runR, runL);
+    return false;
+  }
+  if (runL && !feederReleasePv(MOTION_SIDE_L)) {
+    feederReverseStopRun(runR, runL);
+    return false;
+  }
+
+  const uint32_t t0 = millis();
+  while ((uint32_t)(millis() - t0) < ms) {
+    pollSerial();
+    if (gLmAbortRequested || gFeedAbortRequested || safetyIsActive()) {
+      feederReverseStopRun(runR, runL);
+      return false;
+    }
+    delay(1);
+  }
+
+  bool ok = true;
+  if (runR) ok = feederReverseStopSide(MOTION_SIDE_R) && ok;
+  if (runL) ok = feederReverseStopSide(MOTION_SIDE_L) && ok;
+  return ok;
+}
+
+static void printFeederReverseResult(bool ok, bool useR, bool useL, float rpm,
+                                     uint32_t ms) {
+  Serial.print(F("{\"op\":\"feeder_reverse\",\"ok\":"));
+  Serial.print(ok ? "true" : "false");
+  Serial.print(F(",\"side\":\""));
+  if (useR && useL) Serial.print(F("both"));
+  else if (useR) Serial.print(F("R"));
+  else Serial.print(F("L"));
+  Serial.print(F("\",\"rpm\":"));
+  Serial.print(rpm, 1);
+  Serial.print(F(",\"ms\":"));
+  Serial.print(ms);
+  Serial.println(F("}"));
+}
+
 static void printReleasePartResult(bool ok) {
   gEncoders.update();
   Serial.print(F("{\"op\":\"release_part\",\"ok\":"));
@@ -681,9 +775,17 @@ static void printReleasePartResult(bool ok) {
   Serial.println(F("}"));
 }
 
-static void releasePartRun(const char* line) {
+static void applyLmRampFromJson(const char* json) {
   gTune.lmguide.prSpeedRpm =
-      lmClampSpeedRpm(jsonReadFloat(line, "lm_pr_speed_rpm", gTune.lmguide.prSpeedRpm));
+      lmClampSpeedRpm(jsonReadFloat(json, "lm_pr_speed_rpm", gTune.lmguide.prSpeedRpm));
+  gTune.lmguide.accelMs =
+      lmClampRampMs(jsonReadLong(json, "lm_accel_ms", (long)gTune.lmguide.accelMs));
+  gTune.lmguide.decelMs =
+      lmClampRampMs(jsonReadLong(json, "lm_decel_ms", (long)gTune.lmguide.decelMs));
+}
+
+static void releasePartRun(const char* line) {
+  applyLmRampFromJson(line);
 
   uint32_t blowerDelayMs =
       (uint32_t)jsonReadLong(line, "blower_delay_ms", (long)PARAM_MS_BLOWER_DELAY);
@@ -841,8 +943,7 @@ static void applyTuneFromJson(const char* json) {
   gTune.feeder[MOTION_SIDE_L].targetPositionCounts =
       (int32_t)jsonReadLong(json, "feed_l_target_counts", gTune.feeder[MOTION_SIDE_L].targetPositionCounts);
 
-  gTune.lmguide.prSpeedRpm =
-      lmClampSpeedRpm(jsonReadFloat(json, "lm_pr_speed_rpm", gTune.lmguide.prSpeedRpm));
+  applyLmRampFromJson(json);
   gTune.lmguide.posPuu = (int32_t)jsonReadLong(json, "lm_pos_puu", gTune.lmguide.posPuu);
   gTune.validateEncoder = jsonReadBool(json, "feed_validate_encoder", gTune.validateEncoder);
 }
@@ -1001,7 +1102,8 @@ static void handleSerialLine(char* line) {
   if (strstr(line, "\"op\":\"feed_stage\"")) {
     // Tune opcional en la misma orden (1 request → trabajo → 1 reply).
     if (strstr(line, "feed_r_vel_pps") || strstr(line, "feed_l_vel_pps") ||
-        strstr(line, "lm_pr_speed_rpm") || strstr(line, "feed_validate_encoder") ||
+        strstr(line, "lm_pr_speed_rpm") || strstr(line, "lm_accel_ms") ||
+        strstr(line, "lm_decel_ms") || strstr(line, "feed_validate_encoder") ||
         strstr(line, "feed_r_target_counts") || strstr(line, "feed_l_target_counts") ||
         strstr(line, "lm_pos_puu")) {
       applyTuneFromJson(line);
@@ -1063,8 +1165,7 @@ static void handleSerialLine(char* line) {
       applyDataFromJson(line);
       setDataApplied = true;
     }
-    gTune.lmguide.prSpeedRpm =
-        lmClampSpeedRpm(jsonReadFloat(line, "lm_pr_speed_rpm", gTune.lmguide.prSpeedRpm));
+    applyLmRampFromJson(line);
     const char* target = "home";
     const char* key = strstr(line, "\"target\"");
     if (key) {
@@ -1082,6 +1183,26 @@ static void handleSerialLine(char* line) {
     else
       ok = lmguideMoveNamed(target);
     printLmguideMoveResult(ok, setDataApplied);
+    return;
+  }
+  if (strstr(line, "\"op\":\"feeder_reverse\"")) {
+    if (safetyIsActive()) {
+      Serial.println(F("{\"op\":\"feeder_reverse\",\"ok\":false,\"error\":\"safety\"}"));
+      return;
+    }
+    bool useR = true;
+    bool useL = true;
+    if (strstr(line, "\"side\":\"L\"")) useR = false;
+    else if (strstr(line, "\"side\":\"R\"")) useL = false;
+    float rpm = jsonReadFloat(line, "rpm", PARAM_FEED_REVERSE_RPM_DEFAULT);
+    if (rpm < 1.0f) rpm = 1.0f;
+    if (rpm > (float)PARAM_FEED_MAX_RPM) rpm = (float)PARAM_FEED_MAX_RPM;
+    long msRaw = jsonReadLong(line, "ms", (long)PARAM_FEED_REVERSE_MS_DEFAULT);
+    uint32_t ms = (uint32_t)msRaw;
+    if (ms < PARAM_FEED_REVERSE_MS_MIN) ms = PARAM_FEED_REVERSE_MS_MIN;
+    if (ms > PARAM_FEED_REVERSE_MS_MAX) ms = PARAM_FEED_REVERSE_MS_MAX;
+    bool ok = feederReverseRun(useR, useL, rpm, ms);
+    printFeederReverseResult(ok, useR, useL, rpm, ms);
     return;
   }
   if (strstr(line, "\"op\":\"release_part\"")) {
@@ -1110,8 +1231,7 @@ static void handleSerialLine(char* line) {
       Serial.println(F("{\"op\":\"lmguide_jog\",\"ok\":false,\"error\":\"safety\"}"));
       return;
     }
-    gTune.lmguide.prSpeedRpm =
-        lmClampSpeedRpm(jsonReadFloat(line, "lm_pr_speed_rpm", gTune.lmguide.prSpeedRpm));
+    applyLmRampFromJson(line);
     bool ok = false;
     if (strstr(line, "\"delta_puu\"")) {
       ok = lmguideJogDelta((int32_t)jsonReadLong(line, "delta_puu", 0));
