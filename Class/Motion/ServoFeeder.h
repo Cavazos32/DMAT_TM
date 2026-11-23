@@ -237,6 +237,22 @@ static bool canSendRaw(uint32_t cobId, const uint8_t* data, uint8_t len) {
   return twai_transmit(&msg, pdMS_TO_TICKS(80)) == ESP_OK;
 }
 
+/* Descarta RX pendiente antes de un TX SDO. Sin esto, un 0x60 viejo de 0x6040
+ * (Halt 0x010F) puede confirmar ReleasePv (0x000F) y dejar el eje frenado. */
+static void canFlushRxNow() {
+  twai_message_t rx;
+  while (twai_receive(&rx, 0) == ESP_OK) {
+  }
+}
+
+/* Doble flush con quietud: cierra la ventana de ACK en vuelo que un solo
+ * canFlushRxNow no ve (solape release_part + Modbus aumenta latencia RX). */
+static void canFlushRxQuiet() {
+  canFlushRxNow();
+  delay(2);
+  canFlushRxNow();
+}
+
 static bool canSdoDownload(uint8_t node, uint16_t index, uint8_t sub, const uint8_t data[8]) {
   const uint32_t expectedRx = SERVO_CAN_COB_RX(node);
   const TickType_t rxTicks = pdMS_TO_TICKS(5);
@@ -244,11 +260,13 @@ static bool canSdoDownload(uint8_t node, uint16_t index, uint8_t sub, const uint
   // Una transmisión TWAI correcta solo confirma que el ESP32 encoló la trama.
   // Esperar 0x60 confirma que el servo realmente aplicó la escritura.
   for (uint8_t attempt = 0; attempt < 2; attempt++) {
+    canFlushRxQuiet();
     if (!canSendRaw(SERVO_CAN_COB_TX(node), data, 8)) continue;
 
     uint32_t t0 = millis();
     while (millis() - t0 < FEEDER_SDO_CONFIRM_MS) {
-      feederPoll();
+      // No feederPoll/pollSerial aquí: en solape reentra release_part y puede
+      // despachar/ deferred servo_on o drenar RX de forma cruzada.
       twai_message_t rx;
       if (twai_receive(&rx, rxTicks) != ESP_OK) continue;
       if ((rx.identifier & 0x7FFu) != expectedRx || rx.data_length_code < 4) continue;
@@ -298,12 +316,12 @@ static bool canNmt(uint8_t cmd) {
 
 static bool canReadSdoI32(uint8_t node, uint16_t index, uint8_t sub, int32_t* out, uint32_t timeoutMs) {
   uint8_t req[8] = {0x40, (uint8_t)(index & 0xFF), (uint8_t)(index >> 8), sub, 0, 0, 0, 0};
+  canFlushRxQuiet();
   if (!canSendRaw(SERVO_CAN_COB_TX(node), req, 8)) return false;
 
   const TickType_t rxTicks = pdMS_TO_TICKS(5);
   uint32_t t0 = millis();
   while (millis() - t0 < timeoutMs) {
-    feederPoll();
     twai_message_t rx;
     if (twai_receive(&rx, rxTicks) != ESP_OK) continue;
     if ((rx.identifier & 0x7FFu) != SERVO_CAN_COB_RX(node) || rx.data_length_code < 8) continue;
@@ -326,6 +344,7 @@ static bool canReadStatusWord(MotionSide side, uint16_t* out, uint32_t timeoutMs
                     0,
                     0,
                     0};
+  canFlushRxQuiet();
   if (!canSendRaw(SERVO_CAN_COB_TX(node), req, 8)) return false;
 
   const uint32_t expectedRx = SERVO_CAN_COB_RX(node);
@@ -334,7 +353,7 @@ static bool canReadStatusWord(MotionSide side, uint16_t* out, uint32_t timeoutMs
   uint32_t rx_sdo_frames = 0;
   int last_cmd = -1;
   while (millis() - t0 < timeoutMs) {
-    feederPoll();
+    // Sin feederPoll: evita reentrar pollSerial durante Halt/diagnóstico.
     twai_message_t rx;
     if (twai_receive(&rx, rxTicks) != ESP_OK) continue;
     uint32_t rxId = rx.identifier & 0x7FFu;
@@ -585,6 +604,16 @@ static bool feederSetPvVelocity(MotionSide side, int32_t velocitySigned) {
 
 static bool feederReleasePv(MotionSide side) {
   return canSdoDownloadU16(feederNode(side), SERVO_OD_CONTROL_WORD, 0, 0x000F);
+}
+
+/* Lee velocidad real (0x606C). Tras ReleasePv debe ser ≠0 si 60FFh tiene consigna. */
+static bool feederReadVelActual(MotionSide side, int32_t* out, uint32_t timeoutMs) {
+  return canReadSdoI32(feederNode(side), SERVO_OD_VELOCITY_ACTUAL, 0, out, timeoutMs);
+}
+
+/* SetVel + clear Halt. Usado al arrancar y al reintentar si el eje no se movió. */
+static bool feederStartPv(MotionSide side, int32_t velocitySigned) {
+  return feederSetPvVelocity(side, velocitySigned) && feederReleasePv(side);
 }
 
 static bool feederStopAll() {

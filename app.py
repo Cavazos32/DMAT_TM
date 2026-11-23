@@ -68,7 +68,12 @@ LMGUIDE_PUU_SIGN = -1
 LMGUIDE_MM_RES = 0.01
 LMGUIDE_PR_RPM_MIN = 400.0
 LMGUIDE_PR_RPM_MAX = 3000.0
+# Viajes no-corte (descarga, despeje, home, jog): RPM fijo al tope + rampa corta.
+LMGUIDE_TRAVEL_RPM = 3000.0
+LMGUIDE_TRAVEL_ACCEL_MS = 100
+LMGUIDE_TRAVEL_DECEL_MS = 100
 # ASDA P5.020/P5.021: ms para 0↔3000 rpm (Parameters.h PARAM_LM_*).
+# Defaults HMI / set_tune (perfil de corte); el viaje usa LMGUIDE_TRAVEL_*.
 LMGUIDE_ACCEL_MS_DEFAULT = 200
 LMGUIDE_DECEL_MS_DEFAULT = 500
 LMGUIDE_RAMP_MS_MIN = 1
@@ -238,8 +243,8 @@ _STEP4_CLOSES = False
 
 # MODO EXPERIMENTAL. En el paso 4 se pone ServoCAN en "Suelto"
 # (feeder_servo_off / Duro apagado). El holder se abre; el encoder neumático
-# permanece cerrado. Al depositar (paso 7), tras lmguide_move al montón, se
-# dispara feeder_servo_on en paralelo: no bloquea Gripper OFF.
+# permanece cerrado. Al depositar (paso 7), tras lmguide_move al montón,
+# feeder_servo_on es síncrono (antes del solape / Gripper OFF).
 # Para probar: True. Para desactivar: False.
 EXPERIMENTAL_SERVO_OFF = True
 
@@ -1174,13 +1179,23 @@ _MOTION_DATA = {
 }
 
 
-def _lm_cmd_fields(tune: dict | None = None) -> dict:
-    """Campos LM Guide que van en cada orden de movimiento / set_tune."""
-    lm = _canonical_motion_tune(tune or {})["lmguide"]
+def _lm_cmd_fields(tune: dict | None = None, *, for_cut: bool = False) -> dict:
+    """Campos LM Guide embebidos en cada orden de movimiento / set_tune.
+
+    for_cut=True: RPM/accel/decel configurados (Motion.json) — solo posición de corte.
+    for_cut=False: viaje normal — 3000 rpm fijos + rampa default (Parameters).
+    """
+    if for_cut:
+        lm = _canonical_motion_tune(tune or {})["lmguide"]
+        return {
+            "lm_pr_speed_rpm": lm["pr_speed_rpm"],
+            "lm_accel_ms": lm["accel_ms"],
+            "lm_decel_ms": lm["decel_ms"],
+        }
     return {
-        "lm_pr_speed_rpm": lm["pr_speed_rpm"],
-        "lm_accel_ms": lm["accel_ms"],
-        "lm_decel_ms": lm["decel_ms"],
+        "lm_pr_speed_rpm": LMGUIDE_TRAVEL_RPM,
+        "lm_accel_ms": LMGUIDE_TRAVEL_ACCEL_MS,
+        "lm_decel_ms": LMGUIDE_TRAVEL_DECEL_MS,
     }
 
 
@@ -1197,7 +1212,8 @@ def _motion_tune_flat(tune: dict) -> dict:
         "lm_pos_puu": lm["pos_puu"],
         "feed_validate_encoder": tune["feed_stage"]["validate_encoder"],
     }
-    flat.update(_lm_cmd_fields(tune))
+    # set_tune conserva el perfil de corte (fuente de verdad HMI / Motion.json).
+    flat.update(_lm_cmd_fields(tune, for_cut=True))
     return flat
 
 
@@ -1613,7 +1629,7 @@ def _build_motion_lines(op: str, tune: dict, body: dict):
         return tune, ['{"op":"lmguide_home"}']
     if op == "lmguide_move_home":
         payload = {"op": "lmguide_move", "target": "home"}
-        payload.update(_lm_cmd_fields(tune))
+        payload.update(_lm_cmd_fields(tune, for_cut=False))
         return tune, [_compact(payload)]
     if op == "lmguide_move":
         if body.get("mm") is None or body.get("mm") == "":
@@ -1621,7 +1637,10 @@ def _build_motion_lines(op: str, tune: dict, body: dict):
         puu = _mm_to_puu(body.get("mm"))
         tune["lmguide"]["pos_puu"] = puu
         payload = {"op": "lmguide_move", "puu": puu}
-        payload.update(_lm_cmd_fields(tune))
+        # Manual: si pide for_cut, aplica perfil de corte; si no, viaje 3000.
+        payload.update(
+            _lm_cmd_fields(tune, for_cut=_parse_bool(body.get("for_cut"), False))
+        )
         return tune, [_compact(payload)]
     if op == "lmguide_jog":
         if body.get("jog_mm") is None or body.get("jog_mm") == "":
@@ -1632,7 +1651,7 @@ def _build_motion_lines(op: str, tune: dict, body: dict):
         direction = 1 if int(body.get("dir") or 1) >= 0 else -1
         delta = _mm_to_puu(direction * abs(jog_mm))
         payload = {"op": "lmguide_jog", "delta_puu": delta}
-        payload.update(_lm_cmd_fields(tune))
+        payload.update(_lm_cmd_fields(tune, for_cut=False))
         return tune, [_compact(payload)]
     if op == "lmguide_stop":
         return tune, ['{"op":"lmguide_stop"}']
@@ -1679,7 +1698,7 @@ def _build_motion_lines(op: str, tune: dict, body: dict):
         return tune, [_compact(payload)]
     if op == "release_part":
         payload = {"op": "release_part"}
-        payload.update(_lm_cmd_fields(tune))
+        payload.update(_lm_cmd_fields(tune, for_cut=False))
         if body.get("clear_puu") is not None:
             payload["clear_puu"] = int(body["clear_puu"])
         for key in ("blower_delay_ms", "blower_ms", "home_settle_ms"):
@@ -5250,11 +5269,13 @@ def _encoder_counts_from_msg(msg: dict | None) -> dict:
     return out
 
 
-def _cycle_move_lm_send(mm: float, inject=None, on_line=None) -> dict:
+def _cycle_move_lm_send(
+    mm: float, inject=None, on_line=None, *, for_cut: bool = False
+) -> dict:
     tune = _load_motion_tune()
     puu = _mm_to_puu(mm)
     payload = {"op": "lmguide_move", "puu": puu}
-    payload.update(_lm_cmd_fields(tune))
+    payload.update(_lm_cmd_fields(tune, for_cut=for_cut))
     return _cycle_motion_send(
         payload,
         timeout_s=_MOTION_LM_MOVE_TIMEOUT_S,
@@ -5263,8 +5284,13 @@ def _cycle_move_lm_send(mm: float, inject=None, on_line=None) -> dict:
     )
 
 
-def _cycle_move_lm_mm(mm: float, inject=None, on_line=None) -> bool:
-    return _motion_cmd_serial_ok(_cycle_move_lm_send(mm, inject=inject, on_line=on_line), "E043")
+def _cycle_move_lm_mm(
+    mm: float, inject=None, on_line=None, *, for_cut: bool = False
+) -> bool:
+    return _motion_cmd_serial_ok(
+        _cycle_move_lm_send(mm, inject=inject, on_line=on_line, for_cut=for_cut),
+        "E043",
+    )
 
 
 def _cycle_lm_home_absolute(*, with_set_data: bool = False) -> bool:
@@ -5275,7 +5301,7 @@ def _cycle_lm_home_absolute(*, with_set_data: bool = False) -> bool:
     global _CYCLE_SET_DATA_ON_HOME
     tune = _load_motion_tune()
     payload = {"op": "lmguide_move", "target": "home"}
-    payload.update(_lm_cmd_fields(tune))
+    payload.update(_lm_cmd_fields(tune, for_cut=False))
     if with_set_data:
         flat = _motion_data_flat(_MOTION_DATA)
         payload["target_length_mm"] = flat.get("target_length_mm")
@@ -5575,7 +5601,7 @@ def _cycle_run_step(step_id: str, params: dict) -> bool:
             )
         else:
             _push_event(f"LM Guide a corte: {cut_mm:.2f} mm.")
-        move_sent = _cycle_move_lm_send(cut_mm)
+        move_sent = _cycle_move_lm_send(cut_mm, for_cut=True)
         if not _motion_cmd_serial_ok(move_sent, "E043"):
             return False
         if not _cycle_sleep_ms(int(params["ms_lm_at_cut"])):
@@ -5641,7 +5667,7 @@ def _cycle_run_step(step_id: str, params: dict) -> bool:
                 f"LM Guide a corte 2/{plan['second_label']}: {second_mm:.2f} mm "
                 f"(comp R {plan['comp_r_mm']:+.2f} / L {plan['comp_l_mm']:+.2f})."
             )
-            if not _cycle_move_lm_mm(second_mm):
+            if not _cycle_move_lm_mm(second_mm, for_cut=True):
                 return False
             if not _cycle_sleep_ms(int(params["ms_lm_at_cut"])):
                 return False
@@ -5665,7 +5691,7 @@ def _cycle_run_step(step_id: str, params: dict) -> bool:
     # pinzas (rules §4.7 / §8), no durante el traslado al montón: si el láser
     # sigue viendo la pieza en descarga, FeedStage “ok” con counts 0 y el
     # siguiente ciclo corta en vacío.
-    # Experimental: tras llegada al montón, ServoCAN ON en paralelo (no bloquea gripper).
+    # Experimental: tras depósito, ServoCAN ON síncrono antes del solape.
     if step_id == "7":
         pos = _active_cut_deposit()
         if pos is None:
@@ -5673,22 +5699,21 @@ def _cycle_run_step(step_id: str, params: dict) -> bool:
             return False
         _cut_mm, disc_mm, stack = pos
         _push_event(f"Depósito montón {stack}: {disc_mm:.2f} mm.")
-        # Gripper OFF solo espera llegada al montón (lmguide_move ok + settle).
-        # ServoCAN ON no bloquea: se dispara después del move, en paralelo.
-        if not _cycle_move_lm_mm(disc_mm):
+        # Gripper OFF espera llegada al montón (lmguide_move ok + settle).
+        # Descarga: viaje 3000 rpm (perfil de corte solo en paso 5/6).
+        if not _cycle_move_lm_mm(disc_mm, for_cut=False):
             return False
         if not _cycle_sleep_ms(int(params["ms_lm_at_discharge"])):
             return False
+        # Duro síncrono: ON en BG durante release_part se difería en Motion y
+        # podía apagar el eje a mitad del feed_stage del solape.
         if EXPERIMENTAL_SERVO_OFF:
-
-            def _feeder_servo_on_bg() -> None:
-                if not _cycle_feeder_servo(True):
-                    _push_event(
-                        "ServoCAN ON (tras depósito) no confirmó; pinzas ya no esperan.",
-                        "warn",
-                    )
-
-            threading.Thread(target=_feeder_servo_on_bg, daemon=True).start()
+            if not _cycle_feeder_servo(True):
+                _push_event(
+                    "ServoCAN ON (tras depósito) no confirmó.",
+                    "warn",
+                )
+                return False
         # Error en el tramo con pieza sujeta: no abrir pinzas (retención).
         if _cycle_should_abort():
             return False
@@ -5755,7 +5780,8 @@ def _cycle_run_step(step_id: str, params: dict) -> bool:
             "blower_ms": blower_ms,
             "home_settle_ms": int(params["ms_at_home_end"]),
         }
-        payload.update(_lm_cmd_fields(_load_motion_tune()))
+        # Despeje + home: viaje 3000 rpm / rampa normal (no decel de corte).
+        payload.update(_lm_cmd_fields(_load_motion_tune(), for_cut=False))
         if abs(clear_at - deposit) >= 0.05:
             payload["clear_puu"] = _mm_to_puu(clear_at)
             _push_event(
@@ -5811,6 +5837,9 @@ def _next_piece_follows() -> bool:
         return False
     if _CYCLE_CTRL.get("step_mode"):
         return False
+    # Pausa pedida: no armar solape ni adelantar la siguiente pieza.
+    if _CYCLE_CTRL["pause_after_step"].is_set():
+        return False
     if not _LOT["active"] or _LOT["tray_wait"]:
         return False
     if not _lot_would_need_another_after_credit():
@@ -5860,6 +5889,31 @@ def _feed_prime_clear() -> None:
 
 def _feed_prime_ready() -> bool:
     return bool(_FEED_PRIME.get("ready") and _FEED_PRIME.get("feed") is not None)
+
+
+def _feed_prime_lasers_present(sides: str | None = None) -> bool:
+    """True si los láseres de los lados del prime siguen ON (material aún en borde)."""
+    mst = _motion_status_get()
+    if mst is None:
+        return False
+    raw = str(
+        sides
+        if sides is not None
+        else (_FEED_PRIME.get("sides") or _run_sides() or "R")
+    ).strip().upper()
+    if raw == "LR":
+        check = ("R", "L")
+    elif raw in ("R", "L"):
+        check = (raw,)
+    else:
+        check = ("R", "L")
+    for side in check:
+        block = mst.get("enc_" + side)
+        if not isinstance(block, dict):
+            return False
+        if block.get("laser") is not True:
+            return False
+    return True
 
 
 def _feed_prime_run(params: dict) -> bool:
@@ -5913,6 +5967,15 @@ def _feed_prime_consume() -> bool:
     """Si hay prime válido: publica modelo actual, carga feed y arranca en paso 4."""
     global _PIECE_BLOWER_MM, _PIECE_FEED, _PIECE_ENC_AT_LM, _STEP4_CLOSES
     if not _feed_prime_ready():
+        return False
+    sides = str(_FEED_PRIME.get("sides") or "").strip().upper()
+    # Sin láser ON el material ya no está en borde: no cortar/contar con feed viejo.
+    if not _feed_prime_lasers_present(sides or None):
+        _feed_prime_clear()
+        _push_event(
+            "Prime descartado: láser(es) apagados — se hará ciclo completo.",
+            "warn",
+        )
         return False
     # Modelo/longitud pueden haber cambiado; el corte usa la medida nueva.
     sent_data = _cycle_motion_send(_motion_data_flat(_MOTION_DATA), timeout_s=2.0)
@@ -6403,10 +6466,12 @@ def _home_after_tray() -> bool:
         mensaje="Charola vacía. Regresando el eje a cero.",
         en_curso=True,
     )
-    sent = _cycle_motion_send(
-        {"op": "lmguide_move", "target": "home"},
-        timeout_s=_MOTION_LM_MOVE_TIMEOUT_S,
-    )
+    home = {
+        "op": "lmguide_move",
+        "target": "home",
+        **_lm_cmd_fields(_load_motion_tune(), for_cut=False),
+    }
+    sent = _cycle_motion_send(home, timeout_s=_MOTION_LM_MOVE_TIMEOUT_S)
     if _motion_cmd_serial_ok(sent, "E043"):
         return True
     _LOT["tray_wait"] = True
@@ -6508,13 +6573,16 @@ def _run_one_piece(start_index: int, started_at: float | None = None) -> bool:
         elapsed = time.time() - piece_wall0
         _set_machine_ui(tiempo_corriendo_s=round(elapsed, 1))
         if _CYCLE_CTRL["pause_after_step"].is_set():
-            _CYCLE_CTRL["pause_after_step"].clear()
-            _cadence_mark_interrupted()
             next_idx = idx + 1
-            # En paso a paso, el último paso cierra la pieza sin pedir otro avance.
-            if next_idx < len(CYCLE_STEPS):
+            step_mode = bool(_CYCLE_CTRL.get("step_mode"))
+            # Paso a paso: el último paso cierra la pieza sin pedir otro avance.
+            if step_mode and next_idx >= len(CYCLE_STEPS):
+                _CYCLE_CTRL["pause_after_step"].clear()
+                _cadence_mark_interrupted()
+            elif next_idx < len(CYCLE_STEPS):
+                _CYCLE_CTRL["pause_after_step"].clear()
+                _cadence_mark_interrupted()
                 next_step = CYCLE_STEPS[next_idx]["id"]
-                step_mode = bool(_CYCLE_CTRL.get("step_mode"))
                 if step_mode:
                     nxt = CYCLE_STEPS[next_idx]
                     msg = (
@@ -6540,6 +6608,8 @@ def _run_one_piece(start_index: int, started_at: float | None = None) -> bool:
                 _push_event(event, "warn")
                 _prefeeder_process_halt_async()
                 return False
+            # Pausa normal tras el paso 8: dejar el flag; el worker pausa
+            # entre piezas (antes se limpiaba y el lote seguía).
     # Cadencia ya medida en Gripper OFF (paso 7). No usar el fin del paso 8.
     credited = ()
     if _LOT.get("active"):
@@ -6636,6 +6706,31 @@ def _cycle_worker(start_index: int = 0, gen: int = 0) -> None:
             if not _cycle_worker_is_current(gen) or _cycle_should_abort():
                 return
             index, started_at = _overlap_handoff()
+            # Pausa pedida en el paso 8 (o con solape ya armado): no arrancar
+            # la siguiente pieza. Reanudar continúa desde el handoff.
+            if _CYCLE_CTRL["pause_after_step"].is_set():
+                _CYCLE_CTRL["pause_after_step"].clear()
+                _cadence_mark_interrupted()
+                step = (
+                    CYCLE_STEPS[index]
+                    if 0 <= index < len(CYCLE_STEPS)
+                    else CYCLE_STEPS[0]
+                )
+                _set_machine_ui(
+                    estado="paused",
+                    estado_label="Pausa",
+                    mensaje="Ciclo en pausa. Reanudar para continuar.",
+                    en_curso=True,
+                    step_id=step["id"],
+                    step_index=index,
+                    progreso_pct=_lot_progress_pct(0),
+                    tiempo_ciclo_s=round(_LAST_PIECE_S, 1),
+                    tiempo_corriendo_s=0,
+                    paralelo_id="",
+                )
+                _push_event("Pausa — pieza completada.", "warn")
+                _prefeeder_process_halt_async()
+                return
             if _LOT.get("cycle_sides") and _LOT["cycle_sides"] != _LOT.get("sides"):
                 _push_event(
                     f"Catch-up lado {_LOT['cycle_sides']}: "
@@ -7545,11 +7640,18 @@ def _purga_abort_keep_fault() -> None:
 
 
 def _feed_stage_payload(side: str | None = None, *, with_tune: bool = True) -> dict:
-    """Una sola orden feed_stage; opcionalmente lleva tune embebido (sin set_tune aparte)."""
+    """Una sola orden feed_stage; opcionalmente lleva tune embebido (sin set_tune aparte).
+
+    No incluye lm_pr_speed/accel/decel: el solape corre dentro de release_part y
+    esas claves pisaban el perfil de viaje (3000 rpm) con el de corte.
+    """
     tune = _load_motion_tune()
     if with_tune:
         payload = _motion_tune_flat(tune)
         payload["op"] = "feed_stage"
+        payload.pop("lm_pr_speed_rpm", None)
+        payload.pop("lm_accel_ms", None)
+        payload.pop("lm_decel_ms", None)
     else:
         payload = {
             "op": "feed_stage",
@@ -7775,12 +7877,12 @@ def _feed_clean():
     return True, "", feed
 
 
-def _routine_move_lm_mm(mm: float) -> bool:
+def _routine_move_lm_mm(mm: float, *, for_cut: bool = False) -> bool:
     tune = _load_motion_tune()
     if _ROUTINE["stop"].is_set():
         return False
     payload = {"op": "lmguide_move", "puu": _mm_to_puu(mm)}
-    payload.update(_lm_cmd_fields(tune))
+    payload.update(_lm_cmd_fields(tune, for_cut=for_cut))
     move = _cycle_motion_send(payload, timeout_s=40.0)
     return _motion_cmd_ok(move, "lmguide_move")
 
@@ -8171,7 +8273,7 @@ def _purge_cut() -> bool:
         "blower_ms": blower_ms,
         "home_settle_ms": int(params["ms_at_home_end"]),
     }
-    payload.update(_lm_cmd_fields(_load_motion_tune()))
+    payload.update(_lm_cmd_fields(_load_motion_tune(), for_cut=False))
     sent = _cycle_motion_send(payload, timeout_s=40.0)
     if _ROUTINE["stop"].is_set():
         _send_motion_urgent(['{"op":"blower_off"}', '{"op":"lmguide_stop"}'])
@@ -8279,6 +8381,8 @@ def _purga_terminar_action(_data=None) -> tuple[bool, str]:
 
 def _posicion_inicial_run() -> None:
     in_purge = _MACHINE_STATE.get("rutina") == "purga"
+    # Home + set0 invalidan material adelantado: el siguiente Start debe alimentar.
+    _feed_prime_clear()
     if not in_purge:
         _set_routine_ui(rutina="posicion_inicial", rutina_fase="", rutina_manos=False, mensaje="Posición inicial.")
     if not _routine_try_reset_fault() or _ROUTINE["stop"].is_set():
@@ -8287,7 +8391,14 @@ def _posicion_inicial_run() -> None:
         elif not in_purge:
             _set_routine_ui(rutina="", mensaje="La falla sigue presente.")
         return
-    home = _cycle_motion_send({"op": "lmguide_move", "target": "home"}, timeout_s=40.0)
+    home = _cycle_motion_send(
+        {
+            "op": "lmguide_move",
+            "target": "home",
+            **_lm_cmd_fields(_load_motion_tune(), for_cut=False),
+        },
+        timeout_s=40.0,
+    )
     if _ROUTINE["stop"].is_set() or not _motion_cmd_ok(home, "lmguide_move"):
         if in_purge:
             _purga_finish(True)
@@ -8527,7 +8638,7 @@ def _checklist_recorrido_run() -> None:
         tune = _load_motion_tune()
         puu = _mm_to_puu(disc)
         payload = {"op": "lmguide_move", "puu": puu}
-        payload.update(_lm_cmd_fields(tune))
+        payload.update(_lm_cmd_fields(tune, for_cut=False))
         move = _cycle_motion_send(payload, timeout_s=40.0)
         if _ROUTINE["stop"].is_set() or not _motion_cmd_ok(move, "lmguide_move"):
             _set_routine_ui(rutina="", mensaje="El recorrido no se completó.")
@@ -8537,7 +8648,12 @@ def _checklist_recorrido_run() -> None:
             return
     else:
         _push_event("Sin longitud suficiente para la descarga. El recorrido solo regresa a cero.", "warn")
-    home = _cycle_motion_send({"op": "lmguide_move", "target": "home"}, timeout_s=40.0)
+    home = {
+        "op": "lmguide_move",
+        "target": "home",
+        **_lm_cmd_fields(_load_motion_tune(), for_cut=False),
+    }
+    home = _cycle_motion_send(home, timeout_s=40.0)
     if _ROUTINE["stop"].is_set() or not _motion_cmd_ok(home, "lmguide_move"):
         _set_routine_ui(rutina="", mensaje="El eje no regresó a cero.")
         return

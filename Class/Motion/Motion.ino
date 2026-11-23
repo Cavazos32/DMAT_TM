@@ -24,6 +24,13 @@ static EncoderPCNT gEncoders;
 
 static uint32_t gLastEncoderPollMs = 0;
 static bool gFeedStageBusy = false;
+static bool gFeedTickable = false;   // begin terminó; tick puede avanzar
+static bool gFeedAsync = false;      // solape: reply al completar tick (no bloquea LM)
+static bool gReleasePartBusy = false;
+static bool gInFeedTick = false;     // evita reentrada feedStageTick vía feederPoll
+static uint8_t gSerialPollDepth = 0; // pollSerial anidado (SDO/CAN → feederPoll)
+static char gDeferredSerialLine[512];
+static bool gDeferredSerialPending = false;
 static volatile bool gLmAbortRequested = false;
 static volatile bool gFeedAbortRequested = false;
 
@@ -228,12 +235,16 @@ static void laserStopDiagPoll(uint32_t nowMs) {
     if (!stable && !timedOut) continue;
 
     d.countsSettled = d.settleLast;
-    d.settleMs = nowMs - d.tLaserAbsMs;
+    // nowMs fresco: el now del tick puede ser anterior a tLaserAbsMs (underflow).
+    uint32_t tNow = millis();
+    d.settleMs = (tNow >= d.tLaserAbsMs) ? (tNow - d.tLaserAbsMs) : 0u;
     d.settled = true;
   }
 }
 
 static void laserStopDiagFinalize() {
+  // Sin pollSerial aquí: canSdo/feederPoll reentrarían al feed y tumbaban el stack
+  // (Guru Meditation / loopTask canary) dejando el servo en PV sin Halt.
   uint32_t t0 = millis();
   while ((millis() - t0) < PARAM_LASER_STOP_SETTLE_MS) {
     bool anyPending = false;
@@ -243,7 +254,7 @@ static void laserStopDiagFinalize() {
     }
     if (!anyPending) break;
     motionPollEncoders();
-    pollSerial();
+    canServiceRxDrain();
     laserStopDiagPoll(millis());
     delay(1);
   }
@@ -255,7 +266,8 @@ static void laserStopDiagFinalize() {
     if (!d.settled) {
       gEncoders.update();
       d.countsSettled = encoderCountsOfficial(side);
-      d.settleMs = millis() - d.tLaserAbsMs;
+      uint32_t tNow = millis();
+      d.settleMs = (tNow >= d.tLaserAbsMs) ? (tNow - d.tLaserAbsMs) : 0u;
       d.settled = true;
     }
     uint16_t sw = 0;
@@ -388,25 +400,60 @@ static FeedStageRequest feedStageDefaultRequest() {
   return req;
 }
 
-static FeedStageResult FeedStage(FeedStageRequest req) {
-  FeedStageResult out = {};
+static void printFeedStageResultJson(const FeedStageResult& r);
+
+/* Estado del FeedStage en curso (bloqueante o solape async con release_part). */
+static FeedStageRequest gFeedReq;
+static FeedStageResult gFeedOut;
+static bool gFeedSideStopped[MOTION_SIDE_COUNT];
+static bool gFeedSideValidated[MOTION_SIDE_COUNT];
+static bool gFeedRunR = false;
+static bool gFeedRunL = false;
+static FeedStageError gFeedFail = FEED_STAGE_OK;
+static uint32_t gFeedT0 = 0;
+static uint8_t gFeedStallKick[MOTION_SIDE_COUNT] = {0, 0};
+
+static void feedStageFinish() {
+  // Primero: no reentrar desde pollSerial dentro de laserStopDiagFinalize.
+  gFeedTickable = false;
+  // Lados sin láser: guardar counts reales (timeout con counts 0 engañaba).
+  gEncoders.update();
+  for (int i = 0; i < MOTION_SIDE_COUNT; i++) {
+    if (gFeedSideValidated[i] || gFeedOut.side[i].laserOn) continue;
+    gFeedOut.side[i].countsMeasured = encoderCountsOfficial((MotionSide)i);
+  }
+  if (!feederStopAll() && gFeedFail == FEED_STAGE_OK) gFeedFail = FEED_STAGE_ERR_FEEDER;
+  laserStopDiagFinalize();
+  if (gFeedFail != FEED_STAGE_OK) gFeedOut.error = gFeedFail;
+  gLastFeedStage = gFeedOut;
+  gFeedStageBusy = false;
+}
+
+/* true = arrancó (tickable). false = error inmediato en gFeedOut. */
+static bool feedStageBegin(FeedStageRequest req) {
+  gFeedOut = {};
   gFeedAbortRequested = false;
   gLmAbortRequested = false;
   if (gFeedStageBusy) {
-    out.error = FEED_STAGE_ERR_BUSY;
-    return out;
+    gFeedOut.error = FEED_STAGE_ERR_BUSY;
+    return false;
   }
   if ((req.useR && !gRt.feederReady[MOTION_SIDE_R]) ||
       (req.useL && !gRt.feederReady[MOTION_SIDE_L])) {
-    out.error = FEED_STAGE_ERR_FEEDER;
-    return out;
+    gFeedOut.error = FEED_STAGE_ERR_FEEDER;
+    return false;
   }
   if (safetyIsActive()) {
-    out.error = FEED_STAGE_ERR_SAFETY;
-    return out;
+    gFeedOut.error = FEED_STAGE_ERR_SAFETY;
+    return false;
   }
 
   gFeedStageBusy = true;
+  gFeedTickable = false;
+  gFeedReq = req;
+  gFeedFail = FEED_STAGE_OK;
+  gFeedStallKick[MOTION_SIDE_R] = 0;
+  gFeedStallKick[MOTION_SIDE_L] = 0;
   laserStopDiagResetAll();
   jointClearPulses();
 
@@ -416,155 +463,261 @@ static FeedStageResult FeedStage(FeedStageRequest req) {
     if (req.useL) sideAtLaser[MOTION_SIDE_L] = laserIsOn(MOTION_SIDE_L);
   }
 
-  bool runR = req.useR && !sideAtLaser[MOTION_SIDE_R];
-  bool runL = req.useL && !sideAtLaser[MOTION_SIDE_L];
-  bool sideFeedStopped[MOTION_SIDE_COUNT] = {!runR, !runL};
-  bool sideValidated[MOTION_SIDE_COUNT] = {!req.useR, !req.useL};
+  gFeedRunR = req.useR && !sideAtLaser[MOTION_SIDE_R];
+  gFeedRunL = req.useL && !sideAtLaser[MOTION_SIDE_L];
+  gFeedSideStopped[MOTION_SIDE_R] = !gFeedRunR;
+  gFeedSideStopped[MOTION_SIDE_L] = !gFeedRunL;
+  gFeedSideValidated[MOTION_SIDE_R] = !req.useR;
+  gFeedSideValidated[MOTION_SIDE_L] = !req.useL;
 
-  // PCNT continuo: una marca relativa por lado al inicio del FeedStage.
   gEncoders.update();
   if (req.useR) encoderSetZero(MOTION_SIDE_R);
   if (req.useL) encoderSetZero(MOTION_SIDE_L);
 
-  FeedStageError fail = FEED_STAGE_OK;
-  // Láser ya ON → counts tras set0 ≈ 0: no hubo avance. Siempre enc_ok=false
-  // (el host detecta fantasma aunque checkEncoder esté off). Solo falla el
-  // FeedStage completo si checkEncoder está on; mode laser/purga puede ok.
+  // Láser ya ON → counts tras set0 ≈ 0: no hubo avance.
   if (sideAtLaser[MOTION_SIDE_R]) {
-    out.side[MOTION_SIDE_R].laserOn = true;
-    out.side[MOTION_SIDE_R].countsMeasured = encoderCountsOfficial(MOTION_SIDE_R);
-    out.side[MOTION_SIDE_R].encOk = false;
-    sideValidated[MOTION_SIDE_R] = true;
-    if (req.checkEncoder) fail = FEED_STAGE_ERR_ENC_R;
+    gFeedOut.side[MOTION_SIDE_R].laserOn = true;
+    gFeedOut.side[MOTION_SIDE_R].countsMeasured = encoderCountsOfficial(MOTION_SIDE_R);
+    gFeedOut.side[MOTION_SIDE_R].encOk = false;
+    gFeedSideValidated[MOTION_SIDE_R] = true;
+    if (req.checkEncoder) gFeedFail = FEED_STAGE_ERR_ENC_R;
   }
   if (sideAtLaser[MOTION_SIDE_L]) {
-    out.side[MOTION_SIDE_L].laserOn = true;
-    out.side[MOTION_SIDE_L].countsMeasured = encoderCountsOfficial(MOTION_SIDE_L);
-    out.side[MOTION_SIDE_L].encOk = false;
-    sideValidated[MOTION_SIDE_L] = true;
-    if (req.checkEncoder && fail == FEED_STAGE_OK) fail = FEED_STAGE_ERR_ENC_L;
+    gFeedOut.side[MOTION_SIDE_L].laserOn = true;
+    gFeedOut.side[MOTION_SIDE_L].countsMeasured = encoderCountsOfficial(MOTION_SIDE_L);
+    gFeedOut.side[MOTION_SIDE_L].encOk = false;
+    gFeedSideValidated[MOTION_SIDE_L] = true;
+    if (req.checkEncoder && gFeedFail == FEED_STAGE_OK) gFeedFail = FEED_STAGE_ERR_ENC_L;
   }
-  if (runR) {
-    if (!feederPreparePv(MOTION_SIDE_R)) fail = FEED_STAGE_ERR_FEEDER;
+  // EXPERIMENTAL_SERVO_OFF: Duro puede llegar tarde respecto al solape.
+  if (gFeedFail == FEED_STAGE_OK && gFeedRunR && !gRt.feederServoOn[MOTION_SIDE_R]) {
+    if (!feederServoOn(MOTION_SIDE_R)) gFeedFail = FEED_STAGE_ERR_FEEDER;
   }
-  if (fail == FEED_STAGE_OK && runL) {
-    if (!feederPreparePv(MOTION_SIDE_L)) fail = FEED_STAGE_ERR_FEEDER;
+  if (gFeedFail == FEED_STAGE_OK && gFeedRunL && !gRt.feederServoOn[MOTION_SIDE_L]) {
+    if (!feederServoOn(MOTION_SIDE_L)) gFeedFail = FEED_STAGE_ERR_FEEDER;
   }
-  if (fail == FEED_STAGE_OK && (runR || runL)) {
+  if (gFeedFail == FEED_STAGE_OK && gFeedRunR) {
+    if (!feederPreparePv(MOTION_SIDE_R)) gFeedFail = FEED_STAGE_ERR_FEEDER;
+  }
+  if (gFeedFail == FEED_STAGE_OK && gFeedRunL) {
+    if (!feederPreparePv(MOTION_SIDE_L)) gFeedFail = FEED_STAGE_ERR_FEEDER;
+  }
+  if (gFeedFail == FEED_STAGE_OK && (gFeedRunR || gFeedRunL)) {
     motionYieldMs(SERVO_CAN_CIA402_SHORT_MS);
-    /* Stop puede llegar en el yield: no rearmar PV ni limpiar Halt. */
     if (gLmAbortRequested || gFeedAbortRequested) {
-      fail = FEED_STAGE_ERR_STOP;
+      gFeedFail = FEED_STAGE_ERR_STOP;
     } else {
-      if (runR && !feederSetPvVelocity(MOTION_SIDE_R, feederFeedVelocity(MOTION_SIDE_R)))
-        fail = FEED_STAGE_ERR_FEEDER;
-      if (fail == FEED_STAGE_OK && runL &&
+      if (gFeedRunR &&
+          !feederSetPvVelocity(MOTION_SIDE_R, feederFeedVelocity(MOTION_SIDE_R)))
+        gFeedFail = FEED_STAGE_ERR_FEEDER;
+      if (gFeedFail == FEED_STAGE_OK && gFeedRunL &&
           !feederSetPvVelocity(MOTION_SIDE_L, feederFeedVelocity(MOTION_SIDE_L)))
-        fail = FEED_STAGE_ERR_FEEDER;
+        gFeedFail = FEED_STAGE_ERR_FEEDER;
     }
   }
-  if (fail == FEED_STAGE_OK && (runR || runL)) {
+  if (gFeedFail == FEED_STAGE_OK && (gFeedRunR || gFeedRunL)) {
     if (gLmAbortRequested || gFeedAbortRequested) {
-      fail = FEED_STAGE_ERR_STOP;
+      gFeedFail = FEED_STAGE_ERR_STOP;
     } else {
-      if (runR && !feederReleasePv(MOTION_SIDE_R)) fail = FEED_STAGE_ERR_FEEDER;
-      if (fail == FEED_STAGE_OK && runL && !feederReleasePv(MOTION_SIDE_L))
-        fail = FEED_STAGE_ERR_FEEDER;
+      if (gFeedRunR && !feederReleasePv(MOTION_SIDE_R)) gFeedFail = FEED_STAGE_ERR_FEEDER;
+      if (gFeedFail == FEED_STAGE_OK && gFeedRunL && !feederReleasePv(MOTION_SIDE_L))
+        gFeedFail = FEED_STAGE_ERR_FEEDER;
     }
   }
-
-  uint32_t tStart = millis();
-  while (fail == FEED_STAGE_OK) {
-    pollSerial();
-    uint32_t nowMs = millis();
-    motionPollEncoders();
-
-    if (gLmAbortRequested || gFeedAbortRequested) {
-      fail = FEED_STAGE_ERR_STOP;
-      break;
-    }
-
-    if (safetyIsActive()) {
-      fail = FEED_STAGE_ERR_SAFETY;
-      break;
-    }
-
-    // Joint: pulso confirmado (aunque ya esté OFF) → abortar el lado afectado.
-    if (req.useR && jointDetected(MOTION_SIDE_R)) {
-      if (!sideFeedStopped[MOTION_SIDE_R]) {
-        feederStop(MOTION_SIDE_R);
-        canSdoDownloadU32(feederNode(MOTION_SIDE_R), SERVO_OD_TARGET_VELOCITY, 0, 0);
-        sideFeedStopped[MOTION_SIDE_R] = true;
-      }
-      fail = FEED_STAGE_ERR_JOINT_R;
-      break;
-    }
-    if (req.useL && jointDetected(MOTION_SIDE_L)) {
-      if (!sideFeedStopped[MOTION_SIDE_L]) {
-        feederStop(MOTION_SIDE_L);
-        canSdoDownloadU32(feederNode(MOTION_SIDE_L), SERVO_OD_TARGET_VELOCITY, 0, 0);
-        sideFeedStopped[MOTION_SIDE_L] = true;
-      }
-      fail = FEED_STAGE_ERR_JOINT_L;
-      break;
-    }
-
-    if (req.ignoreLaser) {
-      if (nowMs - tStart >= req.laserTimeoutMs) {
-        out.error = FEED_STAGE_OK;
+  // Tras Prepare(Halt), un 0x60 espurio de 0x6040 puede marcar ReleasePv “ok”
+  // dejando el eje en Halt (L 2º en solape → counts≈1). La verdad es el
+  // encoder: vel ±1 de ruido no cuenta como movimiento. Re-Prepare+Start.
+  if (gFeedFail == FEED_STAGE_OK && (gFeedRunR || gFeedRunL)) {
+    const int32_t kMinCounts = 40;  // ~1667 pps × 80 ms ≈ 130; 40 = margen
+    const int32_t kMinAbsVel = 100;
+    const uint32_t kProbeMs = 80;
+    for (uint8_t attempt = 0; attempt < 3; attempt++) {
+      if (gLmAbortRequested || gFeedAbortRequested) {
+        gFeedFail = FEED_STAGE_ERR_STOP;
         break;
       }
-    } else {
-    for (int i = 0; i < MOTION_SIDE_COUNT; i++) {
-      if (sideValidated[i]) continue;
-      MotionSide side = (MotionSide)i;
-
-      if (!sideFeedStopped[i] && laserIsOn(side)) {
-        gEncoders.update();
-        int32_t countsAtLaser = encoderCountsOfficial(side);
-        bool stopOk = feederStop(side);
-        stopOk = canSdoDownloadU32(feederNode(side), SERVO_OD_TARGET_VELOCITY, 0, 0) && stopOk;
-        gEncoders.update();
-        int32_t countsAfterHalt = encoderCountsOfficial(side);
-        laserStopDiagBegin(side, nowMs - tStart, countsAtLaser, stopOk, countsAfterHalt);
-        if (!stopOk) {
-          fail = FEED_STAGE_ERR_FEEDER;
+      gEncoders.update();
+      int32_t c0R = gFeedRunR ? encoderCountsOfficial(MOTION_SIDE_R) : 0;
+      int32_t c0L = gFeedRunL ? encoderCountsOfficial(MOTION_SIDE_L) : 0;
+      motionYieldMs(kProbeMs);
+      if (gLmAbortRequested || gFeedAbortRequested) {
+        gFeedFail = FEED_STAGE_ERR_STOP;
+        break;
+      }
+      gEncoders.update();
+      bool needR = false;
+      bool needL = false;
+      if (gFeedRunR) {
+        int32_t d = encoderCountsOfficial(MOTION_SIDE_R) - c0R;
+        if (d < 0) d = -d;
+        int32_t vel = 0;
+        bool velOk = feederReadVelActual(MOTION_SIDE_R, &vel, 80);
+        int32_t absVel = velOk ? (vel < 0 ? -vel : vel) : 0;
+        if (d < kMinCounts && absVel < kMinAbsVel) needR = true;
+      }
+      if (gFeedRunL) {
+        int32_t d = encoderCountsOfficial(MOTION_SIDE_L) - c0L;
+        if (d < 0) d = -d;
+        int32_t vel = 0;
+        bool velOk = feederReadVelActual(MOTION_SIDE_L, &vel, 80);
+        int32_t absVel = velOk ? (vel < 0 ? -vel : vel) : 0;
+        if (d < kMinCounts && absVel < kMinAbsVel) needL = true;
+      }
+      if (!needR && !needL) break;
+      if (attempt == 2) {
+        gFeedFail = FEED_STAGE_ERR_FEEDER;
+        break;
+      }
+      if (needR) {
+        if (!feederPreparePv(MOTION_SIDE_R) ||
+            !feederStartPv(MOTION_SIDE_R, feederFeedVelocity(MOTION_SIDE_R))) {
+          gFeedFail = FEED_STAGE_ERR_FEEDER;
           break;
         }
-        sideFeedStopped[i] = true;
-        out.side[i].laserOn = true;
-        out.side[i].countsMeasured = countsAfterHalt;
-        out.side[i].encOk = true;
-        sideValidated[i] = true;
+      }
+      if (gFeedFail == FEED_STAGE_OK && needL) {
+        if (!feederPreparePv(MOTION_SIDE_L) ||
+            !feederStartPv(MOTION_SIDE_L, feederFeedVelocity(MOTION_SIDE_L))) {
+          gFeedFail = FEED_STAGE_ERR_FEEDER;
+          break;
+        }
+      }
+    }
+  }
+
+  if (gFeedFail != FEED_STAGE_OK) {
+    feedStageFinish();
+    return false;
+  }
+
+  // Ambos lados ya validados (láser ON al inicio sin check): cerrar ya.
+  if (gFeedSideValidated[MOTION_SIDE_R] && gFeedSideValidated[MOTION_SIDE_L]) {
+    gFeedOut.error = FEED_STAGE_OK;
+    feedStageFinish();
+    return false;  // terminó en begin; caller usa gLastFeedStage / gFeedOut
+  }
+
+  gFeedT0 = millis();
+  gFeedTickable = true;
+  return true;
+}
+
+/* Un paso del lazo láser. true = sigue; false = terminó (gLastFeedStage listo). */
+static bool feedStageTick() {
+  if (!gFeedStageBusy || !gFeedTickable) return false;
+  // feederStop/SDO llama feederPoll→pollSerial; sin candado reentraba aquí y
+  // desbordaba el stack sin completar el Halt.
+  if (gInFeedTick) return true;
+  gInFeedTick = true;
+
+  uint32_t nowMs = millis();
+  motionPollEncoders();
+
+  if (gLmAbortRequested || gFeedAbortRequested) {
+    gFeedFail = FEED_STAGE_ERR_STOP;
+  } else if (safetyIsActive()) {
+    gFeedFail = FEED_STAGE_ERR_SAFETY;
+  } else if (gFeedReq.useR && jointDetected(MOTION_SIDE_R)) {
+    if (!gFeedSideStopped[MOTION_SIDE_R]) {
+      gFeedSideStopped[MOTION_SIDE_R] = true;
+      feederStop(MOTION_SIDE_R);
+      canSdoDownloadU32(feederNode(MOTION_SIDE_R), SERVO_OD_TARGET_VELOCITY, 0, 0);
+    }
+    gFeedFail = FEED_STAGE_ERR_JOINT_R;
+  } else if (gFeedReq.useL && jointDetected(MOTION_SIDE_L)) {
+    if (!gFeedSideStopped[MOTION_SIDE_L]) {
+      gFeedSideStopped[MOTION_SIDE_L] = true;
+      feederStop(MOTION_SIDE_L);
+      canSdoDownloadU32(feederNode(MOTION_SIDE_L), SERVO_OD_TARGET_VELOCITY, 0, 0);
+    }
+    gFeedFail = FEED_STAGE_ERR_JOINT_L;
+  } else if (gFeedReq.ignoreLaser) {
+    if (nowMs - gFeedT0 >= gFeedReq.laserTimeoutMs) {
+      gFeedOut.error = FEED_STAGE_OK;
+      feedStageFinish();
+      gInFeedTick = false;
+      return false;
+    }
+  } else {
+    for (int i = 0; i < MOTION_SIDE_COUNT; i++) {
+      if (gFeedSideValidated[i]) continue;
+      MotionSide side = (MotionSide)i;
+
+      // Solape: si el eje “corre” pero el encoder no avanza, rearmar PV.
+      if (!gFeedSideStopped[i] && gFeedStallKick[i] < 3) {
+        int32_t c = encoderCountsOfficial(side);
+        if (c < 0) c = -c;
+        uint32_t dueMs = 150u + (uint32_t)gFeedStallKick[i] * 250u;
+        if (c < 40 && (nowMs - gFeedT0) >= dueMs) {
+          gFeedStallKick[i]++;
+          (void)feederPreparePv(side);
+          (void)feederStartPv(side, feederFeedVelocity(side));
+        }
       }
 
-      if (!sideFeedStopped[i] && (nowMs - tStart >= req.laserTimeoutMs)) {
-        fail = (side == MOTION_SIDE_R) ? FEED_STAGE_ERR_LASER_R : FEED_STAGE_ERR_LASER_L;
+      if (!gFeedSideStopped[i] && laserIsOn(side)) {
+        gEncoders.update();
+        int32_t countsAtLaser = encoderCountsOfficial(side);
+        // Marcar detenido antes del Halt: SDO reentra pollSerial.
+        gFeedSideStopped[i] = true;
+        bool stopOk = feederStop(side);
+        stopOk =
+            canSdoDownloadU32(feederNode(side), SERVO_OD_TARGET_VELOCITY, 0, 0) && stopOk;
+        gEncoders.update();
+        int32_t countsAfterHalt = encoderCountsOfficial(side);
+        laserStopDiagBegin(side, nowMs - gFeedT0, countsAtLaser, stopOk, countsAfterHalt);
+        if (!stopOk) {
+          gFeedFail = FEED_STAGE_ERR_FEEDER;
+          break;
+        }
+        gFeedOut.side[i].laserOn = true;
+        gFeedOut.side[i].countsMeasured = countsAfterHalt;
+        gFeedOut.side[i].encOk = true;
+        gFeedSideValidated[i] = true;
+      }
+
+      if (!gFeedSideStopped[i] && (nowMs - gFeedT0 >= gFeedReq.laserTimeoutMs)) {
+        gFeedFail =
+            (side == MOTION_SIDE_R) ? FEED_STAGE_ERR_LASER_R : FEED_STAGE_ERR_LASER_L;
         break;
       }
     }
-    }
+  }
 
-    if (fail != FEED_STAGE_OK) break;
+  if (gFeedFail != FEED_STAGE_OK) {
+    feedStageFinish();
+    gInFeedTick = false;
+    return false;
+  }
 
-    laserStopDiagPoll(nowMs);
+  laserStopDiagPoll(millis());
 
-    if (sideValidated[MOTION_SIDE_R] && sideValidated[MOTION_SIDE_L]) {
-      out.error = FEED_STAGE_OK;
-      break;
-    }
+  if (gFeedSideValidated[MOTION_SIDE_R] && gFeedSideValidated[MOTION_SIDE_L]) {
+    gFeedOut.error = FEED_STAGE_OK;
+    feedStageFinish();
+    gInFeedTick = false;
+    return false;
+  }
+  gInFeedTick = false;
+  return true;
+}
+
+static FeedStageResult FeedStage(FeedStageRequest req) {
+  gFeedAsync = false;
+  if (!feedStageBegin(req)) return gFeedOut;
+  while (feedStageTick()) {
+    pollSerial();
     delay(1);
   }
+  return gLastFeedStage;
+}
 
-  if (!feederStopAll() && fail == FEED_STAGE_OK) fail = FEED_STAGE_ERR_FEEDER;
-  laserStopDiagFinalize();
-  if (fail != FEED_STAGE_OK) {
-    out.error = fail;
-  }
-
-  gLastFeedStage = out;
-  gFeedStageBusy = false;
-  return out;
+/* Avanza feed async del solape sin bloquear release_part / LM. */
+static void feedStageServiceAsync() {
+  if (!gFeedAsync || !gFeedTickable || !gFeedStageBusy) return;
+  if (feedStageTick()) return;
+  printFeedStageResultJson(gLastFeedStage);
+  gFeedAsync = false;
 }
 
 static void printFeedStageResultJson(const FeedStageResult& r) {
@@ -811,6 +964,9 @@ static void applyLmRampFromJson(const char* json) {
 }
 
 static void releasePartRun(const char* line) {
+  // Perfil de la orden (viaje). Se reaplica antes de cada tramo: pollSerial
+  // puede ingerir feed_stage del solape y no debe dejar el home con rampa de corte.
+  gReleasePartBusy = true;
   applyLmRampFromJson(line);
 
   uint32_t blowerDelayMs =
@@ -824,13 +980,17 @@ static void releasePartRun(const char* line) {
   bool doClear = (clearPuu != LONG_MIN);
 
   if (doClear) {
+    applyLmRampFromJson(line);
     if (!lmguideMovePr1((int32_t)clearPuu)) {
+      gReleasePartBusy = false;
       printReleasePartResult(false);
       return;
     }
   }
 
+  applyLmRampFromJson(line);
   if (!releasePartHomeWithBlower(blowerDelayMs, blowerMs)) {
+    gReleasePartBusy = false;
     printReleasePartResult(false);
     return;
   }
@@ -846,6 +1006,8 @@ static void releasePartRun(const char* line) {
     }
   }
   blowerOff();
+  gReleasePartBusy = false;
+  // release_part ok aunque el feed async del solape siga; loop/pollSerial lo cierra.
   printReleasePartResult(true);
 }
 
@@ -1127,9 +1289,9 @@ static void handleSerialLine(char* line) {
   }
   if (strstr(line, "\"op\":\"feed_stage\"")) {
     // Tune opcional en la misma orden (1 request → trabajo → 1 reply).
+    // No aplicar lm_* ramp aquí si vienen: el solape no debe pisar viaje de release.
     if (strstr(line, "feed_r_vel_pps") || strstr(line, "feed_l_vel_pps") ||
-        strstr(line, "lm_pr_speed_rpm") || strstr(line, "lm_accel_ms") ||
-        strstr(line, "lm_decel_ms") || strstr(line, "feed_validate_encoder") ||
+        strstr(line, "feed_validate_encoder") ||
         strstr(line, "feed_r_target_counts") || strstr(line, "feed_l_target_counts") ||
         strstr(line, "lm_pos_puu")) {
       applyTuneFromJson(line);
@@ -1151,6 +1313,19 @@ static void handleSerialLine(char* line) {
     }
     long timeoutMs = jsonReadLong(line, "timeout_ms", (long)req.laserTimeoutMs);
     if (timeoutMs >= 500 && timeoutMs <= 60000) req.laserTimeoutMs = (uint32_t)timeoutMs;
+
+    // Durante ReleasePart: arrancar feed y volver (LM home sigue en paralelo).
+    if (gReleasePartBusy) {
+      gFeedAsync = true;
+      if (!feedStageBegin(req)) {
+        // Error inmediato o ya terminó en begin (láser ON): reply ahora.
+        printFeedStageResultJson(
+            gFeedOut.error != FEED_STAGE_OK ? gFeedOut : gLastFeedStage);
+        gFeedAsync = false;
+      }
+      return;
+    }
+
     FeedStageResult r = FeedStage(req);
     printFeedStageResultJson(r);
     return;
@@ -1285,7 +1460,40 @@ static void handleSerialLine(char* line) {
 static char gSerialLine[512];
 static size_t gSerialLineLen = 0;
 
+static void pollSerialDispatchLine(char* line) {
+  // ReleasePart llama pollSerial mientras espera clear/home. FeedStage debe
+  // arrancar en esa espera para alimentar en paralelo, no después de home.
+  if (gSerialPollDepth == 2 && gReleasePartBusy &&
+      strstr(line, "\"op\":\"feed_stage\"")) {
+    handleSerialLine(line);
+    return;
+  }
+  // Reentrada desde canSdo/feederPoll: no despachar otras ops largas.
+  if (gSerialPollDepth > 1) {
+    if (strstr(line, "\"op\":\"feeder_stop\"") || strstr(line, "\"op\":\"lmguide_stop\"")) {
+      gFeedAbortRequested = true;
+      gLmAbortRequested = true;
+      return;
+    }
+    // EXPERIMENTAL_SERVO_OFF: feeder_servo_on en BG durante release_part llega
+    // diferido; al salir de home haría Shutdown (0x0006) a mitad del feed async.
+    if (gFeedStageBusy && (strstr(line, "\"op\":\"feeder_servo_on\"") ||
+                           strstr(line, "\"op\":\"feeder_servo_off\""))) {
+      return;
+    }
+    if (!gDeferredSerialPending) {
+      strncpy(gDeferredSerialLine, line, sizeof(gDeferredSerialLine) - 1);
+      gDeferredSerialLine[sizeof(gDeferredSerialLine) - 1] = '\0';
+      gDeferredSerialPending = true;
+    }
+    return;
+  }
+  handleSerialLine(line);
+}
+
 static void pollSerial() {
+  gSerialPollDepth++;
+
   while (Serial.available()) {
     char c = (char)Serial.read();
     if (c == '\r') continue;
@@ -1294,13 +1502,35 @@ static void pollSerial() {
       memcpy(line, gSerialLine, gSerialLineLen);
       line[gSerialLineLen] = '\0';
       gSerialLineLen = 0;
-      handleSerialLine(line);
+      pollSerialDispatchLine(line);
       continue;
     }
     if (gSerialLineLen + 1 < sizeof(gSerialLine)) {
       gSerialLine[gSerialLineLen++] = c;
     }
   }
+
+  if (gSerialPollDepth == 1) {
+    if (gDeferredSerialPending) {
+      // No aplicar servo_on/off diferido mientras el feed async corre.
+      if (gFeedStageBusy &&
+          (strstr(gDeferredSerialLine, "\"op\":\"feeder_servo_on\"") ||
+           strstr(gDeferredSerialLine, "\"op\":\"feeder_servo_off\""))) {
+        gDeferredSerialPending = false;
+      } else {
+        gDeferredSerialPending = false;
+        handleSerialLine(gDeferredSerialLine);
+      }
+    }
+  }
+  // Durante ReleasePart, profundidad 2 corresponde al poll de clear/home.
+  // Avanzar ahí el feed async; profundidad 3+ pertenece a SDO/CAN anidado.
+  if (gSerialPollDepth == 1 ||
+      (gSerialPollDepth == 2 && gReleasePartBusy && !gInFeedTick)) {
+    feedStageServiceAsync();
+  }
+
+  gSerialPollDepth--;
 }
 static void motionYieldMs(uint32_t ms) {
   uint32_t t0 = millis();

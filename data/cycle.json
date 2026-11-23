@@ -12,7 +12,7 @@
   "cut_offset_mm": 0.0,
   "cut_comp_mode": true,
   "cut_comp_r_mm": 1.0,
-  "cut_comp_l_mm": 0.75,
+  "cut_comp_l_mm": 1.0,
   "deposit_batch_size": 50,
   "deposit_stack_gap_mm": 130.0,
   "deposit_max_travel_mm": 1450.0,
@@ -20,7 +20,7 @@
   "feed_sides": "LR",
   "blower_ms_per_mm": 8.0,
   "blower_ms_min": 200,
-  "cantidad": 4,
+  "cantidad": 100,
   "numero_modelo": "030-2780-1-A-T-TUBE-M",
   "longitud_modelo_mm": 603.0,
   "modelo_desc": "WIP, 7113-500009 (.603)"
