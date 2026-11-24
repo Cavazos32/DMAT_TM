@@ -30,13 +30,9 @@ public:
         // Límites del contador PCNT de 16 bits (highLimit > 0, lowLimit < 0).
         int highLimit = 32767;
         int lowLimit  = -32768;
-        // INPUT, INPUT_PULLUP o INPUT_PULLDOWN.
         uint8_t inputMode = INPUT_PULLUP;
-        // Invierte el signo del conteo en ambos encoders.
         bool invertDirection = false;
-        // Ventana mínima para recalcular la velocidad.
         uint32_t speedWindowUs = 10000;
-        // Tiempo sin movimiento tras el cual direction pasa a STOPPED.
         uint32_t stopTimeoutUs = 100000;
     };
     struct Reading {
@@ -57,7 +53,6 @@ public:
         Config config;
         return begin(config);
     }
-    // begin()/end() deben ejecutarse desde una sola tarea.
     bool begin(const Config& config) {
         if (_started) {
             end();
@@ -151,10 +146,8 @@ private:
         pcnt_channel_handle_t channelA = nullptr;
         pcnt_channel_handle_t channelB = nullptr;
         Pins pins = {-1, -1, -1};
-        // Escrito por la ISR del índice Z; protegido con indexMux.
         volatile uint32_t indexCount = 0;
         mutable portMUX_TYPE indexMux = portMUX_INITIALIZER_UNLOCKED;
-        // Datos compartidos; protegidos con dataMux.
         int32_t lastDriverCount = 0;
         int64_t totalCount = 0;
         int64_t zeroOffset = 0;
@@ -167,7 +160,6 @@ private:
         bool unitStarted = false;   // false si un reset no pudo reiniciar el conteo
         bool ready = false;
         mutable portMUX_TYPE dataMux = portMUX_INITIALIZER_UNLOCKED;
-        // Estado interno de begin()/end()/reset (serializado, sin spinlock).
         bool unitEnabled = false;
         bool zAttached = false;
     };
@@ -216,8 +208,6 @@ private:
         _recoveryError = err;
         portEXIT_CRITICAL(&_errMux);
     }
-
-    // No llamar dentro de una sección crítica de dataMux/indexMux.
     bool check(esp_err_t err) {
         if (err != ESP_OK) {
             setError(err);

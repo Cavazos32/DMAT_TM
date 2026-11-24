@@ -66,7 +66,7 @@ static const int   PARAM_PIN_SAFETY         = 26;
 
 // ── [A] FeedStage (solo firmware) ─────────────────────────────────────────
 
-static const uint32_t PARAM_FEED_STAGE_LASER_TIMEOUT_MS = 4000u;
+static const uint32_t PARAM_FEED_STAGE_LASER_TIMEOUT_MS =1000u;
 static const bool     PARAM_FEED_VALIDATE_ENCODER       = false;
 /* Diagnóstico de parada por láser: asiento de encoder + lectura corta de status. */
 static const uint32_t PARAM_LASER_STOP_SETTLE_MS   = 80u;
@@ -136,7 +136,7 @@ static const uint32_t PARAM_LM_SERVO_ON_SETTLE_MS = 2000;
 static const float    PARAM_LM_MOVE_TOLERANCE_MM  = 0.5f;
 static const float    PARAM_LM_HOME_TOLERANCE_MM  = 1.0f;
 static const float    PARAM_LM_HOME_MAX_TRAVEL_MM = 120.0f;
-static const uint32_t PARAM_LM_MOVE_DONE_TIMEOUT_MS = 45000;
+static const uint32_t PARAM_LM_MOVE_DONE_TIMEOUT_MS = 2000;
 // Un solo intento: si Modbus/destino fallan, el error debe salir sin esperar 3×45 s.
 static const uint8_t  PARAM_LM_MOVE_MAX_ATTEMPTS  = 1;
 
@@ -145,7 +145,7 @@ static const uint16_t PARAM_LM_HOME_TIME_MS       = 150;
 static const float    PARAM_LM_HOME_SPEED_RPM     = 10.0f;
 static const uint16_t PARAM_LM_HOME_METHOD_FWD    = 0x0029;
 static const uint16_t PARAM_LM_HOME_METHOD_REV    = 0x002A;
-static const uint32_t PARAM_LM_HOME_DONE_TIMEOUT_MS = 30000;
+static const uint32_t PARAM_LM_HOME_DONE_TIMEOUT_MS = 2000;
 
 static const uint32_t PARAM_SERIAL_BAUD         = 115200;
 

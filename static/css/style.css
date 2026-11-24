@@ -413,7 +413,7 @@ html[data-theme="light"] body {
 
 .status-banner {
   display: grid;
-  grid-template-columns: minmax(0, 1.1fr) minmax(12rem, 0.9fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   column-gap: 1rem;
   row-gap: 0.7rem;
@@ -550,19 +550,17 @@ html[data-theme="light"] body {
   overflow-wrap: anywhere;
 }
 
-.status-banner__row {
-  display: contents;
-}
-
 .status-banner__detail {
   margin: 0;
   font-size: 0.95rem;
   color: var(--text-muted);
   line-height: 1.4;
   min-width: 0;
-  align-self: center;
-  grid-column: 2;
   overflow-wrap: anywhere;
+}
+
+.status-banner__detail:empty {
+  display: none;
 }
 
 .status-banner__detail.is-warn {
@@ -573,7 +571,7 @@ html[data-theme="light"] body {
 }
 
 .status-banner__open-error {
-  grid-column: 3;
+  grid-column: 2;
   justify-self: end;
   align-self: center;
   flex: 0 0 auto;
@@ -597,9 +595,9 @@ html[data-theme="light"] body {
   display: none;
 }
 
-/* Sin botón: título + mensaje en dos columnas equilibradas */
+/* Sin botón Abrir: solo la columna de estado */
 .status-banner:not(:has(.status-banner__open-error:not([hidden]))) {
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .progress-block {
@@ -3707,7 +3705,6 @@ html:not([data-theme="light"]) .theme-toggle__icon--moon {
   }
 
   .status-banner__lead,
-  .status-banner__detail,
   .status-banner__open-error,
   .status-banner__actions {
     grid-column: 1;

@@ -21,7 +21,7 @@
   "blower_ms_per_mm": 8.0,
   "blower_ms_min": 200,
   "cantidad": 100,
-  "numero_modelo": "030-2780-1-A-T-TUBE-M",
-  "longitud_modelo_mm": 603.0,
-  "modelo_desc": "WIP, 7113-500009 (.603)"
+  "numero_modelo": "",
+  "longitud_modelo_mm": null,
+  "modelo_desc": ""
 }

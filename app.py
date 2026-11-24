@@ -38,7 +38,6 @@ import error_codes  # noqa: E402
 app = Flask(__name__)
 
 DATA_DIR = Path(__file__).resolve().parent / "data"
-# Catálogo BOM (API): [{item, desc, longitud}, ...]. Fallback legado: modelos.json.
 BOM_LONGITUDES_PATH = DATA_DIR / "bom_longitudes.json"
 MODELOS_PATH = DATA_DIR / "modelos.json"
 MOTION_PATH = DATA_DIR / "Motion.json"
@@ -55,35 +54,22 @@ PURGE_PARK_MM = 250.0
 PURGE_DEPOSIT_MM = 100.0
 PURGE_CLEAN_MS = 3000
 PURGE_AFTER_CUT_MS = 500
-# La longitud del modelo es la pieza. La LM Guide recorre esa longitud menos este offset.
 LMGUIDE_PIECE_OFFSET_MM = 55.0
 CHECKLIST_MAX_CYCLES = 10000
-
-# ServoLMGuide.h: fábrica 770 PUU / 45 mm; campo 550 mm pedido → 548 mm reales.
-# El sentido de trabajo es PUU negativo.
-LMGUIDE_STEPS_PER_MM = (770.0 / 45.0) * (550.0 / 548.0)
-LMGUIDE_PUU_SIGN = -1
-# Captura / guardado / HMI / corte: resolución 0.01 mm (compensa 3.25, 3.5, etc.).
-# El PUU del drive es ~0.058 mm; el entero PUU es el límite físico real.
+LMGUIDE_STEPS_PER_MM = (770.0 / 45.0) * (550.0 / 548.0) # ServoLMGuide.h: fábrica 770 PUU / 45 mm; campo 550 mm pedido → 548 mm reales.
+LMGUIDE_PUU_SIGN = -1 # El sentido de trabajo es PUU negativo.
 LMGUIDE_MM_RES = 0.01
 LMGUIDE_PR_RPM_MIN = 400.0
 LMGUIDE_PR_RPM_MAX = 3000.0
-# Viajes no-corte (descarga, despeje, home, jog): RPM fijo al tope + rampa corta.
 LMGUIDE_TRAVEL_RPM = 3000.0
 LMGUIDE_TRAVEL_ACCEL_MS = 100
 LMGUIDE_TRAVEL_DECEL_MS = 100
-# ASDA P5.020/P5.021: ms para 0↔3000 rpm (Parameters.h PARAM_LM_*).
-# Defaults HMI / set_tune (perfil de corte); el viaje usa LMGUIDE_TRAVEL_*.
 LMGUIDE_ACCEL_MS_DEFAULT = 200
 LMGUIDE_DECEL_MS_DEFAULT = 500
 LMGUIDE_RAMP_MS_MIN = 1
 LMGUIDE_RAMP_MS_MAX = 65500
-
-# Reset de error: condiciones PLC/Motion despejadas de forma estable (ms).
 _ERROR_RESET_STABLE_MS = 200
-
-# DSY 6091:01=1, 6091:02=10000 → 0x60FF = RPM * 10000 / 60 (manual PV).
-FEED_SHAFT_INC_PER_REV = 10000.0
+FEED_SHAFT_INC_PER_REV = 10000.0 # DSY 6091:01=1, 6091:02=10000 → 0x60FF = RPM * 10000 / 60 (manual PV).
 
 # -----------------------------------------------------------------------------
 # ANDON_SKIP_OPCIONAL — TODO_BORRAR
@@ -91,10 +77,10 @@ FEED_SHAFT_INC_PER_REV = 10000.0
 # "No usar Andon"). Cuando en planta siempre haya cable, borrar todo el bloque
 # marcado con este tag en app.py, static/js/main.js y el párrafo en rutinas-operador.md.
 # -----------------------------------------------------------------------------
+
 _ANDON_SKIPPED_ENV = os.environ.get("HMI_ANDON_SKIP", "0").strip() == "1"
 _ANDON_NONE_TOKEN = "__none__"
 # --- fin constantes ANDON_SKIP_OPCIONAL ---
-
 _serial_lock = threading.Lock()
 _motion_write_lock = threading.Lock()
 _motion_serial = None
@@ -106,33 +92,25 @@ _serial_cfg = {
     "prefeeder": "",
     "andon_disabled": False,  # ANDON_SKIP_OPCIONAL — TODO_BORRAR (quitar clave y usos)
     "checklist_bypass": False,
-    # Última prueba Probar por módulo: {port, ok, message}. No se borra al refrescar la lista USB.
     "online": {},
 }
-
 # Orquestador del ciclo automático (rules.md §4.1–4.8) — app.py coordina Motion + PLC.
 _STATE_LOCK = threading.Lock()
-# Candado de arranque: un solo Start/Resume/Charola a la vez (evita workers gemelos).
 _CYCLE_SPAWN_LOCK = threading.Lock()
 _CYCLE_WORKER_TLS = threading.local()
 _CYCLE_CTRL = {
     "thread": None,
-    # Generación del worker oficial. Un hilo huérfano ve gen ≠ la suya y se detiene.
     "gen": 0,
     "stop": threading.Event(),
     "pause_after_step": threading.Event(),
-    # Prueba desde Parámetros → Ciclo: un paso, pausa, «Siguiente paso».
     "step_mode": False,
 }
 
-# Hilo de purga, posición inicial, alimentar un lado y piezas de prueba.
-# El ciclo automático no usa este hilo.
 _ROUTINE = {
     "thread": None,
     "stop": threading.Event(),
     "from_lote": False,
 }
-
 # Interlocks del orquestador (estado lógico tras pasos completados en este ciclo).
 _CYCLE_LATCH = {
     "holder_encoder_active": False,
@@ -143,7 +121,6 @@ _CYCLE_LATCH = {
     "discharge_done": False,
 }
 # Espejo de salidas PLC: lo actualiza la reply/push del esclavo, no un status pedido.
-# known=False si se perdió el COM o aún no hay estado.
 _PLC_MIRROR = {
     "known": False,
     "holder": False,
@@ -153,14 +130,9 @@ _PLC_MIRROR = {
     "cutter_l": False,
 }
 _PLC_MIRROR_LOCK = threading.Lock()
-# Blower vive en Motion; se refleja aquí para la UI manual (panel PLC).
 _MOTION_BLOWER_ON = False
-# Arranque fresco: set_data ya viajó embebido en lmguide_move home.
 _CYCLE_SET_DATA_ON_HOME = False
-# Pinzas cerradas con pieza en proceso (paso 4 → antes de soltar en paso 7).
-# Ante error se retiene; no se re-cierra si ya estaban abiertas.
 _GRIPPER_HOLDING = False
-
 # Latch operativo Joint (recovery.kind == "joint" es la fuente HMI).
 _JOINT = {
     "skip_cut": "",  # "", "R", "L", "RL"
@@ -168,10 +140,6 @@ _JOINT = {
     "piece_counted": False,  # pieza buena ya contada al entrar a operator
     "holder_released": False,
 }
-
-# Lote en curso. El batch (montón de la charola) se calcula al pulsar Start.
-# qty_total = piezas del pedido; pieces_r/l = buenas por lado; cycle_sides = lados del ciclo actual
-# (puede ser un solo lado para empatar tras fallo parcial).
 _LOT = {
     "active": False,
     "tray_wait": False,
@@ -199,29 +167,16 @@ _LOT = {
     "cycle_sides": "R",
 }
 _LAST_PIECE_S = 0.0
-# Último Gripper OFF confirmado (perf_counter). Cadencia = liberación actual − anterior.
 _PREV_PIECE_END_T: float | None = None
-# Ancla perf_counter del Start (primera pieza: Start → primer Gripper OFF).
 _CADENCE_T0: float | None = None
-# Intervalo actual incluye pausa/error/Joint/charola/recuperación.
 _CADENCE_INTERRUPTED = False
-# Evita duplicar cadencia si el paso 7 se reentra o se reanuda tras liberar.
 _CADENCE_RECORDED = False
-# Reloj vivo de la pieza / lote (para HMI: estimado y corriendo). wall-clock.
 _PIECE_TICK0: float | None = None
 _LOT_T0: float | None = None
-# Longitud programada de la pieza en curso (para duración del blower).
-# Se conserva aunque el paso 3 del ciclo siguiente termine durante el regreso a home.
 _PIECE_BLOWER_MM = None
-# Lectura de encoder L/R de la pieza en curso (no se pisa con el solape).
-# CAPTURA A: láser detuvo el servo (FeedStage). CAPTURA B: LM Guide reached.
 _PIECE_FEED = {"R": None, "L": None}
 _PIECE_ENC_AT_LM = {"R": None, "L": None}
 
-# Siguiente ciclo arrancado al soltar pinzas (fin del paso 7 → paso 8).
-# Los pasos 1 a 3 pueden terminar mientras el eje sigue hacia home.
-# El paso 4 no cierra pinzas hasta que el paso 8 anterior acabó:
-# eje en home y pinzas abiertas.
 _OVERLAP = {
     "gen": 0,
     "on": False,
@@ -238,27 +193,16 @@ _OVERLAP = {
     "feed_t0": None,
     "sides": "",  # lados del ciclo solapado (catch-up puede diferir del actual)
 }
-# El siguiente paso 4 solo cierra: home ya está hecho y las pinzas siguen abiertas.
 _STEP4_CLOSES = False
-
-# MODO EXPERIMENTAL. En el paso 4 se pone ServoCAN en "Suelto"
-# (feeder_servo_off / Duro apagado). El holder se abre; el encoder neumático
-# permanece cerrado. Al depositar (paso 7), tras lmguide_move al montón,
-# feeder_servo_on es síncrono (antes del solape / Gripper OFF).
-# Para probar: True. Para desactivar: False.
 EXPERIMENTAL_SERVO_OFF = True
 
-# Material ya alimentado hasta el láser (fuera de tiempo de ciclo).
-# Listo para que el siguiente Start / charola arranque en el paso 4.
 _FEED_PRIME = {
     "ready": False,
     "feed": None,  # {"R": ..., "L": ...}
     "sides": "",
     "blower_mm": None,
 }
-
 # Pasos ejecutables en orden (1 = arranque / set_data al Motion).
-# Con otro ciclo pendiente, el paso 7 dispara de nuevo el 1 sin esperar al 8.
 CYCLE_STEPS = (
     {"id": "1", "label": "Start — inicio de secuencia", "actor": "coordinator"},
     {"id": "2", "label": "Holder dual + encoder dual", "actor": "plc"},
@@ -269,7 +213,6 @@ CYCLE_STEPS = (
     {"id": "7", "label": "Descarga de pieza", "actor": "motion+plc"},
     {"id": "8", "label": "ReleasePart — despeje, home y blower", "actor": "motion"},
 )
-
 # ── Registro de producción (una línea por operación; no sustituye [Motion]/[PLC]) ──
 _LOT_SEQ = 0
 _PROD_CADENCE_SAMPLES: list[float] = []
@@ -286,8 +229,6 @@ _PROD_STEP_DESC = {
     "7": "Descarga de pieza",
     "8": "ReleasePart home + blower",
 }
-
-
 def _lot_cycle_sides_now() -> str:
     """Lados efectivos del ciclo actual (catch-up puede ser R o L solo)."""
     raw = str(_LOT.get("cycle_sides") or _LOT.get("sides") or "R").strip().upper()
@@ -753,7 +694,7 @@ _HMI_CYCLE_EXTRA_KEYS = ("cantidad", "numero_modelo", "longitud_modelo_mm", "mod
 _MACHINE_STATE = {
     "estado": "idle",
     "estado_label": "En espera",
-    "mensaje": "Sistema listo. Sin errores activos.",
+    "mensaje": "",
     "progreso_pct": 0,
     "ciclo_paso_id": "",
     "ciclo_paso_label": "",
@@ -774,11 +715,7 @@ _MACHINE_STATE = {
     "rutina": "",
     "rutina_fase": "",
     "rutina_manos": False,
-    # Tras cualquier error: Reset → purga → Reanudar reintenta la pieza desde el paso 1
-    # (el lote y cycles_done se conservan; no se cuenta ni se descarta la pieza).
     "post_error_purga": False,
-    # Flujo guiado de recuperación (popup): error → reset → piezas → manguera → purga → listo.
-    # kind="joint": WARNING Joint (sin Reset/piezas/manguera).
     "recovery": {
         "active": False,
         "step": "",
@@ -790,7 +727,6 @@ _MACHINE_STATE = {
         "busy": False,
     },
     "ciclos_mant": 0,
-    # Piezas buenas por lado desde el último reset de mantenimiento (no son el lote).
     "ciclos_mant_r": 0,
     "ciclos_mant_l": 0,
     "checklist": {
@@ -804,7 +740,6 @@ _MACHINE_STATE = {
         "purga_ok": False,
         "piezas_cortadas": False,
     },
-    # Estado de la franja global «Inicializar actuadores».
     "actuators": {
         "state": "offline",  # offline | initializing | online
         "stage": "",
@@ -1081,10 +1016,8 @@ def _canonical_motion_tune(src):
             "pos_puu": _as_int(src, ("lmguide", "pos_puu"), 0),
         },
         "feed_stage": {
-            # Apagado por defecto: sin rangos mm definidos en HMI no forzar E035/E036.
             "validate_encoder": _as_bool(src, ("feed_stage", "validate_encoder"), False),
         },
-        # Experimental: holder/encoder por etapa + corrección (paso 2 y 6).
         "experimental": _canonical_experimental(src.get("experimental")),
     }
 
@@ -1102,7 +1035,6 @@ def _load_motion_tune():
         tune = _canonical_motion_tune({})
         _save_motion_tune(tune)
         return tune
-    # utf-8-sig: tolera BOM de editores Windows (Notepad, etc.)
     with MOTION_PATH.open(encoding="utf-8-sig") as f:
         data = json.load(f)
     return _canonical_motion_tune(data)
@@ -1154,7 +1086,6 @@ def _load_prefeeder_tune():
         tune = _canonical_prefeeder_tune({})
         _save_prefeeder_tune(tune)
         return tune
-    # utf-8-sig: tolera BOM de editores Windows (Notepad, etc.)
     with PFEEDER_PATH.open(encoding="utf-8-sig") as f:
         data = json.load(f)
     return _canonical_prefeeder_tune(data)
@@ -1212,7 +1143,6 @@ def _motion_tune_flat(tune: dict) -> dict:
         "lm_pos_puu": lm["pos_puu"],
         "feed_validate_encoder": tune["feed_stage"]["validate_encoder"],
     }
-    # set_tune conserva el perfil de corte (fuente de verdad HMI / Motion.json).
     flat.update(_lm_cmd_fields(tune, for_cut=True))
     return flat
 
@@ -1780,7 +1710,6 @@ def _load_serial_cfg() -> None:
             prefeeder = str(saved.get("prefeeder") or "").strip()
             andon_disabled = bool(saved.get("andon_disabled"))
             checklist_bypass = bool(saved.get("checklist_bypass"))
-            # No restaurar "online" de disco: un ok viejo no implica enlace vivo.
     if andon_disabled:
         andon = ""
     with _serial_cfg_lock:
@@ -2225,8 +2154,6 @@ def _read_lines_until_op(
                 on_line(msg)
         if want_op not in seen:
             return False
-        # feed_error: la respuesta ya llegó (fallida) en un paso anterior; no
-        # re-esperar feed_stage o el paso 8 cuelga ~100 s con "Ciclo en marcha".
         overlap_feed_pending = (
             inject is not None
             and _OVERLAP.get("on")
@@ -2342,7 +2269,6 @@ def _send_plc_serial(lines):
                 ser.rts = False
                 ser.open()
                 time.sleep(0.05)
-                # Boot push del PLC (status); no descartar — alimenta el espejo.
                 _plc_rx_seed_mirror(ser)
                 _plc_serial = ser
             ser = _plc_serial
@@ -2477,7 +2403,6 @@ def _open_prefeeder_serial_unlocked(port: str):
             except Exception:
                 pass
             ser.open()
-            # Si DTR pulsó, el Master reinicia (~0.3 s en setup).
             time.sleep(0.55 if attempt == 0 else 0.85)
             _serial_rx_flush(ser)
             _prefeeder_serial = ser
@@ -2785,12 +2710,12 @@ def _prefeeder_not_ready_message(status: dict | None) -> str:
     if offline:
         sides = "/".join(offline)
         return (
-            f"E099 PreAlimentador: lado {sides} sin enlace WiFi al maestro "
+            f"Error E099 PreAlimentador: lado {sides} sin enlace WiFi al maestro "
             "(revisa alimentación/red del esclavo)."
         )
     if not status.get("feed_lock"):
         return (
-            "E099 PreAlimentador: desbloqueado — pulsa Iniciar para estabilizar y bloquear."
+            "Error E099 PreAlimentador: desbloqueado — pulsa Iniciar para estabilizar y bloquear."
         )
     return error_codes.format_message("E099")
 
@@ -3488,7 +3413,6 @@ def _enter_machine_error(primary: str, msg: str, *, en_curso: bool | None = None
         if en_curso is None:
             en_curso = bool(_MACHINE_STATE.get("ciclo_en_curso"))
     if in_error or had_code:
-        # Mismo stop: no pisar código/mensaje del popup con fallos posteriores.
         if not _recovery_get().get("active"):
             _recovery_begin(existing_code or primary, existing_msg or msg)
         if not in_error:

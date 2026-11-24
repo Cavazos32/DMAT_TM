@@ -4,6 +4,23 @@
   const STORAGE_MODEL = "dmat_modelo";
   const STORAGE_PLC_BLOWER_MS = "dmat_plc_blower_ms";
   const ACTUATOR_STAGE_ORDER = ["feeder", "lmguide", "home", "ready"];
+  // Errores de enlace/COM: banner sin solución; Abrir → Parámetros / Conexión.
+  const LINK_COM_ERROR_CODES = {
+    E010: 1,
+    E017: 1,
+    E018: 1,
+    E019: 1,
+    E040: 1,
+    E041: 1,
+    E042: 1,
+    E043: 1,
+    E070: 1,
+    E071: 1,
+    E072: 1,
+    E090: 1,
+    E091: 1,
+    E092: 1,
+  };
 
   const els = {
     statusBanner: document.getElementById("statusBanner"),
@@ -144,6 +161,9 @@
   let recoveryViewKey = "";
   let recoveryWantOpen = false;
   let recoveryAutoKey = "";
+  /** "conexion" | "recovery" — destino del botón Abrir del banner. */
+  let bannerOpenTarget = "recovery";
+  let lastBannerErrorCode = "";
 
   const PLC_OUTPUTS = [
     ["holder", "holder"],
@@ -420,33 +440,21 @@
     els.statusBanner.className =
       "status-banner status-banner--full " +
       (bannerClassByEstado[bannerEstado] || bannerClassByEstado.idle);
-    if (jointWarn) {
-      const side = String(recNow.side || "");
-      const sideLabel =
-        side === "RL" ? "Right y Left" : side === "L" ? "Left" : side === "R" ? "Right" : "";
-      els.statusBannerLabel.textContent =
-        "Warning Joint" +
-        (sideLabel ? " · Joint " + sideLabel : "") +
-        (recNow.code ? " · " + recNow.code : "");
-    } else if (
-      recoveryErrorActive ||
-      (estado === "error" && (recNow.code || state.ciclo_error))
-    ) {
+    const showErrorLine =
+      recoveryErrorActive || estado === "error" || jointWarn;
+    if (showErrorLine) {
       const errCode = recNow.code || state.ciclo_error || "";
       const errMsg = recNow.mensaje || state.mensaje || "";
       const parsed = parseRecoveryError(errCode, errMsg);
-      els.statusBannerLabel.textContent = formatErrorBannerTitle(parsed, errCode);
+      els.statusBannerLabel.textContent = formatErrorStandard(parsed, errCode);
     } else {
       els.statusBannerLabel.textContent = state.estado_label || "En espera";
     }
-    // Detalle: mensaje de estado normal. Sin textos rojos al lado del ERROR.
+    // Derecha: solo botón Abrir. Sin mensajes de secuencia. Aviso de manos bajo el estado.
     if (els.statusBannerDetail) {
-      els.statusBannerDetail.classList.toggle("is-warn", !!state.rutina_manos);
-      if (recoveryErrorActive || estado === "error") {
-        els.statusBannerDetail.textContent = "";
-      } else {
-        els.statusBannerDetail.textContent = state.mensaje || "";
-      }
+      const handsWarn = !!state.rutina_manos && !showErrorLine;
+      els.statusBannerDetail.textContent = handsWarn ? "NO INTRODUCIR MANOS" : "";
+      els.statusBannerDetail.classList.toggle("is-warn", handsWarn);
     }
 
     const pct = Math.min(100, Math.max(0, Number(state.progreso_pct) || 0));
@@ -768,12 +776,28 @@
     el.classList.toggle("is-off", !on);
   }
 
+  function isLinkComError(code) {
+    const c = String(code || "")
+      .trim()
+      .toUpperCase();
+    return !!LINK_COM_ERROR_CODES[c];
+  }
+
+  function stripLinkComSolution(desc) {
+    return String(desc || "")
+      .replace(/\s*Elígelo en Parámetros[^.]*\.?/gi, "")
+      .replace(/\s*Revisa el puerto en Parámetros[^.]*\.?/gi, "")
+      .replace(/\s*Revisa el cable, la placa[^.]*\.?/gi, "")
+      .replace(/\s{2,}/g, " ")
+      .trim();
+  }
+
   function parseRecoveryError(code, mensaje) {
     const raw = String(mensaje || "").trim();
     const fallbackCode = String(code || "").trim();
     const items = [];
-    // Varios format_message unidos por " · " o por espacio: "E043 Motion: … E019 PLC: …"
-    const re = /([A-Z]?\d+)\s+([^:]+):\s*/gi;
+    // Estándar: "Error E043 Motion: …" (también acepta legado sin "Error ").
+    const re = /(?:Error\s+)?([A-Z]?\d+)\s+([^:]+):\s*/gi;
     const starts = [];
     let m;
     while ((m = re.exec(raw)) !== null) {
@@ -808,20 +832,6 @@
       if (it.desc && uniqueDescs.indexOf(it.desc) < 0) uniqueDescs.push(it.desc);
     });
 
-    let header = "";
-    if (items.length > 1) {
-      header = items
-        .map(function (it) {
-          return it.module ? it.code + " · " + it.module : it.code;
-        })
-        .filter(Boolean)
-        .join(" · ");
-    } else if (primary.module) {
-      header = primary.code + " · " + primary.module;
-    } else {
-      header = primary.code || fallbackCode;
-    }
-
     const desc =
       uniqueDescs.length > 1
         ? uniqueDescs.join(" ")
@@ -830,28 +840,51 @@
     return {
       code: primary.code || fallbackCode,
       module: primary.module,
-      header: header,
+      header: formatErrorStandard(
+        {
+          code: primary.code || fallbackCode,
+          module: primary.module,
+          desc: desc,
+          items: items.length ? items : null,
+        },
+        fallbackCode
+      ),
       desc: desc,
       items: items,
     };
   }
 
-  function cleanErrorDesc(desc) {
-    return String(desc || "")
-      .replace(/\s*\([^)]*\)\s*\.?$/g, "")
-      .replace(/\.\s*$/, "")
-      .trim();
+  function formatErrorStandard(parsed, fallbackCode) {
+    function one(it) {
+      const code = String((it && it.code) || fallbackCode || "").trim() || "E000";
+      const moduleName = String((it && it.module) || "").trim() || "Sistema";
+      let desc = String((it && it.desc) || "").trim();
+      if (!desc) desc = "La máquina se detuvo.";
+      // Evitar "Error Error E090…" si el texto ya traía el prefijo.
+      desc = desc.replace(/^Error\s+[A-Z]?\d+\s+[^:]+:\s*/i, "").trim() || desc;
+      if (isLinkComError(code)) {
+        desc = stripLinkComSolution(desc) || desc;
+      }
+      return "Error " + code + " " + moduleName + ": " + desc;
+    }
+    const items = parsed && parsed.items && parsed.items.length ? parsed.items : null;
+    if (items && items.length > 1) {
+      return items.map(one).join(" · ");
+    }
+    return one({
+      code: parsed && parsed.code,
+      module: parsed && parsed.module,
+      desc: parsed && parsed.desc,
+    });
   }
 
-  function formatErrorBannerTitle(parsed, fallbackCode) {
-    const code = String((parsed && parsed.code) || fallbackCode || "").trim();
-    const moduleName = String((parsed && parsed.module) || "").trim();
-    const desc = cleanErrorDesc((parsed && parsed.desc) || "");
-    let title = "ERROR";
-    if (code) title += ": " + code;
-    if (moduleName) title += " " + moduleName;
-    if (desc) title += " - " + desc;
-    return title;
+  function openBannerTarget() {
+    if (bannerOpenTarget === "conexion" || isLinkComError(lastBannerErrorCode)) {
+      closeRecoveryModal();
+      openParametros("conexion");
+      return;
+    }
+    openRecoveryModal();
   }
 
   function setRecoveryPoll(on) {
@@ -1132,12 +1165,18 @@
     const step = String(rec.step || "");
     const jointKind = rec.kind === "joint";
     const enError = state.estado === "error" || !!state.ciclo_error;
+    const code = rec.code || state.ciclo_error || "";
+    const linkCom = isLinkComError(code);
+    lastBannerErrorCode = String(code || "").trim().toUpperCase();
+    bannerOpenTarget = linkCom ? "conexion" : "recovery";
     const showBtn = active || enError || !!state.post_error_purga;
 
     if (els.btnOpenRecovery) {
       els.btnOpenRecovery.hidden = !showBtn;
       els.btnOpenRecovery.disabled = !showBtn;
-      if (jointKind) {
+      if (linkCom) {
+        els.btnOpenRecovery.textContent = "Abrir";
+      } else if (jointKind) {
         if (step === "listo") {
           els.btnOpenRecovery.textContent = "Ver Joint";
         } else {
@@ -1152,6 +1191,20 @@
       }
     }
 
+    // COM/enlace: no popup de recuperación; Abrir lleva a Conexión.
+    if (linkCom && enError && !jointKind) {
+      setRecoveryPoll(false);
+      recoveryWantOpen = false;
+      if (els.recoveryModal && !els.recoveryModal.hidden) {
+        closeRecoveryModal();
+      }
+      if (!active) {
+        recoveryViewKey = "";
+        recoveryAutoKey = "";
+        return;
+      }
+    }
+
     if (!active && !enError) {
       setRecoveryPoll(false);
       if (els.recoverySkipLink) els.recoverySkipLink.hidden = true;
@@ -1160,11 +1213,14 @@
       }
       recoveryViewKey = "";
       recoveryAutoKey = "";
+      if (bannerOpenTarget !== "conexion") {
+        bannerOpenTarget = "recovery";
+        lastBannerErrorCode = "";
+      }
       return;
     }
 
     const viewStep = step || (enError ? "error" : "");
-    const code = rec.code || state.ciclo_error || "";
     // Solo auto-abrir al surgir un error/paso nuevo. Si el operador cierra (X),
     // no volver a forzar el popup en cada poll: puede usar «Abrir Error».
     const autoKey =
@@ -1177,7 +1233,7 @@
       String(viewStep || "");
     if (autoKey !== recoveryAutoKey) {
       recoveryAutoKey = autoKey;
-      if (active && step && step !== "listo") {
+      if (active && step && step !== "listo" && !linkCom) {
         recoveryWantOpen = true;
       }
     }
@@ -1354,20 +1410,16 @@
       els.recoveryErrorBox.hidden = !showErrorBox;
     }
     if (showErrorBox) {
+      const standard = formatErrorStandard(parsed, code);
       if (els.recoveryCode) {
-        els.recoveryCode.textContent =
-          parsed.header ||
-          parsed.code ||
-          code ||
-          (jointKind ? "Joint" : viewStep === "purga_error" ? "Purga" : "Error");
+        els.recoveryCode.textContent = standard;
       }
       if (els.recoveryErrorDesc) {
-        els.recoveryErrorDesc.textContent =
-          parsed.desc ||
-          (jointKind
-            ? "Joint detectado. Recuperación de unión requerida."
-            : "La máquina se detuvo.");
+        els.recoveryErrorDesc.textContent = "";
+        els.recoveryErrorDesc.hidden = true;
       }
+    } else if (els.recoveryErrorDesc) {
+      els.recoveryErrorDesc.hidden = false;
     }
 
     const nameR = document.getElementById("recoverySensorNameR");
@@ -2438,9 +2490,6 @@
         const errorText = data.error || "Error al registrar acción.";
         pushLocalEvent(errorText, "error");
         if (data.state) applyState(data.state);
-        if (els.statusBannerDetail && els.statusBannerDetail.textContent !== errorText) {
-          els.statusBannerDetail.textContent = errorText;
-        }
         return;
       }
       pushLocalEvent("[" + block + "] " + labelForAction(action));
@@ -2464,10 +2513,10 @@
     }
   }
 
-  function openParametros() {
+  function openParametros(tabId) {
     els.settingsModal.hidden = true;
     els.parametrosModal.hidden = false;
-    activateSettingsTab("cycle");
+    activateSettingsTab(tabId || "cycle");
     els.parametrosModalClose.focus();
   }
 
@@ -2589,10 +2638,25 @@
 
   function showComErrorInBanner(message) {
     if (!message || !els.statusBanner) return;
+    const text = String(message || "").trim();
     els.statusBanner.className =
       "status-banner status-banner--full status-banner--error";
-    if (els.statusBannerLabel) els.statusBannerLabel.textContent = "Error";
-    if (els.statusBannerDetail) els.statusBannerDetail.textContent = message;
+    const parsed = parseRecoveryError("", text);
+    const code = String(parsed.code || "").trim().toUpperCase();
+    lastBannerErrorCode = code;
+    bannerOpenTarget = "conexion";
+    const standard = formatErrorStandard(parsed, parsed.code);
+    if (els.statusBannerLabel) els.statusBannerLabel.textContent = standard;
+    if (els.statusBannerDetail) {
+      els.statusBannerDetail.textContent = "";
+      els.statusBannerDetail.classList.remove("is-warn");
+    }
+    if (els.btnOpenRecovery) {
+      els.btnOpenRecovery.hidden = false;
+      els.btnOpenRecovery.disabled = false;
+      els.btnOpenRecovery.textContent = "Abrir";
+    }
+    pushLocalEvent(text, "error");
   }
 
   function andonConnectionStatusText() {
@@ -3082,8 +3146,10 @@
 
   if (els.btnOpenRecovery) {
     els.btnOpenRecovery.addEventListener("click", function () {
-      openRecoveryModal();
-      fetchState();
+      openBannerTarget();
+      if (bannerOpenTarget !== "conexion" && !isLinkComError(lastBannerErrorCode)) {
+        fetchState();
+      }
     });
   }
   if (els.recoveryModalClose) {
@@ -4207,10 +4273,6 @@
       }
     }
 
-    if (els.statusBannerDetail) {
-      // Solo rutina de manos usa aviso rojo; el ERROR va en el título del banner.
-      els.statusBannerDetail.classList.toggle("is-warn", !!state.rutina_manos);
-    }
     if (els.statusBannerActions) {
       const showPurge = purga && fase === "espera";
       const showTray = !!state.charola_llena;

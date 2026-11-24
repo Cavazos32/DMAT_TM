@@ -1,7 +1,7 @@
 """
 Catálogo único de errores de la aplicación / orquestador.
 
-Formato visible: E000 Módulo: descripción
+Formato visible (obligatorio): Error E000 Módulo: descripción
 """
 
 from __future__ import annotations
@@ -18,15 +18,15 @@ CATALOG: dict[str, tuple[str, str]] = {
     "E005": ("Orquestador", "No se puede descargar: el corte debe haberse completado (paso 6)."),
     "E006": ("Orquestador", "No se puede ir a home/blower: falta descarga de pieza (paso 7)."),
     "E007": ("Orquestador", "Corte del LM Guide no válido: falta la longitud del modelo."),
-    "E010": ("PLC", "Sin respuesta de status. Revisa el puerto en Parámetros, pestaña Conexión."),
+    "E010": ("PLC", "Sin respuesta de status."),
     "E011": ("PLC", "Holder no confirmado en estado lógico activo."),
     "E012": ("PLC", "Encoder no confirmado en estado lógico activo."),
     "E013": ("PLC", "Pinzas no confirmadas activas."),
     "E014": ("PLC", "Holder no confirmado liberado."),
     "E015": ("PLC", "Encoder no confirmado liberado."),
-    "E017": ("PLC", "No hay puerto seleccionado. Elígelo en Parámetros, pestaña Conexión."),
+    "E017": ("PLC", "No hay puerto seleccionado."),
     "E018": ("PLC", "El puerto seleccionado no es el MCU PLC."),
-    "E019": ("PLC", "El puerto no respondió. Revisa el cable, la placa o cierra el monitor serial."),
+    "E019": ("PLC", "El puerto no respondió."),
     "E020": ("PLC", "Fallo de holder desde el PLC físico."),
     "E021": ("PLC", "Fallo de encoder desde el PLC físico."),
     "E022": ("PLC", "Fallo de cortador desde el PLC físico."),
@@ -41,10 +41,10 @@ CATALOG: dict[str, tuple[str, str]] = {
     "E037": ("Motion", "Fallo al aplicar compensación (comp_move)."),
     "E039": ("Motion", "Safety exhaust / E-stop activo."),
     "E038": ("Motion", "FeedStage falló ({detail})."),
-    "E040": ("Motion", "Sin respuesta de status. Revisa el puerto en Parámetros, pestaña Conexión."),
-    "E041": ("Motion", "No hay puerto seleccionado. Elígelo en Parámetros, pestaña Conexión."),
+    "E040": ("Motion", "Sin respuesta de status."),
+    "E041": ("Motion", "No hay puerto seleccionado."),
     "E042": ("Motion", "El puerto seleccionado no es el MCU Motion."),
-    "E043": ("Motion", "El puerto no respondió. Revisa el cable, la placa o cierra el monitor serial."),
+    "E043": ("Motion", "El puerto no respondió."),
     "E044": ("Motion", "LM Guide: el movimiento no se validó en destino (revisar drive o bus)."),
     "E045": ("Motion", "Alimentación interrumpida (Stop u orden feeder_stop)."),
     "E046": (
@@ -54,12 +54,12 @@ CATALOG: dict[str, tuple[str, str]] = {
     "E050": ("Motion", "Joint Right detectado. Recuperación de unión requerida."),
     "E051": ("Motion", "Joint Left detectado. Recuperación de unión requerida."),
     "E052": ("Motion", "Joint Right y Left detectados. Recuperación de unión requerida."),
-    "E070": ("Andon", "No hay puerto seleccionado. Elígelo en Parámetros, pestaña Conexión."),
+    "E070": ("Andon", "No hay puerto seleccionado."),
     "E071": ("Andon", "El puerto seleccionado no es el MCU Andon."),
-    "E072": ("Andon", "El puerto no respondió. Revisa el cable, la placa o cierra el monitor serial."),
-    "E090": ("PreAlimentador", "No hay puerto seleccionado. Elígelo en Parámetros, pestaña Conexión."),
+    "E072": ("Andon", "El puerto no respondió."),
+    "E090": ("PreAlimentador", "No hay puerto seleccionado."),
     "E091": ("PreAlimentador", "El puerto seleccionado no es el maestro PreAlimentador."),
-    "E092": ("PreAlimentador", "El puerto no respondió. Revisa el cable, la placa o cierra el monitor serial."),
+    "E092": ("PreAlimentador", "El puerto no respondió."),
     "E093": ("PreAlimentador", "Falla de cilindro en el lado L."),
     "E094": (
         "PreAlimentador",
@@ -120,7 +120,7 @@ def format_message(code: str, **kwargs: Any) -> str:
             text = text.format(**kwargs)
         except (KeyError, ValueError):
             pass
-    return f"{code} {module}: {text}"
+    return f"Error {code} {module}: {text}"
 
 
 def feed_stage_code(detail: str) -> str:
