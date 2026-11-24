@@ -19,6 +19,7 @@ struct SideLive {
   bool holgura = false;
   bool limit = false;
   bool forceFeed = false;
+  bool clearFault = false;  // pulso one-shot hacia el lado (Reset HMI)
 };
 
 static WebServer server(80);
@@ -122,15 +123,19 @@ static void appendCfg(String& j, const PfSideParams& c) {
   j += "}";
 }
 
-static String slaveConfigJson(const SideLive& live) {
+static String slaveConfigJson(SideLive& live) {
   String j;
-  j.reserve(240);
+  j.reserve(260);
   j += "{";
   appendCfg(j, live.cfg);
   j += ",\"feed_lock\":";
   j += gFeedLock ? "true" : "false";
   j += ",\"force_feed\":";
   j += live.forceFeed ? "true" : "false";
+  j += ",\"clear_fault\":";
+  j += live.clearFault ? "true" : "false";
+  // One-shot: se entrega en este GET y se apaga.
+  if (live.clearFault) live.clearFault = false;
   j += "}";
   return j;
 }
@@ -385,6 +390,12 @@ static void replySetForceSerial(const String& body) {
   Serial.println(F("}"));
 }
 
+static void replyClearFaultSerial() {
+  liveL.clearFault = true;
+  liveR.clearFault = true;
+  Serial.println(F("{\"op\":\"clear_fault\",\"ok\":true}"));
+}
+
 // --- Serial hacia el orquestador (JSON por línea, como Motion/PLC/Andon) ---
 
 static char gSerialLine[768];
@@ -447,6 +458,10 @@ static void handleSerialLine(char* line) {
   }
   if (strstr(line, "\"op\":\"set_force_feed\"")) {
     replySetForceSerial(String(line));
+    return;
+  }
+  if (strstr(line, "\"op\":\"clear_fault\"")) {
+    replyClearFaultSerial();
     return;
   }
 

@@ -4,16 +4,21 @@
  *
  * Órdenes por Serial (JSON, una línea).
  *
- * Estados: simple, trabajando, error, falta_material, terminado.
- * simple / trabajando / terminado = LED verde.
- * falta_material = LED amarillo.
- * error, o presostato en HIGH = LED rojo y buzzer.
+ * Indicadores:
+ *   idle/simple     = todo off
+ *   trabajando      = LED verde
+ *   error / tecnico = LED rojo + buzzer
+ *   falta_material / materialista / joint = LED amarillo
+ *   jefe            = buzzer
+ *   terminado       = LED verde parpadeando + buzzer
+ *   presostato HIGH = LED rojo + buzzer (prioridad)
  */
 
 #include <Arduino.h>
 #include <string.h>
 
 static const uint32_t PARAM_SERIAL_BAUD = 115200;
+static const uint32_t PARAM_BLINK_MS = 500;
 
 static const int PIN_LED_GREEN = 16;
 static const int PIN_LED_YELLOW = 17;
@@ -27,12 +32,18 @@ static const char* kStateName[] = {
     "error",
     "falta_material",
     "terminado",
+    "materialista",
+    "jefe",
+    "tecnico",
 };
 static const uint8_t ANDON_SIMPLE = 0;
 static const uint8_t ANDON_TRABAJANDO = 1;
 static const uint8_t ANDON_ERROR = 2;
 static const uint8_t ANDON_FALTA_MATERIAL = 3;
 static const uint8_t ANDON_TERMINADO = 4;
+static const uint8_t ANDON_MATERIALISTA = 5;
+static const uint8_t ANDON_JEFE = 6;
+static const uint8_t ANDON_TECNICO = 7;
 static const uint8_t kStateCount = sizeof(kStateName) / sizeof(kStateName[0]);
 
 static uint8_t gState = ANDON_SIMPLE;
@@ -60,6 +71,8 @@ static int stateFromLine(const char* line) {
     size_t n = strlen(kStateName[i]);
     if (strncmp(p, kStateName[i], n) == 0 && p[n] == '"') return (int)i;
   }
+  /* Alias idle → simple */
+  if (strncmp(p, "idle", 4) == 0 && p[4] == '"') return (int)ANDON_SIMPLE;
   return -1;
 }
 
@@ -72,14 +85,28 @@ static void applyIndicators() {
   bool yellow = false;
   bool red = false;
   bool buzz = false;
-  if (!pressureOk() || gState == ANDON_ERROR) {
+  bool blink_green = false;
+
+  if (!pressureOk() || gState == ANDON_ERROR || gState == ANDON_TECNICO) {
     red = true;
     buzz = true;
-  } else if (gState == ANDON_FALTA_MATERIAL) {
+  } else if (gState == ANDON_JEFE) {
+    buzz = true;
+  } else if (gState == ANDON_TERMINADO) {
+    blink_green = true;
+    buzz = true;
+  } else if (
+      gState == ANDON_FALTA_MATERIAL || gState == ANDON_MATERIALISTA) {
     yellow = true;
-  } else if (gState == ANDON_SIMPLE || gState == ANDON_TRABAJANDO || gState == ANDON_TERMINADO) {
+  } else if (gState == ANDON_TRABAJANDO) {
     green = true;
   }
+  /* simple / idle: todo off */
+
+  if (blink_green) {
+    green = ((millis() / PARAM_BLINK_MS) & 1u) == 0u;
+  }
+
   digitalWrite(PIN_LED_GREEN, green ? HIGH : LOW);
   digitalWrite(PIN_LED_YELLOW, yellow ? HIGH : LOW);
   digitalWrite(PIN_LED_RED, red ? HIGH : LOW);

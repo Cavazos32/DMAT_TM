@@ -3064,3 +3064,13 @@
 23/11/26 15:10:46.475 | QTY 100 | R036/L036 | STEP 02 | Holder + encoder | PLC | 0.080 s | PARALLEL
 23/11/26 15:10:55.137 | QTY 100 | R036/L036 | STEP 08 | ReleasePart home + blower | MOTION | 8.741 s | OK
 23/11/26 15:10:55.139 | QTY 100 | R037/L037 | STEP 03 | Alimentación L/R | MOTION | 8.521 s | ERROR | E033 Motion: Timeout de láser lado R (laser_timeout_r).
+24/11/26 12:30:30.234 | QTY 100 | R020/L021 | STEP 01 | Configuración inicial | MOTION | 0.000 s | WARNING | Material terminado — lado R (feed)
+24/11/26 12:30:30.235 | QTY 100 | R020/L021 | STEP 01 | Configuración inicial | MOTION | 0.000 s | WARNING | Joint detectado — lado R (feed)
+24/11/26 12:30:30.235 | QTY 100 | R020/L021 | STEP 01 | Configuración inicial | MOTION | 0.000 s | WARNING | Material terminado — lado R (feed)
+24/11/26 12:30:30.236 | QTY 100 | R020/L021 | STEP 01 | Configuración inicial | MOTION | 0.000 s | WARNING | Joint detectado — lado R (feed)
+24/11/26 12:30:43.002 | QTY 100 | R020/L021 | STEP 01 | Configuración inicial | MOTION | 0.000 s | WARNING | Material terminado — lado R (feed)
+24/11/26 12:30:43.003 | QTY 100 | R020/L021 | STEP 01 | Configuración inicial | MOTION | 0.000 s | WARNING | Joint detectado — lado R (feed)
+24/11/26 12:30:43.003 | QTY 100 | R020/L021 | STEP 01 | Configuración inicial | MOTION | 0.000 s | WARNING | Material terminado — lado R (feed)
+24/11/26 12:30:43.004 | QTY 100 | R020/L021 | STEP 01 | Configuración inicial | MOTION | 0.000 s | WARNING | Joint detectado — lado R (feed)
+24/11/26 12:30:43.004 | QTY 100 | R020/L021 | STEP 01 | Configuración inicial | MOTION | 0.000 s | WARNING | Material terminado — lado R (feed)
+24/11/26 12:30:43.005 | QTY 100 | R021/L021 | STEP 01 | Configuración inicial | MOTION | 0.000 s | WARNING | Joint detectado — lado R (fabricate)

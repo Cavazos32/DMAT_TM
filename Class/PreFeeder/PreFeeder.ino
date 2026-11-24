@@ -34,6 +34,7 @@ static FeedParams gFeed;
 static SemaphoreHandle_t paramMux = nullptr;
 static bool gFeedLock = true;
 static volatile bool gCfgPollUrgent = false;
+static volatile bool gClearFaultReq = false;  // pulso desde maestro / Reset HMI
 static bool gForceFeed = false;  // HMI / maestro (set_force_feed)
 static bool gJogBtn = false;     // Botón físico JOG - L / JOG - R
 
@@ -111,13 +112,23 @@ static bool holguraStableOn = false;
 static uint32_t limitHighMs = 0;
 static uint32_t limitLowMs = 0;
 static bool limitStableOn = false;
+static bool limitRawActive = false;
+static volatile bool limitIrqHit = false;  // flanco corto: no depende del loop
 static bool sensorsReady = false;
+
+static void IRAM_ATTR onLimitIsr() {
+  limitIrqHit = true;
+}
 
 static const SensorSnapshot& SensorMonitor(uint32_t nowMs) {
   if (!sensorsReady) {
     pinMode(PIN_CYLINDER, INPUT_PULLDOWN);
     pinMode(PIN_HOLGURA, INPUT_PULLUP);
-    pinMode(PIN_LIMIT, INPUT_PULLUP);
+    // GPIO 34 no tiene pull interno; el pull-up debe ser externo.
+    pinMode(PIN_LIMIT, INPUT);
+    attachInterrupt(
+        digitalPinToInterrupt(PIN_LIMIT), onLimitIsr,
+        LIMIT_ACTIVE_LEVEL == LOW ? FALLING : RISING);
     sensorsReady = true;
   }
 
@@ -138,7 +149,8 @@ static const SensorSnapshot& SensorMonitor(uint32_t nowMs) {
   }
   gSnap.holguraOn = holguraStableOn;
 
-  if (digitalRead(PIN_LIMIT) == LIMIT_ACTIVE_LEVEL) {
+  limitRawActive = digitalRead(PIN_LIMIT) == LIMIT_ACTIVE_LEVEL;
+  if (limitRawActive) {
     limitHighMs += dt;
     limitLowMs = 0;
     if (limitHighMs >= LIMIT_ON_STABLE_MS) limitStableOn = true;
@@ -147,6 +159,8 @@ static const SensorSnapshot& SensorMonitor(uint32_t nowMs) {
     limitHighMs = 0;
     if (limitLowMs >= LIMIT_OFF_STABLE_MS) limitStableOn = false;
   }
+  // ISR o sondeo: una vez visto, se mantiene hasta clear_fault.
+  if (limitIrqHit) limitStableOn = true;
   gSnap.limitActive = limitStableOn;
   return gSnap;
 }
@@ -164,7 +178,9 @@ static uint32_t holguraSettleEndMs = 0;
 static uint32_t holguraTimedEndMs = 0;
 static bool holguraLastOn = false;
 static bool holguraSawOn = false;
-static uint32_t holguraStallSinceMs = 0;
+static uint32_t holguraOffSinceMs = 0;
+static bool gEmptyIdle = false;  // material agotado: idle local hasta iniciar / clear
+static bool gFeedLockPrev = true;
 
 static void resetHolguraFeedState() {
   holguraPhase = HOLG_IDLE;
@@ -172,7 +188,7 @@ static void resetHolguraFeedState() {
   holguraTimedEndMs = 0;
   holguraLastOn = false;
   holguraSawOn = false;
-  holguraStallSinceMs = 0;
+  holguraOffSinceMs = 0;
 }
 
 static void holguraOnRisingEdge(uint32_t nowMs, const FeedParams& p) {
@@ -209,8 +225,24 @@ static void enterFault(SystemFault f) {
   applyFeedOutputs(paramsNow());
 }
 
+// Solo limpia si la condición física ya no está activa. Si sigue mal, el fault permanece.
+static void tryClearFault(const SensorSnapshot& s) {
+  if (fault == FAULT_NONE) return;
+  if (fault == FAULT_LIMIT) {
+    // Liberar enclave de flanco solo si el pin ya está libre.
+    if (limitRawActive) return;
+    limitIrqHit = false;
+    limitStableOn = false;
+    limitHighMs = 0;
+    fault = FAULT_NONE;
+    return;
+  }
+  if (fault == FAULT_CYLINDER && !s.cylinderOpen) fault = FAULT_NONE;
+  else if (fault == FAULT_HOLGURA && s.holguraOn) fault = FAULT_NONE;
+}
+
 static void beginHolguraFeed(const SensorSnapshot& s) {
-  if (s.holguraOn) return;
+  if (gEmptyIdle || s.holguraOn) return;
   feederMode = FEED_HOLGURA;
   holguraSawOn = false;
   holguraSettleEndMs = 0;
@@ -229,14 +261,17 @@ static void stopHolguraFeedCycle(const SensorSnapshot& s) {
   holguraSawOn = false;
 }
 
-static void serviceHolguraStallFault(uint32_t nowMs, const SensorSnapshot& s) {
-  if (fault != FAULT_NONE || s.holguraOn || FeedMotorMoving() || MotorPullerMoving()) {
-    holguraStallSinceMs = 0;
+// Holgura OFF continuo → idle del lado (sin fault). El otro lado sigue.
+static void serviceHolguraEmptyIdle(uint32_t nowMs, const SensorSnapshot& s) {
+  if (gEmptyIdle || fault != FAULT_NONE || s.holguraOn || forceFeedActive()) {
+    holguraOffSinceMs = 0;
     return;
   }
-  if (!holguraStallSinceMs) holguraStallSinceMs = nowMs;
-  if ((nowMs - holguraStallSinceMs) >= HOLGURA_STALL_FAULT_MS)
-    enterFault(FAULT_HOLGURA);
+  if (!holguraOffSinceMs) holguraOffSinceMs = nowMs;
+  if ((nowMs - holguraOffSinceMs) < HOLGURA_EMPTY_IDLE_MS) return;
+  gEmptyIdle = true;
+  holguraOffSinceMs = 0;
+  stopFeederDemand();
 }
 
 static void serviceHolguraFeed(uint32_t nowMs, const SensorSnapshot& s, const FeedParams& p) {
@@ -298,21 +333,32 @@ static void FeedingMode(uint32_t nowMs) {
     }
   }
 
+  // Reset HMI: limpia fault si ya no aplica; también reintenta empty-idle.
+  if (gClearFaultReq) {
+    gClearFaultReq = false;
+    tryClearFault(s);
+    gEmptyIdle = false;
+    holguraOffSinceMs = 0;
+  }
+
+  // Iniciar (feed_lock off): reintenta alimentación tras empty-idle.
+  if (gFeedLockPrev && !gFeedLock) {
+    gEmptyIdle = false;
+    holguraOffSinceMs = 0;
+  }
+  gFeedLockPrev = gFeedLock;
+
   // JOG (HMI o boton): fuerza giro ya; sin fallas ni feed_lock.
   if (forceFeedActive()) {
-    holguraStallSinceMs = 0;
+    gEmptyIdle = false;
+    holguraOffSinceMs = 0;
     feederDemand = true;
     FeedMotor(p.rpm);
     MotorPuller(p.pullerRpm);
     return;
   }
 
-  if (fault == FAULT_LIMIT && !s.limitActive) fault = FAULT_NONE;
-  if (fault == FAULT_CYLINDER && !s.cylinderOpen) fault = FAULT_NONE;
-  // Holgura se limpia cuando el sensor vuelve a ON.
-  if (fault == FAULT_HOLGURA && s.holguraOn) fault = FAULT_NONE;
-
-  // Limite / cilindro solo afectan el ciclo automatico.
+  // Fallas enclavadas: no se limpian solas al soltar el sensor.
   if (s.limitActive && fault != FAULT_LIMIT) enterFault(FAULT_LIMIT);
   else if (fault == FAULT_NONE) {
     if (s.cylinderOpen) enterFault(FAULT_CYLINDER);
@@ -324,13 +370,13 @@ static void FeedingMode(uint32_t nowMs) {
     return;
   }
 
-  if (fault == FAULT_NONE) {
+  if (fault == FAULT_NONE && !gEmptyIdle) {
     if (!feederDemand && !s.holguraOn)
       beginHolguraFeed(s);
     serviceHolguraFeed(nowMs, s, p);
   }
 
-  serviceHolguraStallFault(nowMs, s);
+  serviceHolguraEmptyIdle(nowMs, s);
   applyFeedOutputs(p);
 }
 
@@ -451,6 +497,10 @@ static void applyConfigJson(const String& body) {
   if (jsonBoolCfg(body, "force_feed", bit)) {
     if (bit != gForceFeed) gCfgPollUrgent = true;
     gForceFeed = bit;
+  }
+  if (jsonBoolCfg(body, "clear_fault", bit) && bit) {
+    gClearFaultReq = true;
+    gCfgPollUrgent = true;
   }
   clampFeed(next);
   if (!paramMux) return;

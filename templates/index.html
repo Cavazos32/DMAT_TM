@@ -51,6 +51,7 @@
         <div class="status-banner__main">
           <span class="status-banner__dot" id="statusBannerDot"></span>
           <span class="status-banner__label" id="statusBannerLabel">En espera</span>
+          <span class="status-banner__blink" id="statusBannerLowMat" hidden aria-live="polite">Poco material</span>
         </div>
         <p class="status-banner__detail" id="statusBannerDetail"></p>
       </div>
@@ -364,6 +365,11 @@
                       <span class="motion-laser__name">Joint</span>
                       <span class="motion-laser__state">Sin detección</span>
                     </p>
+                    <p class="motion-laser" id="materialLedR" role="status" aria-label="Material lado R ausente">
+                      <span class="motion-laser__led" aria-hidden="true"></span>
+                      <span class="motion-laser__name">Material</span>
+                      <span class="motion-laser__state">Ausente</span>
+                    </p>
                     <div class="motion-validate__enc">
                       <span class="motion-validate__label">Encoder</span>
                       <span class="motion-validate__value" id="encReadR">—</span>
@@ -385,6 +391,11 @@
                       <span class="motion-laser__name">Joint</span>
                       <span class="motion-laser__state">Sin detección</span>
                     </p>
+                    <p class="motion-laser" id="materialLedL" role="status" aria-label="Material lado L ausente">
+                      <span class="motion-laser__led" aria-hidden="true"></span>
+                      <span class="motion-laser__name">Material</span>
+                      <span class="motion-laser__state">Ausente</span>
+                    </p>
                     <div class="motion-validate__enc">
                       <span class="motion-validate__label">Encoder</span>
                       <span class="motion-validate__value" id="encReadL">—</span>
@@ -405,13 +416,22 @@
                     <label class="motion-field motion-field--compact feeder-cut-layout__vel-r">Vel. RPM
                       <input type="number" step="1" min="0" data-motion-path="feeder.R.profile_velocity_pps" data-motion-unit="feed_rpm">
                     </label>
+                    <label class="motion-field motion-field--compact feeder-cut-layout__vel2-r" title="Si es igual a Vel. RPM, no cambia en marcha">Vel2 RPM
+                      <input type="number" step="1" min="0" data-motion-path="feeder.R.secondary_velocity_pps" data-motion-unit="feed_rpm">
+                    </label>
                     <button type="button" class="btn btn-manual btn--compact feeder-cut-layout__test-r" data-motion-op="feeder_test" data-motion-side="R">Probar R</button>
                     <button type="button" class="btn btn-manual feeder-cut-layout__cut" data-plc-op="valve" data-plc-name="cutters" data-plc-keep-label aria-pressed="false" title="Activar o desactivar cortadores R y L juntos">Cortar</button>
                     <p class="motion-side__title feeder-cut-layout__title-l">Lado L</p>
                     <label class="motion-field motion-field--compact feeder-cut-layout__vel-l">Vel. RPM
                       <input type="number" step="1" min="0" data-motion-path="feeder.L.profile_velocity_pps" data-motion-unit="feed_rpm">
                     </label>
+                    <label class="motion-field motion-field--compact feeder-cut-layout__vel2-l" title="Si es igual a Vel. RPM, no cambia en marcha">Vel2 RPM
+                      <input type="number" step="1" min="0" data-motion-path="feeder.L.secondary_velocity_pps" data-motion-unit="feed_rpm">
+                    </label>
                     <button type="button" class="btn btn-manual btn--compact feeder-cut-layout__test-l" data-motion-op="feeder_test" data-motion-side="L">Probar L</button>
+                    <label class="motion-field motion-field--compact feeder-cut-layout__delay" title="Tras arrancar FeedStage, espera este tiempo y aplica Vel2 si es distinta">Vel2 tras (ms)
+                      <input type="number" step="1" min="0" max="60000" data-motion-path="feed_stage.secondary_velocity_delay_ms">
+                    </label>
                   </div>
                 </fieldset>
 
@@ -431,21 +451,35 @@
                       <label class="motion-field">Posición (mm)
                         <input type="number" step="0.1" id="lmMoveMm" data-motion-path="lmguide.pos_puu" data-motion-unit="mm" placeholder="mm">
                       </label>
-                      <label class="motion-field">RPM
-                        <input type="number" step="0.1" min="0" data-motion-path="lmguide.pr_speed_rpm">
-                      </label>
                       <span class="lm-guide__puu" id="lmMovePuu" aria-hidden="true">0</span>
-                      <button type="button" class="btn btn-manual" data-motion-op="lmguide_move">Mover</button>
-                      <button type="button" class="btn btn-manual" data-motion-op="lmguide_move_home">Ir a cero</button>
                     </div>
-                    <div class="lm-guide__row lm-guide__row--ramp">
+                    <p class="lm-guide__segment-label">Corte / jalar</p>
+                    <div class="lm-guide__row lm-guide__row--profile" role="group" aria-label="Perfil corte / jalar LM Guide">
+                      <label class="motion-field">RPM
+                        <input type="number" step="0.1" min="0" data-motion-path="lmguide.pr_speed_rpm" title="Corte / jalar">
+                      </label>
                       <label class="motion-field">Accel (ms)
-                        <input type="number" step="1" min="1" max="65500" data-motion-path="lmguide.accel_ms" title="Tiempo 0→3000 rpm (ASDA P5.020)">
+                        <input type="number" step="1" min="1" max="65500" data-motion-path="lmguide.accel_ms" title="Corte / jalar: tiempo 0→3000 rpm (ASDA P5.020)">
                       </label>
                       <label class="motion-field">Decel (ms)
-                        <input type="number" step="1" min="1" max="65500" data-motion-path="lmguide.decel_ms" title="Tiempo 3000→0 rpm (ASDA P5.021)">
+                        <input type="number" step="1" min="1" max="65500" data-motion-path="lmguide.decel_ms" title="Corte / jalar: tiempo 3000→0 rpm (ASDA P5.021)">
                       </label>
-                      <button type="button" class="btn btn-manual" id="lmSimOpen" title="Ver perfil de velocidad y tiempos (no mueve el eje)">Perfil</button>
+                      <button type="button" class="btn btn-manual" data-motion-op="lmguide_move" data-for-cut="1">Mover</button>
+                      <button type="button" class="btn btn-manual" data-motion-op="lmguide_move_home" data-for-cut="1">Ir a cero</button>
+                    </div>
+                    <p class="lm-guide__segment-label">Movimientos comunes</p>
+                    <div class="lm-guide__row lm-guide__row--profile" role="group" aria-label="Perfil movimientos comunes LM Guide">
+                      <label class="motion-field">RPM
+                        <input type="number" step="0.1" min="0" data-motion-path="lmguide.travel_pr_speed_rpm" title="Movimientos comunes (home, descarga, jog, etc.)">
+                      </label>
+                      <label class="motion-field">Accel (ms)
+                        <input type="number" step="1" min="1" max="65500" data-motion-path="lmguide.travel_accel_ms" title="Movimientos comunes: tiempo 0→3000 rpm (ASDA P5.020)">
+                      </label>
+                      <label class="motion-field">Decel (ms)
+                        <input type="number" step="1" min="1" max="65500" data-motion-path="lmguide.travel_decel_ms" title="Movimientos comunes: tiempo 3000→0 rpm (ASDA P5.021)">
+                      </label>
+                      <button type="button" class="btn btn-manual" data-motion-op="lmguide_move" data-for-cut="0">Mover</button>
+                      <button type="button" class="btn btn-manual" data-motion-op="lmguide_move_home" data-for-cut="0">Ir a cero</button>
                     </div>
                     <div class="lm-guide__row lm-guide__row--servo">
                       <button type="button" class="btn btn-power" id="lmServoToggle" data-motion-op="lmguide_servo" aria-pressed="false">Apagado</button>
@@ -455,136 +489,6 @@
                   </div>
                 </fieldset>
               </div>
-
-              <fieldset class="motion-fieldset motion-fieldset--wide motion-fieldset--experimental">
-                <legend>EXPERIMENTAL</legend>
-                <p class="motion-params__note motion-params__note--tight">En ciclo: alimentar siempre con holder+encoder cerrados. Al cerrar pinzas (paso 4) se aplica «antes de jalar» en la misma orden PLC. Paso 6 usa «antes de cortar» → corrección (si activa y holder cerrado, con enable) → corte. Probar sigue en manual.</p>
-                <div class="motion-experimental">
-                  <section class="motion-exp-side" data-exp-side="R" aria-labelledby="expSideTitleR">
-                    <header class="motion-exp-side__head">
-                      <span class="motion-validate__mark" aria-hidden="true">R</span>
-                      <h3 class="motion-exp-side__title" id="expSideTitleR">Lado R</h3>
-                    </header>
-
-                    <div class="motion-exp-stage">
-                      <p class="motion-exp-stage__title">Antes de jalar</p>
-                      <div class="motion-exp-stage__switches">
-                        <label class="settings-toggle settings-toggle--compact">
-                          <input type="checkbox" data-motion-path="experimental.R.before_pull.holder">
-                          <span class="settings-toggle__switch" aria-hidden="true"></span>
-                          <span class="settings-toggle__text">Holder</span>
-                        </label>
-                        <label class="settings-toggle settings-toggle--compact">
-                          <input type="checkbox" data-motion-path="experimental.R.before_pull.encoder">
-                          <span class="settings-toggle__switch" aria-hidden="true"></span>
-                          <span class="settings-toggle__text">Encoder</span>
-                        </label>
-                      </div>
-                    </div>
-
-                    <div class="motion-exp-stage">
-                      <p class="motion-exp-stage__title">Antes de cortar</p>
-                      <div class="motion-exp-stage__switches">
-                        <label class="settings-toggle settings-toggle--compact">
-                          <input type="checkbox" data-exp-before-cut-holder data-motion-path="experimental.R.before_cut.holder">
-                          <span class="settings-toggle__switch" aria-hidden="true"></span>
-                          <span class="settings-toggle__text">Holder</span>
-                        </label>
-                        <label class="settings-toggle settings-toggle--compact">
-                          <input type="checkbox" data-motion-path="experimental.R.before_cut.encoder">
-                          <span class="settings-toggle__switch" aria-hidden="true"></span>
-                          <span class="settings-toggle__text">Encoder</span>
-                        </label>
-                      </div>
-                    </div>
-
-                    <div class="motion-exp-stage motion-exp-stage--correction" data-exp-correction>
-                      <p class="motion-exp-stage__title">Corrección servo</p>
-                      <p class="motion-exp-correction__hint" data-exp-correction-hint hidden>Requiere holder cerrado antes de cortar.</p>
-                      <div class="motion-exp-correction">
-                        <label class="settings-toggle settings-toggle--compact">
-                          <input type="checkbox" data-exp-correction-enabled data-motion-path="experimental.R.correction.enabled">
-                          <span class="settings-toggle__switch" aria-hidden="true"></span>
-                          <span class="settings-toggle__text">Activar</span>
-                        </label>
-                        <label class="motion-field motion-field--compact">RPM
-                          <input type="number" step="1" min="1" max="3000" data-motion-path="experimental.R.correction.rpm">
-                        </label>
-                        <label class="motion-field motion-field--compact">Tiempo (ms)
-                          <input type="number" step="1" min="50" max="30000" data-motion-path="experimental.R.correction.ms">
-                        </label>
-                        <button type="button" class="btn btn-manual btn--compact" data-motion-op="feeder_reverse" data-motion-side="R">Probar</button>
-                        <p class="motion-laser motion-experimental__status" id="feederReverseStatusR" role="status" aria-label="Corrección R sin ejecutar" data-state="idle">
-                          <span class="motion-laser__led" aria-hidden="true"></span>
-                          <span class="motion-laser__state">Sin ejecutar</span>
-                        </p>
-                      </div>
-                    </div>
-                  </section>
-
-                  <section class="motion-exp-side" data-exp-side="L" aria-labelledby="expSideTitleL">
-                    <header class="motion-exp-side__head">
-                      <span class="motion-validate__mark" aria-hidden="true">L</span>
-                      <h3 class="motion-exp-side__title" id="expSideTitleL">Lado L</h3>
-                    </header>
-
-                    <div class="motion-exp-stage">
-                      <p class="motion-exp-stage__title">Antes de jalar</p>
-                      <div class="motion-exp-stage__switches">
-                        <label class="settings-toggle settings-toggle--compact">
-                          <input type="checkbox" data-motion-path="experimental.L.before_pull.holder">
-                          <span class="settings-toggle__switch" aria-hidden="true"></span>
-                          <span class="settings-toggle__text">Holder</span>
-                        </label>
-                        <label class="settings-toggle settings-toggle--compact">
-                          <input type="checkbox" data-motion-path="experimental.L.before_pull.encoder">
-                          <span class="settings-toggle__switch" aria-hidden="true"></span>
-                          <span class="settings-toggle__text">Encoder</span>
-                        </label>
-                      </div>
-                    </div>
-
-                    <div class="motion-exp-stage">
-                      <p class="motion-exp-stage__title">Antes de cortar</p>
-                      <div class="motion-exp-stage__switches">
-                        <label class="settings-toggle settings-toggle--compact">
-                          <input type="checkbox" data-exp-before-cut-holder data-motion-path="experimental.L.before_cut.holder">
-                          <span class="settings-toggle__switch" aria-hidden="true"></span>
-                          <span class="settings-toggle__text">Holder</span>
-                        </label>
-                        <label class="settings-toggle settings-toggle--compact">
-                          <input type="checkbox" data-motion-path="experimental.L.before_cut.encoder">
-                          <span class="settings-toggle__switch" aria-hidden="true"></span>
-                          <span class="settings-toggle__text">Encoder</span>
-                        </label>
-                      </div>
-                    </div>
-
-                    <div class="motion-exp-stage motion-exp-stage--correction" data-exp-correction>
-                      <p class="motion-exp-stage__title">Corrección servo</p>
-                      <p class="motion-exp-correction__hint" data-exp-correction-hint hidden>Requiere holder cerrado antes de cortar.</p>
-                      <div class="motion-exp-correction">
-                        <label class="settings-toggle settings-toggle--compact">
-                          <input type="checkbox" data-exp-correction-enabled data-motion-path="experimental.L.correction.enabled">
-                          <span class="settings-toggle__switch" aria-hidden="true"></span>
-                          <span class="settings-toggle__text">Activar</span>
-                        </label>
-                        <label class="motion-field motion-field--compact">RPM
-                          <input type="number" step="1" min="1" max="3000" data-motion-path="experimental.L.correction.rpm">
-                        </label>
-                        <label class="motion-field motion-field--compact">Tiempo (ms)
-                          <input type="number" step="1" min="50" max="30000" data-motion-path="experimental.L.correction.ms">
-                        </label>
-                        <button type="button" class="btn btn-manual btn--compact" data-motion-op="feeder_reverse" data-motion-side="L">Probar</button>
-                        <p class="motion-laser motion-experimental__status" id="feederReverseStatusL" role="status" aria-label="Corrección L sin ejecutar" data-state="idle">
-                          <span class="motion-laser__led" aria-hidden="true"></span>
-                          <span class="motion-laser__state">Sin ejecutar</span>
-                        </p>
-                      </div>
-                    </div>
-                  </section>
-                </div>
-              </fieldset>
 
             </div>
           </form>
@@ -823,37 +727,6 @@
             <button type="button" class="btn btn-secondary" id="mantCancel">Cancelar</button>
           </div>
         </div>
-      </div>
-    </div>
-  </div>
-
-  <div class="modal-overlay" id="lmSimModal" hidden role="dialog" aria-modal="true" aria-labelledby="lmSimModalTitle">
-    <div class="modal modal--wide modal--lm-sim">
-      <header class="modal__header">
-        <h2 id="lmSimModalTitle">Simulación LM Guide</h2>
-        <button type="button" class="modal__close" id="lmSimModalClose" aria-label="Cerrar">×</button>
-      </header>
-      <div class="modal__body">
-        <p class="modal__hint">
-          Perfil ASDA (0↔3000&nbsp;rpm) según posición, RPM, accel y decel.
-          Ajusta <strong>mm/rev</strong> al paso del husillo/polea para afinar el tiempo.
-        </p>
-        <div class="lm-sim__meta" id="lmSimMeta"></div>
-        <label class="modal-field lm-sim__mmrev" for="lmSimMmPerRev">mm por revolución del motor
-          <input type="number" id="lmSimMmPerRev" step="0.1" min="0.1" max="200" value="10">
-        </label>
-        <svg class="lm-sim__chart" id="lmSimChart" viewBox="0 0 560 200" role="img" aria-label="Perfil de velocidad">
-          <line class="lm-sim__axis" x1="48" y1="16" x2="48" y2="160"></line>
-          <line class="lm-sim__axis" x1="48" y1="160" x2="536" y2="160"></line>
-          <line class="lm-sim__phase" id="lmSimPhaseAcc" x1="48" y1="16" x2="48" y2="160"></line>
-          <line class="lm-sim__phase" id="lmSimPhaseDec" x1="48" y1="16" x2="48" y2="160"></line>
-          <polyline class="lm-sim__curve" id="lmSimCurve" fill="none" points="48,160"></polyline>
-          <text class="lm-sim__axis-label" x="14" y="24">rpm</text>
-          <text class="lm-sim__axis-label" x="520" y="178">t</text>
-          <text class="lm-sim__axis-label" id="lmSimTimeLabel" x="280" y="190" text-anchor="middle"></text>
-        </svg>
-        <dl class="lm-sim__stats" id="lmSimStats"></dl>
-        <p class="modal__hint" id="lmSimNote" hidden></p>
       </div>
     </div>
   </div>

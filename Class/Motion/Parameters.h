@@ -8,12 +8,14 @@
  * [C] Datos de ciclo + set_data / modelo (NVS en ESP32)
  *
  * Claves JSON (data/Motion.json) ↔ tune:
- *   feeder.R/L.profile_velocity_pps, target_position_counts
+ *   feeder.R/L.profile_velocity_pps, secondary_velocity_pps, target_position_counts
+ *   feed_stage.secondary_velocity_delay_ms, validate_encoder
  *   lmguide.pr_speed_rpm, accel_ms, decel_ms, pos_puu
  *   set_data: target_length_mm, tolerance_mm, modelo_id, measure_comp_mm
  *
  * FeedStage: timeout láser fijo PARAM_FEED_STAGE_LASER_TIMEOUT_MS;
- * velocidad de alimentación = feeder.R/L.profile_velocity_pps (mismo bloque CAN).
+ * arranca con profile_velocity_pps; tras secondary_velocity_delay_ms, si
+ * secondary_velocity_pps ≠ primaria, escribe 60FFh en caliente (PV).
  */
 
 #include <stddef.h>
@@ -42,7 +44,6 @@ static const uint32_t PARAM_BLOWER_DEFAULT_MS = 2000;
 // ── [A] Encoder OM (pines; lógica en Encoder.h / EncoderPCNT) + láser + joint ─
 
 static const uint32_t PARAM_ENC_POLL_MS = 80;
-// Filtro de glitch PCNT (ns). 5 µs; tope típico ESP32 ~12.5 µs @ APB 80 MHz.
 static const uint32_t PARAM_ENC_GLITCH_FILTER_NS = 5000;
 
 static const int PARAM_PIN_ENC_A_R = 18;
@@ -51,24 +52,29 @@ static const int PARAM_PIN_ENC_Z_R = 21;
 static const int PARAM_PIN_ENC_A_L = 22;
 static const int PARAM_PIN_ENC_B_L = 23;
 static const int PARAM_PIN_ENC_Z_L = 25;
-
 static const int   PARAM_PIN_LASER_R        = 32;
 static const int   PARAM_PIN_LASER_L        = 34;
 static const bool  PARAM_LASER_ACTIVE_HIGH  = false;
 static const int   PARAM_PIN_JOINT_R        = 12;
 static const int   PARAM_PIN_JOINT_L        = 13;
 static const bool  PARAM_JOINT_ACTIVE_HIGH  = false;
-// Debounce asimétrico: ON corto captura uniones que pasan rápido;
-// OFF más largo filtra rebote y falsos cruzados GPIO 12/13 al soltar.
 static const uint32_t PARAM_JOINT_DEBOUNCE_ON_MS  = 2;
 static const uint32_t PARAM_JOINT_DEBOUNCE_OFF_MS = 25;
+static const bool  PARAM_MATERIAL_SENSOR_ENABLE = true;
+static const int   PARAM_PIN_MATERIAL_R       = 14;
+static const int   PARAM_PIN_MATERIAL_L       = 27;
+static const bool  PARAM_MATERIAL_ACTIVE_HIGH = false;  // ON = material presente
+static const uint32_t PARAM_MATERIAL_DEBOUNCE_ON_MS  = 5;
+static const uint32_t PARAM_MATERIAL_DEBOUNCE_OFF_MS = 25;
+static const uint32_t PARAM_SENSOR_TASK_PERIOD_MS = 1;
+static const uint32_t PARAM_SENSOR_TASK_STACK     = 3072;
+static const uint8_t  PARAM_SENSOR_TASK_PRIO      = 3;
 static const int   PARAM_PIN_SAFETY         = 26;
 
 // ── [A] FeedStage (solo firmware) ─────────────────────────────────────────
 
 static const uint32_t PARAM_FEED_STAGE_LASER_TIMEOUT_MS =1000u;
 static const bool     PARAM_FEED_VALIDATE_ENCODER       = false;
-/* Diagnóstico de parada por láser: asiento de encoder + lectura corta de status. */
 static const uint32_t PARAM_LASER_STOP_SETTLE_MS   = 80u;
 static const uint32_t PARAM_LASER_STOP_STABLE_MS   = 10u;
 static const uint32_t PARAM_LASER_STOP_STATUS_MS   = 50u;
@@ -98,17 +104,18 @@ static const int8_t   PARAM_FEED_CMD_SIGN_L       = -1;
 
 static const uint32_t PARAM_FEED_TARGET_COUNTS_DEFAULT = 42500u;
 static const uint32_t PARAM_FEED_PROFILE_VEL_DEFAULT   = 42500u;
+static const uint32_t PARAM_FEED_SECONDARY_VEL_DEFAULT = PARAM_FEED_PROFILE_VEL_DEFAULT;
+static const uint32_t PARAM_FEED_SECONDARY_VEL_DELAY_MS = 200u;
 static const uint32_t PARAM_FEED_PROFILE_ACCEL_PPS2      = 800000u;
 static const uint32_t PARAM_FEED_PROFILE_DECEL_PPS2      = 800000u;
 static const int32_t  PARAM_FEED_JOG_STEP_COUNTS         = 5000;
 static const uint32_t PARAM_FEED_MAX_RPM                 = 3000u;
 static const uint8_t  PARAM_FEED_HALT_OPTION_CODE        = 2;
 static const uint32_t PARAM_FEED_HALT_DECEL_PP           = 8000000u;
-
 static const uint32_t PARAM_FEED_MAX_PPS =
     (uint32_t)((uint64_t)PARAM_FEED_MAX_RPM * PARAM_FEED_SHAFT_INC_PER_REV / 60u);
 
-/* Experimental: PV inverso por tiempo (feeder_reverse). */
+/* PV inverso por tiempo (feeder_reverse; manual / diagnóstico). */
 static const float    PARAM_FEED_REVERSE_RPM_DEFAULT = 30.0f;
 static const uint32_t PARAM_FEED_REVERSE_MS_DEFAULT  = 200u;
 static const uint32_t PARAM_FEED_REVERSE_MS_MIN      = 50u;
@@ -124,7 +131,6 @@ static const int      PARAM_PIN_MODBUS_TX         = 17;
 static const float    PARAM_LM_PR_SPEED_RPM       = 1200.0f;
 static const float    PARAM_LM_PR_SPEED_RPM_MIN   = 400.0f;
 static const float    PARAM_LM_PR_SPEED_RPM_MAX   = 3000.0f;
-// ASDA P5.020/P5.021: tiempo 0↔3000 rpm (ms). PATH usa #0=accel, #1=decel.
 static const uint16_t PARAM_LM_ACCEL_MS           = 200;
 static const uint16_t PARAM_LM_DECEL_MS           = 500;
 static const uint16_t PARAM_LM_RAMP_MS_MIN        = 1;
@@ -137,7 +143,6 @@ static const float    PARAM_LM_MOVE_TOLERANCE_MM  = 0.5f;
 static const float    PARAM_LM_HOME_TOLERANCE_MM  = 1.0f;
 static const float    PARAM_LM_HOME_MAX_TRAVEL_MM = 120.0f;
 static const uint32_t PARAM_LM_MOVE_DONE_TIMEOUT_MS = 2000;
-// Un solo intento: si Modbus/destino fallan, el error debe salir sin esperar 3×45 s.
 static const uint8_t  PARAM_LM_MOVE_MAX_ATTEMPTS  = 1;
 
 static const uint16_t PARAM_LM_HOME_TORQUE_PCT    = 10;
@@ -155,6 +160,7 @@ enum MotionSide : uint8_t { MOTION_SIDE_R = 0, MOTION_SIDE_L = 1, MOTION_SIDE_CO
 
 struct MotionFeederSideTune {
   uint32_t profileVelocityPps;
+  uint32_t secondaryVelocityPps;
   int32_t targetPositionCounts;
 };
 
@@ -169,6 +175,7 @@ struct MotionTune {
   MotionFeederSideTune feeder[MOTION_SIDE_COUNT];
   MotionLMGuideTune lmguide;
   bool validateEncoder;
+  uint32_t secondaryVelocityDelayMs;
 };
 
 // ── [C] set_data / modelo (NVS) ────────────────────────────────────────────
@@ -185,6 +192,7 @@ static inline void motionTuneSetDefaults(MotionTune* tune) {
   memset(tune, 0, sizeof(MotionTune));
   for (int i = 0; i < MOTION_SIDE_COUNT; i++) {
     tune->feeder[i].profileVelocityPps = PARAM_FEED_PROFILE_VEL_DEFAULT;
+    tune->feeder[i].secondaryVelocityPps = PARAM_FEED_SECONDARY_VEL_DEFAULT;
     tune->feeder[i].targetPositionCounts = (int32_t)PARAM_FEED_TARGET_COUNTS_DEFAULT;
   }
   tune->lmguide.prSpeedRpm = PARAM_LM_PR_SPEED_RPM;
@@ -192,6 +200,7 @@ static inline void motionTuneSetDefaults(MotionTune* tune) {
   tune->lmguide.decelMs = PARAM_LM_DECEL_MS;
   tune->lmguide.posPuu = 0;
   tune->validateEncoder = PARAM_FEED_VALIDATE_ENCODER;
+  tune->secondaryVelocityDelayMs = PARAM_FEED_SECONDARY_VEL_DELAY_MS;
 }
 
 static inline void motionDataSetDefaults(MotionData* data) {
@@ -208,6 +217,9 @@ static inline void motionDataSetDefaults(MotionData* data) {
 #define JOINT_PIN_R       PARAM_PIN_JOINT_R
 #define JOINT_PIN_L       PARAM_PIN_JOINT_L
 #define JOINT_ACTIVE_HIGH PARAM_JOINT_ACTIVE_HIGH
+#define MATERIAL_PIN_R       PARAM_PIN_MATERIAL_R
+#define MATERIAL_PIN_L       PARAM_PIN_MATERIAL_L
+#define MATERIAL_ACTIVE_HIGH PARAM_MATERIAL_ACTIVE_HIGH
 #define SAFETY_PIN        PARAM_PIN_SAFETY
 
 #define SERVO_CAN_TX_GPIO           PARAM_CAN_TX_GPIO

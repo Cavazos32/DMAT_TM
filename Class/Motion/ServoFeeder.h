@@ -237,16 +237,11 @@ static bool canSendRaw(uint32_t cobId, const uint8_t* data, uint8_t len) {
   return twai_transmit(&msg, pdMS_TO_TICKS(80)) == ESP_OK;
 }
 
-/* Descarta RX pendiente antes de un TX SDO. Sin esto, un 0x60 viejo de 0x6040
- * (Halt 0x010F) puede confirmar ReleasePv (0x000F) y dejar el eje frenado. */
 static void canFlushRxNow() {
   twai_message_t rx;
   while (twai_receive(&rx, 0) == ESP_OK) {
   }
 }
-
-/* Doble flush con quietud: cierra la ventana de ACK en vuelo que un solo
- * canFlushRxNow no ve (solape release_part + Modbus aumenta latencia RX). */
 static void canFlushRxQuiet() {
   canFlushRxNow();
   delay(2);
@@ -257,16 +252,12 @@ static bool canSdoDownload(uint8_t node, uint16_t index, uint8_t sub, const uint
   const uint32_t expectedRx = SERVO_CAN_COB_RX(node);
   const TickType_t rxTicks = pdMS_TO_TICKS(5);
 
-  // Una transmisión TWAI correcta solo confirma que el ESP32 encoló la trama.
-  // Esperar 0x60 confirma que el servo realmente aplicó la escritura.
   for (uint8_t attempt = 0; attempt < 2; attempt++) {
     canFlushRxQuiet();
     if (!canSendRaw(SERVO_CAN_COB_TX(node), data, 8)) continue;
 
     uint32_t t0 = millis();
     while (millis() - t0 < FEEDER_SDO_CONFIRM_MS) {
-      // No feederPoll/pollSerial aquí: en solape reentra release_part y puede
-      // despachar/ deferred servo_on o drenar RX de forma cruzada.
       twai_message_t rx;
       if (twai_receive(&rx, rxTicks) != ESP_OK) continue;
       if ((rx.identifier & 0x7FFu) != expectedRx || rx.data_length_code < 4) continue;
@@ -353,7 +344,6 @@ static bool canReadStatusWord(MotionSide side, uint16_t* out, uint32_t timeoutMs
   uint32_t rx_sdo_frames = 0;
   int last_cmd = -1;
   while (millis() - t0 < timeoutMs) {
-    // Sin feederPoll: evita reentrar pollSerial durante Halt/diagnóstico.
     twai_message_t rx;
     if (twai_receive(&rx, rxTicks) != ESP_OK) continue;
     uint32_t rxId = rx.identifier & 0x7FFu;
@@ -526,8 +516,6 @@ static bool feederInitBus() {
 }
 
 static bool feederStop(MotionSide side) {
-  /* PV: primero 60FFh=0. Halt (0x010F) solo si Duro — si está Suelto, 0x010F
-   * re-habilita el eje y puede retomar una velocidad residual en 60FFh. */
   uint8_t node = feederNode(side);
   bool ok = canSdoDownloadU32(node, SERVO_OD_TARGET_VELOCITY, 0, 0);
   if (gFeederServoOn && gFeederServoOn[side]) {
@@ -554,7 +542,6 @@ static bool feederServoOn(MotionSide side) {
 static bool feederServoOff(MotionSide side) {
   if (!ensureCanBus() || !gFeederReady || !gFeederReady[side]) return false;
   uint8_t node = feederNode(side);
-  /* Limpiar 60FFh antes de Suelto: evita retomar PV si algo vuelve a Enable. */
   (void)canSdoDownloadU32(node, SERVO_OD_TARGET_VELOCITY, 0, 0);
   if (!canSdoDownloadU16(node, SERVO_OD_CONTROL_WORD, 0, 0x0006)) return false;
   feederMarkServoOn(side, false);

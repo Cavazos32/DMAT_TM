@@ -2,10 +2,12 @@
   "feeder": {
     "R": {
       "profile_velocity_pps": 1667,
+      "secondary_velocity_pps": 1667,
       "target_position_counts": 42500
     },
     "L": {
       "profile_velocity_pps": 1667,
+      "secondary_velocity_pps": 1667,
       "target_position_counts": 42500
     }
   },
@@ -16,38 +18,7 @@
     "pos_puu": -9403
   },
   "feed_stage": {
-    "validate_encoder": false
-  },
-  "experimental": {
-    "R": {
-      "before_pull": {
-        "holder": false,
-        "encoder": false
-      },
-      "before_cut": {
-        "holder": true,
-        "encoder": false
-      },
-      "correction": {
-        "enabled": false,
-        "rpm": 10,
-        "ms": 80
-      }
-    },
-    "L": {
-      "before_pull": {
-        "holder": false,
-        "encoder": false
-      },
-      "before_cut": {
-        "holder": true,
-        "encoder": false
-      },
-      "correction": {
-        "enabled": false,
-        "rpm": 10,
-        "ms": 80
-      }
-    }
+    "validate_encoder": false,
+    "secondary_velocity_delay_ms": 200
   }
 }

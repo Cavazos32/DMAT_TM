@@ -146,7 +146,6 @@
   let motionPuuSign = -1;
   let motionMmRes = 0.1;
   let motionFeedShaftIncPerRev = 10000;  // DSY 6091:02
-  let lmSimMmPerRev = 10;
   let motionEncPollTimer = null;
   let motionEncPollBusy = false;
   let motionCommandInFlight = false;
@@ -425,14 +424,20 @@
   function applyState(state) {
     if (!state) return;
 
+    syncAndonCallButtons(state);
+
     const estado = state.estado || "idle";
     let bannerEstado = estado;
     const recNow = state.recovery || {};
     const recStep = String(recNow.step || "");
-    const jointWarn = !!recNow.active && recNow.kind === "joint";
+    const jointWarn =
+      !!recNow.active && (recNow.kind === "joint" || recNow.kind === "material");
     // listo = recuperación terminada: ya no es banner de error (ni texto rojo al lado).
     const recoveryErrorActive =
-      !!recNow.active && recNow.kind !== "joint" && recStep !== "listo";
+      !!recNow.active &&
+      recNow.kind !== "joint" &&
+      recNow.kind !== "material" &&
+      recStep !== "listo";
     if (state.rutina_manos) bannerEstado = "stopped";
     else if (state.rutina) bannerEstado = "manual";
     else if (jointWarn) bannerEstado = "warning";
@@ -453,8 +458,23 @@
     // Derecha: solo botón Abrir. Sin mensajes de secuencia. Aviso de manos bajo el estado.
     if (els.statusBannerDetail) {
       const handsWarn = !!state.rutina_manos && !showErrorLine;
-      els.statusBannerDetail.textContent = handsWarn ? "NO INTRODUCIR MANOS" : "";
-      els.statusBannerDetail.classList.toggle("is-warn", handsWarn);
+      let detail = handsWarn ? "NO INTRODUCIR MANOS" : "";
+      if (!detail && state.sin_material) {
+        detail = "Se requiere material en ambos lados";
+      } else if (!detail && state.poco_material && !jointWarn) {
+        detail = "Trabajando con poco material";
+      }
+      els.statusBannerDetail.textContent = detail;
+      els.statusBannerDetail.classList.toggle(
+        "is-warn",
+        handsWarn || !!state.poco_material || !!state.sin_material
+      );
+    }
+    const lowMatEl = document.getElementById("statusBannerLowMat");
+    if (lowMatEl) {
+      const showLow = !!state.poco_material && !state.sin_material;
+      lowMatEl.hidden = !showLow;
+      lowMatEl.textContent = "Trabajando con poco material";
     }
 
     const pct = Math.min(100, Math.max(0, Number(state.progreso_pct) || 0));
@@ -1008,11 +1028,16 @@
     const joint = jointCtx || null;
     syncRecoverySkipLink(step, rutina, !!joint);
     if (joint) {
-      if (step === "park" || step === "await_home") {
+      const busy = !!(joint && joint.busy);
+      if (step === "await_piece" || step === "post_cut" || step === "await_home" || step === "park") {
         const wait = recoveryPrimaryButton(
-          step === "park"
-            ? "Yendo a Park… espera"
-            : "Terminando pieza del lado correcto… espera",
+          step === "await_piece"
+            ? "Terminando pieza del lado sano… espera"
+            : step === "post_cut"
+              ? "Terminando descarga… luego Purga"
+              : step === "await_home"
+                ? "Regresando a Home… espera"
+                : "Preparando… espera",
           "btn-secondary",
           "wait"
         );
@@ -1020,45 +1045,62 @@
         els.recoveryActions.appendChild(wait);
         return;
       }
-      if (step === "operator") {
-        const busy = !!(joint && joint.busy);
+      if (step === "segregate") {
         const required = recoveryActionsGroup("required", "Siguiente");
-        const helpers = recoveryActionsGroup("helpers", "Funciones Extras");
-        const continuar = recoveryPrimaryButton(
-          "Continuar",
-          "btn-start",
-          "joint_continuar"
-        );
-        const alimentar = recoveryPrimaryButton(
-          "Alimentar",
-          "btn-secondary recovery-helper-btn",
-          "joint_alimentar"
-        );
         const liberar = recoveryPrimaryButton(
           "Liberar",
-          "btn-secondary recovery-helper-btn",
+          "btn-start",
           "joint_liberar"
         );
-        alimentar.disabled = busy;
         liberar.disabled = busy;
-        // Continuar solo cuando el poll confirme Joint Apagado en el lado afectado.
-        continuar.disabled = true;
-        required.appendChild(continuar);
-        helpers.appendChild(
-          recoveryHelperDesc("Alimentar: avanza un poco el material del lado afectado.")
-        );
-        helpers.appendChild(alimentar);
-        helpers.appendChild(
-          recoveryHelperDesc("Liberar: suelta las sujeciones para trabajar a mano.")
-        );
-        helpers.appendChild(liberar);
+        required.appendChild(liberar);
         els.recoveryActions.appendChild(required);
-        els.recoveryActions.appendChild(helpers);
+        return;
+      }
+      if (step === "classify") {
+        const required = recoveryActionsGroup("required", "Clasificación");
+        if (joint.segregateOnly) {
+          const done = recoveryPrimaryButton(
+            "Confirmar segregación",
+            "btn-start",
+            "joint_segregate_done"
+          );
+          done.disabled = busy;
+          required.appendChild(done);
+        } else {
+          const good = recoveryPrimaryButton(
+            "Pieza buena",
+            "btn-start",
+            "joint_classify_good"
+          );
+          const bad = recoveryPrimaryButton(
+            "Pieza mala",
+            "btn-secondary",
+            "joint_classify_bad"
+          );
+          good.disabled = busy;
+          bad.disabled = busy;
+          required.appendChild(good);
+          required.appendChild(bad);
+        }
+        els.recoveryActions.appendChild(required);
+        return;
+      }
+      if (step === "operator") {
+        const required = recoveryActionsGroup("required", "Siguiente");
+        const liberar = recoveryPrimaryButton(
+          "Liberar",
+          "btn-start",
+          "joint_liberar"
+        );
+        liberar.disabled = busy;
+        required.appendChild(liberar);
+        els.recoveryActions.appendChild(required);
         return;
       }
       if (step === "purga") {
         const wait = recoveryPrimaryButton(
-          "Purga Joint en curso, espera…",
+          "Usa la Purga manual…",
           "btn-secondary",
           "wait"
         );
@@ -1163,7 +1205,7 @@
     const rec = state.recovery || {};
     const active = !!rec.active;
     const step = String(rec.step || "");
-    const jointKind = rec.kind === "joint";
+    const jointKind = rec.kind === "joint" || rec.kind === "material";
     const enError = state.estado === "error" || !!state.ciclo_error;
     const code = rec.code || state.ciclo_error || "";
     const linkCom = isLinkComError(code);
@@ -1178,7 +1220,7 @@
         els.btnOpenRecovery.textContent = "Abrir";
       } else if (jointKind) {
         if (step === "listo") {
-          els.btnOpenRecovery.textContent = "Ver Joint";
+          els.btnOpenRecovery.textContent = "Ver Warning";
         } else {
           els.btnOpenRecovery.textContent = "Abrir Warning";
         }
@@ -1277,17 +1319,13 @@
       if (jointKind) {
         const side = String(rec.side || "");
         const sideLabel =
-          side === "RL"
-            ? "Right y Left"
-            : side === "L"
-              ? "Left"
-              : side === "R"
-                ? "Right"
-                : "";
+          side === "RL" ? "R y L" : side === "L" ? "L" : side === "R" ? "R" : "";
+        const warnTitle =
+          rec.kind === "material" ? "Warning Material" : "Warning Joint";
         els.recoveryModalTitle.textContent =
           viewStep === "listo"
-            ? "Joint listo"
-            : "Warning Joint" + (sideLabel ? " · " + sideLabel : "");
+            ? "Warning listo"
+            : warnTitle + (sideLabel ? " · " + sideLabel : "");
       } else {
         els.recoveryModalTitle.textContent =
           viewStep === "listo" ? "Listo" : "Recuperación";
@@ -1299,35 +1337,50 @@
     const stepGuide = String(rec.guide || "").trim();
     const errorFixed = String(rec.mensaje || "").trim();
     const jointMeta = {
+      await_piece: [
+        "Warning · Fabricación",
+        "Terminando pieza del lado sano",
+        stepGuide || "Se omite el lado afectado y se termina la pieza sana.",
+      ],
+      post_cut: [
+        "Warning · Post-corte",
+        "Conservando piezas cortadas",
+        stepGuide || "Al terminar descarga/home se abrirá la Purga.",
+      ],
+      segregate: [
+        "Warning · Segregación",
+        "Retira y segrega el material",
+        stepGuide || "Pulsa Liberar para abrir pinzas.",
+      ],
+      classify: [
+        "Warning · Clasificación",
+        "Clasifica la pieza",
+        stepGuide || "Elige Pieza buena o Pieza mala.",
+      ],
       park: [
-        "Joint · Park",
-        "Moviendo a Park",
-        stepGuide || "El eje va a posición segura. Espera sin meter las manos.",
+        "Warning · Preparación",
+        "Preparando",
+        stepGuide || "Espera.",
       ],
       await_home: [
-        "Joint · Fabricación",
-        "Terminando pieza del lado correcto",
-        stepGuide ||
-          "El lado correcto termina la pieza y regresa. Luego irá a posición segura.",
+        "Warning · Home",
+        "Regresando a Home",
+        stepGuide || "Espera la confirmación de Home.",
       ],
       operator: [
-        "Joint · Intervención",
-        "Elige una acción",
-        stepGuide ||
-          "Libera el Joint hasta Apagado. Luego pulsa Continuar para iniciar la limpieza.",
+        "Warning · Intervención",
+        "Pulsa Liberar",
+        stepGuide || "Abre pinzas para segregación.",
       ],
       purga: [
-        "Joint · Purga",
-        "NO INTRODUCIR MANOS",
-        stepGuide || "Limpieza en curso, espera.",
+        "Warning · Purga",
+        "Usa la Purga manual",
+        stepGuide || "Recupera el lado con la rutina de Purga existente.",
       ],
       listo: [
-        "Joint · Listo",
+        "Warning · Listo",
         "Listo",
-        stepGuide ||
-          (jointOrigin === "fabricate"
-            ? "Vuelve y pulsa Reanudar. La pieza del lado correcto ya quedó contada."
-            : "Vuelve y pulsa Reanudar. La pieza incompleta se reintenta desde el inicio."),
+        stepGuide || "Puedes continuar con el lado disponible.",
       ],
     };
     const stepMeta = {
@@ -1433,7 +1486,11 @@
     }
 
     const showSensors =
-      (jointKind && (viewStep === "operator" || viewStep === "park" || viewStep === "await_home")) ||
+      (jointKind &&
+        (viewStep === "segregate" ||
+          viewStep === "classify" ||
+          viewStep === "operator" ||
+          viewStep === "await_piece")) ||
       (!jointKind && (viewStep === "manguera" || viewStep === "purga_error"));
     if (els.recoveryJointLegend) {
       // Las descripciones breves van en «Funciones Extras» de las acciones.
@@ -1458,7 +1515,13 @@
       renderRecoveryActions(
         viewStep,
         jointKind
-          ? { origin: jointOrigin, side: rec.side, busy: !!rec.busy }
+          ? {
+              origin: jointOrigin,
+              side: rec.side,
+              busy: !!rec.busy,
+              segregateOnly: !!rec.segregate_only,
+              healthySide: String(rec.healthy_side || ""),
+            }
           : null,
         rutina
       );
@@ -1932,25 +1995,6 @@
     return snapped.toFixed(1);
   }
 
-  function syncExperimentalCorrectionGates() {
-    if (!els.motionTuneForm) return;
-    els.motionTuneForm.querySelectorAll("[data-exp-side]").forEach(function (sideEl) {
-      const holder = sideEl.querySelector("[data-exp-before-cut-holder]");
-      const enabled = sideEl.querySelector("[data-exp-correction-enabled]");
-      const stage = sideEl.querySelector("[data-exp-correction]");
-      const hint = sideEl.querySelector("[data-exp-correction-hint]");
-      if (!holder || !enabled) return;
-      const holderClosed = !!holder.checked;
-      if (!holderClosed && enabled.checked) {
-        enabled.checked = false;
-        motionTuneDirty = true;
-      }
-      enabled.disabled = !holderClosed;
-      if (stage) stage.classList.toggle("is-blocked", !holderClosed);
-      if (hint) hint.hidden = holderClosed;
-    });
-  }
-
   function motionFormFromTune(tune) {
     if (!els.motionTuneForm || !tune) return;
     if (motionTuneDirty) return;
@@ -1975,7 +2019,6 @@
       }
       input.value = String(val);
     });
-    syncExperimentalCorrectionGates();
     motionRefreshPuuReadout();
   }
 
@@ -2024,20 +2067,6 @@
     if (!els.motionEsp32Hint) return;
     els.motionEsp32Hint.hidden = !text;
     els.motionEsp32Hint.textContent = text || "";
-  }
-
-  function setFeederReverseStatus(side, state, label) {
-    const sideKey = String(side || "R").toUpperCase() === "L" ? "L" : "R";
-    const el = document.getElementById("feederReverseStatus" + sideKey);
-    if (!el) return;
-    const next = state || "idle";
-    el.setAttribute("data-state", next);
-    const text = el.querySelector(".motion-laser__state");
-    if (text) text.textContent = label || "Sin ejecutar";
-    el.setAttribute(
-      "aria-label",
-      "Corrección " + sideKey + " " + (label || "sin ejecutar").toLowerCase()
-    );
   }
 
   function latchLmServo(on) {
@@ -2184,6 +2213,12 @@
       fetchState();
       return;
     }
+    if (op === "lmguide_move" || op === "lmguide_move_home") {
+      const forCutAttr = btn.getAttribute("data-for-cut");
+      if (forCutAttr != null) {
+        extra.for_cut = forCutAttr === "1" || forCutAttr === "true";
+      }
+    }
     if (op === "lmguide_move") {
       const raw = (document.getElementById("lmMoveMm") || {}).value || "";
       const mm = motionSnapMm(String(raw).trim());
@@ -2208,25 +2243,6 @@
       extra.side = btn.getAttribute("data-motion-side") || "R";
       const data = await sendMotionOp(op, extra);
       if (data) pollEncoder();
-      return;
-    }
-    if (op === "feeder_reverse") {
-      extra.side = btn.getAttribute("data-motion-side") || "R";
-      const tune = motionTuneFromForm();
-      const exp = (tune && tune.experimental) || {};
-      const sideCfg = exp[extra.side] || {};
-      const corr = sideCfg.correction || {};
-      if (corr.rpm != null) extra.rpm = corr.rpm;
-      if (corr.ms != null) extra.ms = corr.ms;
-      setFeederReverseStatus(extra.side, "run", "Ejecutando…");
-      const data = await sendMotionOp(op, extra);
-      if (data && data.sent && data.command_ok === true) {
-        setFeederReverseStatus(extra.side, "done", "Terminado");
-      } else if (data && data.sent && data.command_ok === false) {
-        setFeederReverseStatus(extra.side, "error", "Error");
-      } else {
-        setFeederReverseStatus(extra.side, "error", "Sin respuesta");
-      }
       return;
     }
     if (op === "lmguide_jog") {
@@ -2255,6 +2271,9 @@
       const el = document.getElementById(side === "R" ? "encReadR" : "encReadL");
       const laserLed = document.getElementById(side === "R" ? "laserLedR" : "laserLedL");
       const jointLed = document.getElementById(side === "R" ? "jointLedR" : "jointLedL");
+      const materialLed = document.getElementById(
+        side === "R" ? "materialLedR" : "materialLedL"
+      );
       const sideData = encoder && encoder[side];
       if (el) {
         const counts = sideData && sideData.counts;
@@ -2266,6 +2285,18 @@
       }
       motionShowSensorLed(laserLed, side, "Láser", !!(sideData && sideData.laser === true));
       motionShowSensorLed(jointLed, side, "Joint", !!(sideData && sideData.joint === true));
+      // Material: ON = presente. Etiqueta distinta a Joint/Láser.
+      if (materialLed) {
+        const matOn = !!(sideData && sideData.material === true);
+        const stateEl = materialLed.querySelector(".motion-laser__state");
+        const label = matOn ? "Presente" : "Ausente";
+        materialLed.classList.toggle("is-on", matOn);
+        if (stateEl && stateEl.textContent !== label) stateEl.textContent = label;
+        materialLed.setAttribute(
+          "aria-label",
+          "Material lado " + side + (matOn ? " presente" : " ausente")
+        );
+      }
     });
   }
 
@@ -2384,8 +2415,21 @@
       joint_confirm: "Joint Confirm",
       joint_continue: "Joint Continue",
       joint_finish: "Joint Finish",
+      materialista: "Materialista",
+      tecnico: "Técnico",
+      jefe: "Jefe de grupo",
     };
     return labels[action] || action;
+  }
+
+  function syncAndonCallButtons(state) {
+    const call = String((state && state.andon_call) || "");
+    document.querySelectorAll("[data-andon-call]").forEach(function (btn) {
+      const name = btn.getAttribute("data-andon-call") || "";
+      const on = !!name && name === call;
+      btn.classList.toggle("is-active", on);
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
+    });
   }
 
   function syncCycleStepTestControls(state) {
@@ -3132,11 +3176,6 @@
       closeMantenimiento();
       return;
     }
-    const lmSimModalEsc = document.getElementById("lmSimModal");
-    if (lmSimModalEsc && !lmSimModalEsc.hidden) {
-      closeLmSimModal();
-      return;
-    }
     if (!els.parametrosModal.hidden) {
       closeParametros(true);
       return;
@@ -3230,7 +3269,10 @@
       op === "joint_retry" ||
       op === "joint_confirm" ||
       op === "joint_continue" ||
-      op === "joint_finish"
+      op === "joint_finish" ||
+      op === "joint_classify_good" ||
+      op === "joint_classify_bad" ||
+      op === "joint_segregate_done"
     ) {
       if (btn) btn.disabled = true;
       await sendAction("operacion_manual", op);
@@ -3370,14 +3412,6 @@
       if (t && t.hasAttribute && t.hasAttribute("data-motion-path")) {
         motionTuneDirty = true;
       }
-      if (
-        t &&
-        t.hasAttribute &&
-        (t.hasAttribute("data-exp-before-cut-holder") ||
-          t.hasAttribute("data-exp-correction-enabled"))
-      ) {
-        syncExperimentalCorrectionGates();
-      }
     }
     // checkbox dispara change; number/text también input
     els.motionTuneForm.addEventListener("input", markMotionTuneDirty);
@@ -3390,7 +3424,6 @@
         saveMotionTune();
       });
     }
-    syncExperimentalCorrectionGates();
   }
   if (els.motionTuneReload) {
     els.motionTuneReload.addEventListener("click", function () {
@@ -3449,301 +3482,6 @@
       lmMoveMm.value = snapped.toFixed(1);
       motionRefreshPuuReadout();
     });
-  }
-
-  const LM_SIM_RPM_REF = 3000;
-  const LM_SIM_MMREV_KEY = "dmat_lm_mm_per_rev";
-
-  function lmSimLoadMmPerRev() {
-    try {
-      const raw = localStorage.getItem(LM_SIM_MMREV_KEY);
-      const n = Number(raw);
-      if (Number.isFinite(n) && n > 0) lmSimMmPerRev = n;
-    } catch (err) {
-      /* ignore */
-    }
-    return lmSimMmPerRev;
-  }
-
-  function lmSimSaveMmPerRev(value) {
-    const n = Number(value);
-    if (!Number.isFinite(n) || n <= 0) return lmSimMmPerRev;
-    lmSimMmPerRev = Math.max(0.1, Math.min(200, n));
-    try {
-      localStorage.setItem(LM_SIM_MMREV_KEY, String(lmSimMmPerRev));
-    } catch (err) {
-      /* ignore */
-    }
-    return lmSimMmPerRev;
-  }
-
-  function lmSimFormValues() {
-    const form = els.motionTuneForm;
-    const read = function (path, fallback) {
-      if (!form) return fallback;
-      const input = form.querySelector('[data-motion-path="' + path + '"]');
-      if (!input) return fallback;
-      const n = Number(input.value);
-      return Number.isFinite(n) ? n : fallback;
-    };
-    const mmInput = document.getElementById("lmMoveMm");
-    let distanceMm = 0;
-    if (mmInput && mmInput.value.trim() !== "") {
-      const snapped = motionSnapMm(mmInput.value);
-      if (Number.isFinite(snapped)) distanceMm = Math.abs(snapped);
-    }
-    return {
-      distanceMm: distanceMm,
-      rpm: Math.max(1, read("lmguide.pr_speed_rpm", 1200)),
-      accelMs: Math.max(1, read("lmguide.accel_ms", 200)),
-      decelMs: Math.max(1, read("lmguide.decel_ms", 500)),
-      mmPerRev: lmSimLoadMmPerRev(),
-    };
-  }
-
-  function lmSimCompute(input) {
-    const dist = Math.max(0, Number(input.distanceMm) || 0);
-    const rpmCmd = Math.max(1, Math.min(LM_SIM_RPM_REF, Number(input.rpm) || 1));
-    const accelMs = Math.max(1, Number(input.accelMs) || 1);
-    const decelMs = Math.max(1, Number(input.decelMs) || 1);
-    const mmPerRev = Math.max(0.1, Number(input.mmPerRev) || 10);
-    const k = mmPerRev / 60; // mm/s por rpm
-    const a = k * (LM_SIM_RPM_REF / (accelMs / 1000)); // mm/s²
-    const d = k * (LM_SIM_RPM_REF / (decelMs / 1000)); // mm/s²
-    const vCmd = k * rpmCmd;
-    const tAccFull = (accelMs / 1000) * (rpmCmd / LM_SIM_RPM_REF);
-    const tDecFull = (decelMs / 1000) * (rpmCmd / LM_SIM_RPM_REF);
-    const sAccFull = 0.5 * vCmd * tAccFull;
-    const sDecFull = 0.5 * vCmd * tDecFull;
-
-    let profile = "trapezoid";
-    let tAcc = tAccFull;
-    let tDec = tDecFull;
-    let tCruise = 0;
-    let vPeak = vCmd;
-    let rpmPeak = rpmCmd;
-    let sAcc = sAccFull;
-    let sDec = sDecFull;
-    let sCruise = 0;
-
-    if (dist <= 0) {
-      profile = "idle";
-      tAcc = 0;
-      tDec = 0;
-      vPeak = 0;
-      rpmPeak = 0;
-      sAcc = 0;
-      sDec = 0;
-    } else if (sAccFull + sDecFull > dist) {
-      profile = "triangle";
-      const inv = 1 / (2 * a) + 1 / (2 * d);
-      vPeak = Math.sqrt(dist / inv);
-      rpmPeak = vPeak / k;
-      tAcc = vPeak / a;
-      tDec = vPeak / d;
-      tCruise = 0;
-      sAcc = 0.5 * vPeak * tAcc;
-      sDec = dist - sAcc;
-      sCruise = 0;
-    } else {
-      sCruise = dist - sAccFull - sDecFull;
-      tCruise = sCruise / vCmd;
-      sAcc = sAccFull;
-      sDec = sDecFull;
-    }
-
-    const tTotal = tAcc + tCruise + tDec;
-    return {
-      profile: profile,
-      distanceMm: dist,
-      rpmCmd: rpmCmd,
-      rpmPeak: rpmPeak,
-      accelMs: accelMs,
-      decelMs: decelMs,
-      mmPerRev: mmPerRev,
-      vPeakMms: vPeak,
-      tAcc: tAcc,
-      tCruise: tCruise,
-      tDec: tDec,
-      tTotal: tTotal,
-      sAcc: sAcc,
-      sCruise: sCruise,
-      sDec: sDec,
-    };
-  }
-
-  function lmSimFmtMs(sec) {
-    const ms = Math.round((Number(sec) || 0) * 1000);
-    if (ms >= 1000) return (ms / 1000).toFixed(2) + " s";
-    return ms + " ms";
-  }
-
-  function lmSimFmtMm(mm) {
-    return (Number(mm) || 0).toFixed(1) + " mm";
-  }
-
-  function lmSimFmtRpm(rpm) {
-    return (Number(rpm) || 0).toFixed(0) + " rpm";
-  }
-
-  function lmSimDrawChart(p) {
-    const curve = document.getElementById("lmSimCurve");
-    const phaseAcc = document.getElementById("lmSimPhaseAcc");
-    const phaseDec = document.getElementById("lmSimPhaseDec");
-    const timeLabel = document.getElementById("lmSimTimeLabel");
-    if (!curve || !p) return;
-    const x0 = 48;
-    const y0 = 160;
-    const w = 488;
-    const h = 144;
-    const xAt = function (t) {
-      if (p.tTotal <= 0) return x0;
-      return x0 + (Math.max(0, Math.min(p.tTotal, t)) / p.tTotal) * w;
-    };
-    const yAt = function (rpm) {
-      return y0 - (Math.max(0, Math.min(LM_SIM_RPM_REF, rpm)) / LM_SIM_RPM_REF) * h;
-    };
-    if (p.tTotal <= 0 || p.rpmPeak <= 0) {
-      curve.setAttribute("points", x0 + "," + y0);
-      if (phaseAcc) {
-        phaseAcc.setAttribute("x1", x0);
-        phaseAcc.setAttribute("x2", x0);
-      }
-      if (phaseDec) {
-        phaseDec.setAttribute("x1", x0);
-        phaseDec.setAttribute("x2", x0);
-      }
-      if (timeLabel) timeLabel.textContent = "";
-      return;
-    }
-    const pts = [];
-    pts.push(xAt(0).toFixed(1) + "," + yAt(0).toFixed(1));
-    pts.push(xAt(p.tAcc).toFixed(1) + "," + yAt(p.rpmPeak).toFixed(1));
-    if (p.tCruise > 1e-6) {
-      pts.push(xAt(p.tAcc + p.tCruise).toFixed(1) + "," + yAt(p.rpmPeak).toFixed(1));
-    }
-    pts.push(xAt(p.tTotal).toFixed(1) + "," + yAt(0).toFixed(1));
-    curve.setAttribute("points", pts.join(" "));
-    if (phaseAcc) {
-      const xA = xAt(p.tAcc).toFixed(1);
-      phaseAcc.setAttribute("x1", xA);
-      phaseAcc.setAttribute("x2", xA);
-    }
-    if (phaseDec) {
-      const xD = xAt(p.tAcc + p.tCruise).toFixed(1);
-      phaseDec.setAttribute("x1", xD);
-      phaseDec.setAttribute("x2", xD);
-    }
-    if (timeLabel) timeLabel.textContent = "total " + lmSimFmtMs(p.tTotal);
-  }
-
-  function lmSimRender(p) {
-    const meta = document.getElementById("lmSimMeta");
-    const stats = document.getElementById("lmSimStats");
-    const note = document.getElementById("lmSimNote");
-
-    if (meta) {
-      meta.innerHTML =
-        "<span>Distancia <strong>" +
-        lmSimFmtMm(p.distanceMm) +
-        "</strong></span>" +
-        "<span>RPM cmd <strong>" +
-        lmSimFmtRpm(p.rpmCmd) +
-        "</strong></span>" +
-        "<span>Accel <strong>" +
-        p.accelMs +
-        " ms</strong></span>" +
-        "<span>Decel <strong>" +
-        p.decelMs +
-        " ms</strong></span>" +
-        "<span>Perfil <strong>" +
-        (p.profile === "triangle"
-          ? "triángulo"
-          : p.profile === "trapezoid"
-            ? "trapecio"
-            : "—") +
-        "</strong></span>";
-    }
-
-    if (stats) {
-      const rows = [
-        ["Tiempo total", lmSimFmtMs(p.tTotal)],
-        ["Vel. pico", lmSimFmtRpm(p.rpmPeak) + " · " + (p.vPeakMms || 0).toFixed(1) + " mm/s"],
-        ["Tiempo accel", lmSimFmtMs(p.tAcc)],
-        ["Dist. accel", lmSimFmtMm(p.sAcc)],
-        ["Tiempo crucero", lmSimFmtMs(p.tCruise)],
-        ["Dist. crucero", lmSimFmtMm(p.sCruise)],
-        ["Tiempo decel", lmSimFmtMs(p.tDec)],
-        ["Dist. decel", lmSimFmtMm(p.sDec)],
-      ];
-      stats.innerHTML = rows
-        .map(function (row) {
-          return "<div><dt>" + row[0] + "</dt><dd>" + row[1] + "</dd></div>";
-        })
-        .join("");
-    }
-
-    if (note) {
-      if (p.distanceMm <= 0) {
-        note.hidden = false;
-        note.textContent =
-          "Escribe una Posición (mm) distinta de cero para calcular el recorrido.";
-      } else if (p.profile === "triangle") {
-        note.hidden = false;
-        note.textContent =
-          "El tramo es corto: no alcanza " +
-          lmSimFmtRpm(p.rpmCmd) +
-          "; pico ≈ " +
-          lmSimFmtRpm(p.rpmPeak) +
-          ".";
-      } else {
-        note.hidden = true;
-        note.textContent = "";
-      }
-    }
-
-    lmSimDrawChart(p);
-  }
-
-  function lmSimRefresh() {
-    const mmInput = document.getElementById("lmSimMmPerRev");
-    if (mmInput) lmSimSaveMmPerRev(mmInput.value);
-    const vals = lmSimFormValues();
-    vals.mmPerRev = lmSimMmPerRev;
-    lmSimRender(lmSimCompute(vals));
-  }
-
-  function openLmSimModal() {
-    const modal = document.getElementById("lmSimModal");
-    if (!modal) return;
-    const mmInput = document.getElementById("lmSimMmPerRev");
-    if (mmInput) mmInput.value = String(lmSimLoadMmPerRev());
-    modal.hidden = false;
-    lmSimRefresh();
-  }
-
-  function closeLmSimModal() {
-    const modal = document.getElementById("lmSimModal");
-    if (modal) modal.hidden = true;
-  }
-
-  const lmSimOpen = document.getElementById("lmSimOpen");
-  if (lmSimOpen) {
-    lmSimOpen.addEventListener("click", openLmSimModal);
-  }
-  const lmSimClose = document.getElementById("lmSimModalClose");
-  if (lmSimClose) {
-    lmSimClose.addEventListener("click", closeLmSimModal);
-  }
-  const lmSimModal = document.getElementById("lmSimModal");
-  if (lmSimModal) {
-    lmSimModal.addEventListener("click", function (e) {
-      if (e.target === lmSimModal) closeLmSimModal();
-    });
-  }
-  const lmSimMmInput = document.getElementById("lmSimMmPerRev");
-  if (lmSimMmInput) {
-    lmSimMmInput.addEventListener("change", lmSimRefresh);
   }
 
   if (els.motionTuneForm) {
@@ -4572,6 +4310,15 @@
       sendAction("operacion_manual", btn.dataset.action);
     });
   }
+
+  document.querySelectorAll("[data-andon-call]").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      const call = btn.getAttribute("data-andon-call");
+      if (!call) return;
+      flashButton(btn);
+      sendAction("andon", call);
+    });
+  });
 
   document.querySelectorAll("[data-pf-hold]").forEach(function (btn) {
     const side = btn.getAttribute("data-pf-hold");
