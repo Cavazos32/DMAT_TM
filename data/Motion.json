@@ -23,6 +23,6 @@
   "feed_stage": {
     "validate_encoder": false,
     "dual_speed_enable": true,
-    "speed_switch_ms": 500
+    "speed_switch_ms": 310
   }
 }

@@ -57,7 +57,7 @@ static const bool  PARAM_LASER_ACTIVE_HIGH  = false;
 static const int   PARAM_PIN_JOINT_R        = 12;
 static const int   PARAM_PIN_JOINT_L        = 13;
 static const bool  PARAM_JOINT_ACTIVE_HIGH  = false;
-static const uint32_t PARAM_JOINT_DEBOUNCE_ON_MS  = 2;
+static const uint32_t PARAM_JOINT_DEBOUNCE_ON_MS  = 25;
 static const uint32_t PARAM_JOINT_DEBOUNCE_OFF_MS = 25;
 static const bool  PARAM_MATERIAL_SENSOR_ENABLE = true;
 static const int   PARAM_PIN_MATERIAL_R       = 39;
@@ -78,6 +78,10 @@ static const bool     PARAM_FEED_VALIDATE_ENCODER       = false;
 static const bool     PARAM_FEED_DUAL_SPEED_ENABLE       = true;
 static const uint32_t PARAM_FEED_SPEED_SWITCH_MS_DEFAULT = 800u;
 static const uint32_t PARAM_FEED_SPEED_SWITCH_MS_MAX     = 15000u;
+/* Prueba Purga/ciclo: desfase de arranque R→L (no bloqueante). Probar individual no lo usa. */
+static const uint32_t PARAM_FEED_DUAL_START_SKEW_MS = 50u;
+/* Counts de encoder para dar por iniciado el movimiento (T0 V1→V2 por lado). */
+static const int32_t  PARAM_FEED_MOTION_START_COUNTS = 8;
 static const uint32_t PARAM_LASER_STOP_SETTLE_MS   = 80u;
 static const uint32_t PARAM_LASER_STOP_STABLE_MS   = 10u;
 static const uint32_t PARAM_LASER_STOP_STATUS_MS   = 50u;

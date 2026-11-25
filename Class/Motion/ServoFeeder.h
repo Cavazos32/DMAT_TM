@@ -718,6 +718,24 @@ static bool feederSetPvVelocityPair(bool useR, int32_t velR, bool useL, int32_t 
                                SERVO_OD_TARGET_VELOCITY, 0, tTxR, tTxL, tAckR, tAckL);
 }
 
+/* TX 0x60FF sin esperar confirmación (no hace flush RX). */
+static bool feederSetPvVelocityTx(MotionSide side, int32_t velocitySigned, uint32_t* tTx) {
+  uint8_t d[8];
+  canSdoPackU32(d, SERVO_OD_TARGET_VELOCITY, 0, (uint32_t)velocitySigned);
+  if (!canSendRaw(SERVO_CAN_COB_TX(feederNode(side)), d, 8)) return false;
+  if (tTx) *tTx = millis();
+  return true;
+}
+
+/* Drena RX sin bloquear y empareja confirms SDO pendientes (0x60FF por nodo). */
+static void feederVelPendService(CanSdoPending* slots, uint8_t n) {
+  if (!slots || n == 0) return;
+  twai_message_t rx;
+  while (twai_receive(&rx, 0) == ESP_OK) {
+    canSdoApplyRxToPending(slots, n, rx);
+  }
+}
+
 static bool feederReleasePv(MotionSide side) {
   return canSdoDownloadU16(feederNode(side), SERVO_OD_CONTROL_WORD, 0, 0x000F);
 }

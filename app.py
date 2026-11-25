@@ -625,16 +625,31 @@ def _feed_pv_log_rx(msg: dict) -> None:
     elif phase == "v1":
         side = str(msg.get("side") or "?")
         pps = int(msg.get("pps") or 0)
+        skew = msg.get("skew_ms")
+        skew_s = f" skew_ms={skew}" if skew is not None else ""
         line = (
             f"[FEED_PV MCU v1] side={side} ok={msg.get('ok')} "
-            f"cmd={msg.get('cmd')} {_pps_to_rpm(pps)}rpm/{pps}pps"
+            f"cmd={msg.get('cmd')} {_pps_to_rpm(pps)}rpm/{pps}pps "
+            f"t_tx={msg.get('t_tx')}{skew_s}"
+        )
+    elif phase == "move_t0":
+        line = (
+            f"[FEED_PV MCU move_t0] side={msg.get('side')} "
+            f"t_tx={msg.get('t_tx')} t0={msg.get('t0')} lag_ms={msg.get('lag_ms')} "
+            f"counts={msg.get('counts')}"
+        )
+    elif phase in ("v1_ack", "v2_ack", "v1_timeout", "v2_timeout"):
+        line = (
+            f"[FEED_PV MCU {phase}] side={msg.get('side')} ok={msg.get('ok')} "
+            f"cmd={msg.get('cmd')} t_tx={msg.get('t_tx')} t_ack={msg.get('t_ack')}"
         )
     elif phase == "v2":
         side = str(msg.get("side") or "?")
         pps = int(msg.get("pps") or 0)
         line = (
             f"[FEED_PV MCU v2] side={side} ok={msg.get('ok')} t_ms={msg.get('t_ms')} "
-            f"cmd={msg.get('cmd')} {_pps_to_rpm(pps)}rpm/{pps}pps"
+            f"cmd={msg.get('cmd')} {_pps_to_rpm(pps)}rpm/{pps}pps "
+            f"t_tx={msg.get('t_tx')} counts={msg.get('counts')}"
         )
     elif phase == "laser":
         line = (
