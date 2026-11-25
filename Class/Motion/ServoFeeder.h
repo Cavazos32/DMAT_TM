@@ -271,16 +271,136 @@ static bool canSdoDownload(uint8_t node, uint16_t index, uint8_t sub, const uint
   return false;
 }
 
+static void canSdoPackU32(uint8_t d[8], uint16_t index, uint8_t sub, uint32_t value) {
+  d[0] = 0x23;
+  d[1] = (uint8_t)(index & 0xFF);
+  d[2] = (uint8_t)(index >> 8);
+  d[3] = sub;
+  d[4] = (uint8_t)(value & 0xFF);
+  d[5] = (uint8_t)((value >> 8) & 0xFF);
+  d[6] = (uint8_t)((value >> 16) & 0xFF);
+  d[7] = (uint8_t)((value >> 24) & 0xFF);
+}
+
 static bool canSdoDownloadU32(uint8_t node, uint16_t index, uint8_t sub, uint32_t value) {
-  uint8_t d[8] = {0x23,
-                  (uint8_t)(index & 0xFF),
-                  (uint8_t)(index >> 8),
-                  sub,
-                  (uint8_t)(value & 0xFF),
-                  (uint8_t)((value >> 8) & 0xFF),
-                  (uint8_t)((value >> 16) & 0xFF),
-                  (uint8_t)((value >> 24) & 0xFF)};
+  uint8_t d[8];
+  canSdoPackU32(d, index, sub, value);
   return canSdoDownload(node, index, sub, d);
+}
+
+/* Slot de confirmación SDO pendiente (distinto por NodeID + índice + subíndice). */
+struct CanSdoPending {
+  uint8_t node;
+  uint16_t index;
+  uint8_t sub;
+  bool active;
+  bool done;
+  bool ok;
+};
+
+static void canSdoApplyRxToPending(CanSdoPending* slots, uint8_t n, const twai_message_t& rx) {
+  if (!slots || n == 0 || rx.data_length_code < 4) return;
+  const uint32_t id = rx.identifier & 0x7FFu;
+  for (uint8_t i = 0; i < n; i++) {
+    if (!slots[i].active || slots[i].done) continue;
+    if (id != SERVO_CAN_COB_RX(slots[i].node)) continue;
+    if (rx.data[1] != (uint8_t)(slots[i].index & 0xFF) ||
+        rx.data[2] != (uint8_t)(slots[i].index >> 8) || rx.data[3] != slots[i].sub)
+      continue;
+    if (rx.data[0] == 0x60) {
+      slots[i].done = true;
+      slots[i].ok = true;
+    } else if (rx.data[0] == 0x80) {
+      slots[i].done = true;
+      slots[i].ok = false;
+    }
+  }
+}
+
+/* Espera confirmaciones de varios nodos en un solo lazo RX (sin flush intermedio). */
+static bool canSdoAwaitPending(CanSdoPending* slots, uint8_t n, uint32_t timeoutMs) {
+  if (!slots || n == 0) return true;
+  const TickType_t rxTicks = pdMS_TO_TICKS(5);
+  uint32_t t0 = millis();
+  while ((uint32_t)(millis() - t0) < timeoutMs) {
+    bool allDone = true;
+    for (uint8_t i = 0; i < n; i++) {
+      if (slots[i].active && !slots[i].done) {
+        allDone = false;
+        break;
+      }
+    }
+    if (allDone) break;
+    twai_message_t rx;
+    if (twai_receive(&rx, rxTicks) != ESP_OK) continue;
+    canSdoApplyRxToPending(slots, n, rx);
+  }
+  bool ok = true;
+  for (uint8_t i = 0; i < n; i++) {
+    if (slots[i].active && !slots[i].ok) ok = false;
+  }
+  return ok;
+}
+
+/*
+ * Descarga U32 a uno o dos nodos del mismo índice/sub.
+ * Con ambos activos: TX consecutivos sin esperar entre ellos; luego confirma ambos.
+ * No reenvía un nodo ya confirmado en el reintento.
+ */
+static bool canSdoDownloadU32Pair(uint8_t nodeA, uint32_t valueA, bool useA, uint8_t nodeB,
+                                  uint32_t valueB, bool useB, uint16_t index, uint8_t sub,
+                                  uint32_t* tTxA, uint32_t* tTxB, uint32_t* tAckA,
+                                  uint32_t* tAckB) {
+  if (!useA && !useB) return true;
+  if (useA && !useB) {
+    if (tTxA) *tTxA = millis();
+    bool ok = canSdoDownloadU32(nodeA, index, sub, valueA);
+    if (tAckA) *tAckA = millis();
+    return ok;
+  }
+  if (!useA && useB) {
+    if (tTxB) *tTxB = millis();
+    bool ok = canSdoDownloadU32(nodeB, index, sub, valueB);
+    if (tAckB) *tAckB = millis();
+    return ok;
+  }
+
+  CanSdoPending slots[2] = {};
+  slots[0] = {nodeA, index, sub, true, false, false};
+  slots[1] = {nodeB, index, sub, true, false, false};
+  uint8_t dA[8], dB[8];
+  canSdoPackU32(dA, index, sub, valueA);
+  canSdoPackU32(dB, index, sub, valueB);
+
+  for (uint8_t attempt = 0; attempt < 2; attempt++) {
+    canFlushRxQuiet();
+    bool anyPending = false;
+    if (!slots[0].ok) {
+      slots[0].done = false;
+      if (canSendRaw(SERVO_CAN_COB_TX(nodeA), dA, 8)) {
+        if (tTxA) *tTxA = millis();
+        anyPending = true;
+      } else {
+        slots[0].done = true;
+        slots[0].ok = false;
+      }
+    }
+    if (!slots[1].ok) {
+      slots[1].done = false;
+      if (canSendRaw(SERVO_CAN_COB_TX(nodeB), dB, 8)) {
+        if (tTxB) *tTxB = millis();
+        anyPending = true;
+      } else {
+        slots[1].done = true;
+        slots[1].ok = false;
+      }
+    }
+    if (anyPending) (void)canSdoAwaitPending(slots, 2, FEEDER_SDO_CONFIRM_MS);
+    if (slots[0].ok && tAckA) *tAckA = millis();
+    if (slots[1].ok && tAckB) *tAckB = millis();
+    if (slots[0].ok && slots[1].ok) return true;
+  }
+  return false;
 }
 
 static bool canSdoDownloadU16(uint8_t node, uint16_t index, uint8_t sub, uint16_t value) {
@@ -587,6 +707,15 @@ static bool feederPreparePv(MotionSide side) {
 
 static bool feederSetPvVelocity(MotionSide side, int32_t velocitySigned) {
   return canSdoDownloadU32(feederNode(side), SERVO_OD_TARGET_VELOCITY, 0, (uint32_t)velocitySigned);
+}
+
+/* Consigna 0x60FF en R y/o L. Dual: TX seguido sin esperar SDO entre nodos. */
+static bool feederSetPvVelocityPair(bool useR, int32_t velR, bool useL, int32_t velL,
+                                    uint32_t* tTxR, uint32_t* tTxL, uint32_t* tAckR,
+                                    uint32_t* tAckL) {
+  return canSdoDownloadU32Pair(feederNode(MOTION_SIDE_R), (uint32_t)velR, useR,
+                               feederNode(MOTION_SIDE_L), (uint32_t)velL, useL,
+                               SERVO_OD_TARGET_VELOCITY, 0, tTxR, tTxL, tAckR, tAckL);
 }
 
 static bool feederReleasePv(MotionSide side) {
