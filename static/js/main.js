@@ -812,6 +812,20 @@
       .trim();
   }
 
+  /** Quita instrucciones embebidas: banner/caja solo muestran el fallo. */
+  function stripErrorInstructions(desc) {
+    return String(desc || "")
+      .replace(/\s*Abre el aviso para continuar\.?/gi, "")
+      .replace(/\s*Abre Purga para continuar\.?/gi, "")
+      .replace(/\s*Recuperación de unión requerida\.?/gi, "")
+      .replace(/\s*Recuperación de material requerida\.?/gi, "")
+      .replace(/\s*\(usa Iniciar o revisa fallas\)\.?/gi, "")
+      .replace(/\s*\(revisar drive o bus\)\.?/gi, "")
+      .replace(/\s{2,}/g, " ")
+      .replace(/\s+\./g, ".")
+      .trim();
+  }
+
   function parseRecoveryError(code, mensaje) {
     const raw = String(mensaje || "").trim();
     const fallbackCode = String(code || "").trim();
@@ -885,11 +899,25 @@
       if (isLinkComError(code)) {
         desc = stripLinkComSolution(desc) || desc;
       }
+      desc = stripErrorInstructions(desc) || desc;
       return "Error " + code + " " + moduleName + ": " + desc;
     }
     const items = parsed && parsed.items && parsed.items.length ? parsed.items : null;
     if (items && items.length > 1) {
-      return items.map(one).join(" · ");
+      const seen = [];
+      const lines = [];
+      items.forEach(function (it) {
+        const line = one(it);
+        const key = String((it && it.desc) || "")
+          .trim()
+          .toLowerCase();
+        // Misma descripción → no repetir el texto.
+        if (key && seen.indexOf(key) >= 0) return;
+        if (key) seen.push(key);
+        if (lines.indexOf(line) >= 0) return;
+        lines.push(line);
+      });
+      return lines.join(" · ");
     }
     return one({
       code: parsed && parsed.code,
@@ -1001,6 +1029,8 @@
     if (!els.recoverySkipLink) return;
     const show = !jointKind && recoverySkipAvailable(step, rutina);
     els.recoverySkipLink.hidden = !show;
+    const row = els.recoverySkipLink.closest(".recovery-step-row");
+    if (row) row.hidden = !show;
   }
 
   function recoveryActionsGroup(kind, label) {
@@ -1013,13 +1043,6 @@
       group.appendChild(title);
     }
     return group;
-  }
-
-  function recoveryHelperDesc(text) {
-    const p = document.createElement("p");
-    p.className = "recovery-helper-desc";
-    p.textContent = text;
-    return p;
   }
 
   function renderRecoveryActions(step, jointCtx, rutina) {
@@ -1151,11 +1174,6 @@
         "safe_zone"
       );
       safe.disabled = busy;
-      helpers.appendChild(
-        recoveryHelperDesc(
-          "Zona segura: lleva el eje a posición segura y abre las sujeciones para retirar material."
-        )
-      );
       helpers.appendChild(safe);
       els.recoveryActions.appendChild(required);
       els.recoveryActions.appendChild(helpers);
@@ -1332,115 +1350,30 @@
       }
     }
 
-    const limitErr = code === "E094" || code === "E097";
     const jointOrigin = String(rec.origin || "");
-    const stepGuide = String(rec.guide || "").trim();
     const errorFixed = String(rec.mensaje || "").trim();
-    const jointMeta = {
-      await_piece: [
-        "Warning · Fabricación",
-        "Terminando pieza del lado sano",
-        stepGuide || "Se omite el lado afectado y se termina la pieza sana.",
-      ],
-      post_cut: [
-        "Warning · Post-corte",
-        "Conservando piezas cortadas",
-        stepGuide || "Al terminar descarga/home se abrirá la Purga.",
-      ],
-      segregate: [
-        "Warning · Segregación",
-        "Retira y segrega el material",
-        stepGuide || "Pulsa Liberar para abrir pinzas.",
-      ],
-      classify: [
-        "Warning · Clasificación",
-        "Clasifica la pieza",
-        stepGuide || "Elige Pieza buena o Pieza mala.",
-      ],
-      park: [
-        "Warning · Preparación",
-        "Preparando",
-        stepGuide || "Espera.",
-      ],
-      await_home: [
-        "Warning · Home",
-        "Regresando a Home",
-        stepGuide || "Espera la confirmación de Home.",
-      ],
-      operator: [
-        "Warning · Intervención",
-        "Pulsa Liberar",
-        stepGuide || "Abre pinzas para segregación.",
-      ],
-      purga: [
-        "Warning · Purga",
-        "Usa la Purga manual",
-        stepGuide || "Recupera el lado con la rutina de Purga existente.",
-      ],
-      listo: [
-        "Warning · Listo",
-        "Listo",
-        stepGuide || "Puedes continuar con el lado disponible.",
-      ],
-    };
-    const stepMeta = {
-      error: [
-        "Paso 1 de 5",
-        limitErr ? "Sensor límite PreAlimentador" : "Error activo",
-        stepGuide ||
-          (limitErr
-            ? "Revisa el PreAlimentador y deja holgura. Cuando el límite se libere, pulsa Reset."
-            : "Pulsa Reset para soltar la pieza. Luego sigue los pasos."),
-      ],
-      piezas: [
-        "Paso 2 de 5",
-        "Revisa las piezas",
-        stepGuide || "Confirma que las piezas están bien.",
-      ],
-      manguera: [
-        "Paso 3 de 5",
-        "Sensores láser",
-        stepGuide ||
-          "Retira el material hasta apagar ambos sensores láser. Cuando digan Apagado, pulsa Confirmar.",
-      ],
-      purga: [
-        "Paso 4 de 5",
-        "NO INTRODUCIR MANOS",
-        "",
-      ],
-      purga_error: [
-        "Paso 4 de 5",
-        "Error en purga",
-        stepGuide || "Revisa el material y pulsa Retry.",
-      ],
-      listo: [
-        "Paso 5 de 5",
-        "Listo",
-        stepGuide ||
-          "Vuelve a la pantalla principal y pulsa Reanudar. Esta pieza no suma al contador.",
-      ],
-    };
-    const meta = jointKind
-      ? jointMeta[viewStep] || jointMeta.operator
-      : stepMeta[viewStep] || stepMeta.error;
-    if (els.recoveryStepLabel) els.recoveryStepLabel.textContent = meta[0];
+    const stepGuide = String(rec.guide || "").trim();
+    // Caja = solo error. Guía = apartado INSTRUCCIONES. Sin "Paso X de Y".
+    if (els.recoveryStepLabel) {
+      els.recoveryStepLabel.hidden = true;
+      els.recoveryStepLabel.textContent = "";
+    }
     if (els.recoveryLead) {
-      els.recoveryLead.hidden = !meta[1];
-      els.recoveryLead.textContent = meta[1] || "";
-      els.recoveryLead.classList.toggle("is-hands-warn", viewStep === "purga");
+      const showHandsWarn = !jointKind && viewStep === "purga";
+      els.recoveryLead.hidden = !showHandsWarn;
+      els.recoveryLead.textContent = showHandsWarn ? "NO INTRODUCIR MANOS" : "";
+      els.recoveryLead.classList.toggle("is-hands-warn", showHandsWarn);
     }
     if (els.recoveryText) {
-      // Limpieza automática: solo aviso + espera; sin bloque INSTRUCCIONES.
-      const hideInstructions = !jointKind && viewStep === "purga";
-      const detail = hideInstructions ? "" : stepGuide || meta[2] || "";
-      if (hideInstructions || !detail) {
+      // Apartado de instrucciones: solo recovery.guide (nunca mezclado con el error).
+      if (!stepGuide || (!jointKind && viewStep === "purga")) {
         els.recoveryText.hidden = true;
         els.recoveryText.textContent = "";
         els.recoveryText.classList.remove("is-hands-warn");
       } else {
         els.recoveryText.hidden = false;
         els.recoveryText.innerHTML =
-          '<span class="recovery-text__label">INSTRUCCIONES:</span> ' + detail;
+          '<span class="recovery-text__label">INSTRUCCIONES:</span> ' + stepGuide;
         els.recoveryText.classList.toggle(
           "is-hands-warn",
           !!(jointKind && viewStep === "park")
@@ -2137,6 +2070,35 @@
     }
   }
 
+  function clampFeedSecondaryInForm() {
+    if (!els.motionTuneForm) return;
+    ["R", "L"].forEach(function (side) {
+      const pri = els.motionTuneForm.querySelector(
+        '[data-motion-path="feeder.' + side + '.profile_velocity_pps"]'
+      );
+      const sec = els.motionTuneForm.querySelector(
+        '[data-motion-path="feeder.' + side + '.secondary_velocity_pps"]'
+      );
+      if (!pri || !sec) return;
+      const p = Number(pri.value);
+      const s = Number(sec.value);
+      if (!Number.isFinite(p) || !Number.isFinite(s)) return;
+      if (s > p) sec.value = String(p);
+      if (p > 3000) pri.value = "3000";
+      if (Number(sec.value) > 3000) sec.value = "3000";
+      if (p < 0) pri.value = "0";
+      if (Number(sec.value) < 0) sec.value = "0";
+    });
+    const sw = els.motionTuneForm.querySelector(
+      '[data-motion-path="feed_stage.speed_switch_ms"]'
+    );
+    if (sw) {
+      let ms = Number(sw.value);
+      if (!Number.isFinite(ms) || ms < 0) sw.value = "0";
+      else if (ms > 15000) sw.value = "15000";
+    }
+  }
+
   async function saveMotionTune(ev) {
     if (ev && ev.preventDefault) ev.preventDefault();
     const lmInput = document.getElementById("lmMoveMm");
@@ -2147,6 +2109,7 @@
         motionRefreshPuuReadout();
       }
     }
+    clampFeedSecondaryInForm();
     const tune = motionTuneFromForm();
     try {
       const res = await fetch("/api/motion/tune", {
@@ -3725,7 +3688,6 @@
       const sen = (block && block.sensors) || {};
       pfPaintSensor(document.getElementById("pfCyl" + side), !!sen.cylinder, true);
       pfPaintSensor(document.getElementById("pfHolg" + side), !!sen.holgura, false);
-      pfPaintSensor(document.getElementById("pfLim" + side), !!sen.limit, true);
       if (block && block.cfg) tuneFromMaster[side] = block.cfg;
     });
     // No pisar valores que el operador está editando o aún no guardó.

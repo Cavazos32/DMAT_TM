@@ -1,12 +1,12 @@
 ---
-description: Cortadora de tubo — Firmware y lógica de control (rules.md v0.6)
+description: Cortadora de tubo — Firmware y lógica de control (rules.md v0.7)
 alwaysApply: true
 ---
 
 # rules.md
 # Cortadora de tubo — Firmware y lógica de control
 
-**Estado del documento:** Borrador — v0.6  
+**Estado del documento:** Borrador — v0.7  
 **Proyecto:** Cortadora de tubo dual / espejo  
 **Requisito principal:** Tolerancia de corte de ±2 mm por lado  
 **Alcance:** Firmware, responsabilidades de los MCU, secuencias de control, comunicación y reglas de desarrollo de software.
@@ -165,9 +165,10 @@ Secuencia por lado:
 1. Activar el servo CAN correspondiente.
 2. Alimentar el tubo.
 3. Monitorear el láser correspondiente.
-4. Cuando el láser de ese lado se active:
-   - Detener inmediatamente el servo correspondiente.
-   - Leer el encoder correspondiente.
+4. Láser de ese lado:
+   - Si ya está ON al arrancar una alimentación normal, el material está en posición. Ese lado no se mueve. R y L usan la misma regla.
+   - Si está OFF, el primer ON detiene el servo y se lee el encoder.
+   - En la alimentación en paralelo tras el corte, el ON heredado es el borde ya usado: se espera OFF y el ON siguiente. La cuenta de ese tramo parte de cero al ver el OFF.
 5. Comparar la medición del encoder contra la longitud objetivo común.
 6. Validar la medición con la tolerancia de ±2 mm correspondiente a ese lado.
 
@@ -227,7 +228,9 @@ La siguiente es la secuencia definida hasta el momento.
 ## 4.1 Estado inicial
 
 - La máquina recibe la orden Start.
-- Comienza la secuencia automática.
+- El LM Guide va primero a home absoluto.
+- Después comienza la secuencia automática.
+- Si el ciclo es de ambos lados, los dos láseres tienen que estar ON para trabajar R y L.
 
 ## 4.2 Activación de Holder y Encoder
 
@@ -241,10 +244,10 @@ Ambas salidas deben activarse juntas.
 
 1. Iniciar la alimentación de L y R mediante sus respectivos servos CAN.
 2. Monitorear ambos láseres.
-3. Cuando el láser de un lado se active:
-   - Detener inmediatamente el servo de ese lado.
-   - Leer el encoder de ese lado.
-   - Validar la longitud de ese lado.
+3. Láser de ese lado, con la misma regla del Bloque 1:
+   - ON al arrancar la alimentación normal: material en posición, ese lado no alimenta.
+   - OFF al arrancar: el primer ON detiene, lee el encoder y valida.
+   - En el paralelo tras el corte, el ON heredado no cuenta: OFF y después el ON nuevo.
 4. Mantener el otro lado en su proceso de alimentación si todavía no ha terminado.
 5. Continuar únicamente cuando ambos lados hayan validado correctamente.
 
@@ -278,6 +281,8 @@ Los lados trabajan con la misma longitud objetivo y se espera que terminen en co
 4. Transcurridos los 50 ms, desactivar Cutter R y Cutter L.
 5. Esperar 100 ms.
 
+Al confirmar los cortadores apagados, si hay otra pieza, arranca el Bloque 1 de la siguiente (holder, encoder y alimentación) en paralelo con esta espera, la descarga, la liberación de pinzas y el ReleasePart. El láser de esa alimentación usa el flanco descrito en el Bloque 1: el ON de la pieza que se acaba de cortar no cuenta.
+
 ## 4.7 Descarga de la pieza
 
 1. Mover el LM Guide a la posición de descarga.
@@ -285,7 +290,7 @@ Los lados trabajan con la misma longitud objetivo y se espera que terminen en co
 3. Desactivar Grippers Dual.
 4. Esperar 100 ms.
 
-La liberación del gripper es la condición de referencia para iniciar la siguiente alimentación cuando se habilite el funcionamiento en paralelo.
+La alimentación de la siguiente pieza ya puede estar en curso desde que se apagaron los cortadores. La liberación del gripper no es el disparo de esa alimentación.
 
 ## 4.8 ReleasePart — despeje, home y blower
 
@@ -487,11 +492,13 @@ La máquina requerirá eventualmente rutas especiales de ejecución.
 
 Requisito identificado:
 
-Al llegar a la etapa de apertura/liberación de pinzas, se podrá iniciar nuevamente la acción del Bloque 1 en paralelo con la continuación de la secuencia existente.
+Al apagarse los cortadores de la pieza en curso, se inicia nuevamente la acción del Bloque 1 en paralelo con la espera posterior al corte, la descarga, la liberación de pinzas y el ReleasePart.
+
+Para volver al comportamiento anterior: el solape arrancaba al liberar las pinzas en el depósito y el feed solo corría con ReleasePart. El láser ON al inicio de FeedStage cerraba ese lado de inmediato. Los puntos de código están marcados con `REVERTIR`.
 
 Comportamiento esperado:
 
-- La condición que habilita esta repetición todavía debe definirse.
+- La repetición se habilita cuando hay otra pieza y los cortadores de la pieza en curso ya se apagaron.
 - La acción de alimentación debe comenzar desde el paso inicial del Bloque 1.
 - La ejecución debe continuar hasta que el Bloque 1 complete y valide correctamente ambos lados.
 - Esta ejecución debe integrarse en la secuencia existente.
@@ -501,7 +508,7 @@ Comportamiento esperado:
 - Reutilizar las acciones y parámetros existentes.
 - Mantener la sincronización necesaria antes de ejecutar una etapa que requiera que ambos bloques estén completos.
 
-La implementación exacta de la concurrencia y el punto de sincronización se definirá cuando se especifique la condición de repetición.
+La pieza siguiente espera, antes de pinzas y corte, a que ese Bloque 1 haya validado ambos lados.
 
 # 9. Alcance actual
 
@@ -531,7 +538,7 @@ La siguiente información debe aclararse antes de cerrar la especificación del 
 - Comandos Modbus y forma de confirmar la llegada a posición.
 - Comportamiento exacto de los servos ante error.
 - Detalle de la detección del láser y condiciones eléctricas.
-- Condición de repetición del Bloque 1 durante la liberación de pinzas.
+- Polaridad eléctrica del láser. El flanco de alimentación ya está definido: ON heredado no cuenta; vale el OFF y el ON siguiente.
 
 ## PLC
 
@@ -560,7 +567,7 @@ Queda pendiente definir el protocolo e intercambio de estados con el MCU que coo
 - Definir qué salidas se conservan y cuáles se desactivan durante cada tipo de pausa.
 - Definir las condiciones exactas de restablecimiento y el tiempo de espera aplicable antes de aceptar que el error desapareció.
 - Definir la condición de finalización del ciclo cuando el blower y el regreso a home concluyen en momentos distintos.
-- Definir el detalle de la condición que habilita la siguiente alimentación en paralelo.
+- La siguiente alimentación en paralelo arranca al apagar los cortadores, si hay otra pieza.
 
 # 11. Principio de desarrollo del proyecto
 

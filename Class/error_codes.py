@@ -2,13 +2,18 @@
 Catálogo único de errores de la aplicación / orquestador.
 
 Formato visible (obligatorio): Error E000 Módulo: descripción
+
+La descripción del catálogo es solo el fallo. Las acciones de operador van en
+INSTRUCTIONS (apartado de instrucciones / recovery.guide), no en banner ni en
+la caja de error.
 """
 
 from __future__ import annotations
 
-from typing import Any
+import re
+from typing import Any, Iterable
 
-# code -> (module, description template)
+# code -> (module, description template) — solo el error, sin instrucciones.
 CATALOG: dict[str, tuple[str, str]] = {
     "E000": ("Sistema", "Error desconocido."),
     "E001": ("Orquestador", "No se puede alimentar: holder y encoder deben estar activos (paso 2)."),
@@ -45,18 +50,18 @@ CATALOG: dict[str, tuple[str, str]] = {
     "E041": ("Motion", "No hay puerto seleccionado."),
     "E042": ("Motion", "El puerto seleccionado no es el MCU Motion."),
     "E043": ("Motion", "El puerto no respondió."),
-    "E044": ("Motion", "LM Guide: el movimiento no se validó en destino (revisar drive o bus)."),
+    "E044": ("Motion", "LM Guide: el movimiento no se validó en destino."),
     "E045": ("Motion", "Alimentación interrumpida (Stop u orden feeder_stop)."),
     "E046": (
         "Orquestador",
         "No se puede limpiar el error: falla del PLC, seguridad en Motion, falla de campo del PreAlimentador o enlace sin respuesta estable.",
     ),
-    "E050": ("Motion", "Joint Right detectado. Recuperación de unión requerida."),
-    "E051": ("Motion", "Joint Left detectado. Recuperación de unión requerida."),
-    "E052": ("Motion", "Joint Right y Left detectados. Recuperación de unión requerida."),
-    "E053": ("Motion", "Material terminado — lado R. Recuperación de material requerida."),
-    "E054": ("Motion", "Material terminado — lado L. Recuperación de material requerida."),
-    "E055": ("Motion", "Material terminado — lados R y L. Recuperación de material requerida."),
+    "E050": ("Motion", "Joint Right detectado."),
+    "E051": ("Motion", "Joint Left detectado."),
+    "E052": ("Motion", "Joint Right y Left detectados."),
+    "E053": ("Motion", "Material terminado — lado R."),
+    "E054": ("Motion", "Material terminado — lado L."),
+    "E055": ("Motion", "Material terminado — lados R y L."),
     "E070": ("Andon", "No hay puerto seleccionado."),
     "E071": ("Andon", "El puerto seleccionado no es el MCU Andon."),
     "E072": ("Andon", "El puerto no respondió."),
@@ -64,19 +69,31 @@ CATALOG: dict[str, tuple[str, str]] = {
     "E091": ("PreAlimentador", "El puerto seleccionado no es el maestro PreAlimentador."),
     "E092": ("PreAlimentador", "El puerto no respondió."),
     "E093": ("PreAlimentador", "Falla de cilindro en el lado L."),
-    "E094": (
+    "E095": (
         "PreAlimentador",
-        "Sensor límite L activo. Revisa el PreAlimentador y deja holgura adecuada para trabajar. Puedes usar JOG L (HMI o botón) para reposicionar.",
+        "Holgura L: sensor OFF sin movimiento del feeder, o sin recuperar en el tiempo configurado.",
     ),
-    "E095": ("PreAlimentador", "Falla de holgura en el lado L."),
     "E096": ("PreAlimentador", "Falla de cilindro en el lado R."),
-    "E097": (
+    "E098": (
         "PreAlimentador",
-        "Sensor límite R activo. Revisa el PreAlimentador y deja holgura adecuada para trabajar. Puedes usar JOG R (HMI o botón) para reposicionar.",
+        "Holgura R: sensor OFF sin movimiento del feeder, o sin recuperar en el tiempo configurado.",
     ),
-    "E098": ("PreAlimentador", "Falla de holgura en el lado R."),
-    "E099": ("PreAlimentador", "No está listo ni estabilizado (usa Iniciar o revisa fallas)."),
+    "E099": ("PreAlimentador", "No está listo ni estabilizado."),
 }
+
+# Acciones de operador: solo apartado de instrucciones (recovery.guide), nunca banner/caja.
+INSTRUCTIONS: dict[str, str] = {
+    "E044": "Revisa el drive o el bus Modbus del LM Guide.",
+    "E050": "Recuperación de unión requerida.",
+    "E051": "Recuperación de unión requerida.",
+    "E052": "Recuperación de unión requerida.",
+    "E053": "Recuperación de material requerida.",
+    "E054": "Recuperación de material requerida.",
+    "E055": "Recuperación de material requerida.",
+    "E099": "Usa Iniciar o revisa fallas.",
+}
+
+_CODE_RE = re.compile(r"\bE\d{3}\b", re.IGNORECASE)
 
 FEED_STAGE_TO_CODE: dict[str, str] = {
     "ok": "",
@@ -112,10 +129,8 @@ PLC_FAULT_FIELDS: tuple[tuple[str, str], ...] = (
 PFEEDER_FAULT_MAP: dict[tuple[str, int], str] = {
     ("L", 3): "E093",
     ("L", 6): "E095",
-    ("L", 7): "E094",
     ("R", 3): "E096",
     ("R", 6): "E098",
-    ("R", 7): "E097",
 }
 
 
@@ -127,6 +142,78 @@ def format_message(code: str, **kwargs: Any) -> str:
         except (KeyError, ValueError):
             pass
     return f"Error {code} {module}: {text}"
+
+
+def codes_from_text(text: str) -> list[str]:
+    """Códigos E0xx únicos en orden de aparición."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for m in _CODE_RE.findall(str(text or "")):
+        code = m.upper()
+        if code in seen:
+            continue
+        seen.add(code)
+        out.append(code)
+    return out
+
+
+def format_messages(codes: Iterable[str], **kwargs: Any) -> str:
+    """Une varios errores; no repite la misma descripción."""
+    ordered: list[str] = []
+    seen_code: set[str] = set()
+    for raw in codes:
+        code = str(raw or "").strip().upper()
+        if not code or code in seen_code:
+            continue
+        seen_code.add(code)
+        ordered.append(code)
+    if not ordered:
+        return format_message("E000", **kwargs)
+    if len(ordered) == 1:
+        return format_message(ordered[0], **kwargs)
+
+    lines: list[str] = []
+    seen_desc: set[str] = set()
+    for code in ordered:
+        module, text = CATALOG.get(code, CATALOG["E000"])
+        if kwargs:
+            try:
+                text = text.format(**kwargs)
+            except (KeyError, ValueError):
+                pass
+        key = text.strip().lower()
+        if key in seen_desc:
+            continue
+        seen_desc.add(key)
+        lines.append(f"Error {code} {module}: {text}")
+    return " · ".join(lines) if lines else format_message(ordered[0], **kwargs)
+
+
+def format_instructions(codes: Iterable[str]) -> str:
+    """Texto único para el apartado de instrucciones (sin repetir lo mismo)."""
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for raw in codes:
+        code = str(raw or "").strip().upper()
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        ordered.append(code)
+    if not ordered:
+        return ""
+
+    texts: list[str] = []
+    seen_text: set[str] = set()
+    for code in ordered:
+        text = str(INSTRUCTIONS.get(code) or "").strip()
+        if not text:
+            continue
+        key = text.lower()
+        if key in seen_text:
+            continue
+        seen_text.add(key)
+        texts.append(text)
+    return " ".join(texts)
 
 
 def feed_stage_code(detail: str) -> str:
@@ -186,6 +273,11 @@ def prefeeder_fault_messages(status: dict | None) -> list[str]:
 
 def catalog_for_api() -> dict[str, dict[str, str]]:
     return {
-        code: {"module": mod, "description": desc, "label": format_message(code)}
+        code: {
+            "module": mod,
+            "description": desc,
+            "label": format_message(code),
+            "instructions": INSTRUCTIONS.get(code, ""),
+        }
         for code, (mod, desc) in CATALOG.items()
     }

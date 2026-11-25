@@ -1,24 +1,28 @@
 {
   "feeder": {
     "R": {
-      "profile_velocity_pps": 1667,
-      "secondary_velocity_pps": 1667,
+      "profile_velocity_pps": 10000,
+      "secondary_velocity_pps": 833,
       "target_position_counts": 42500
     },
     "L": {
-      "profile_velocity_pps": 1667,
-      "secondary_velocity_pps": 1667,
+      "profile_velocity_pps": 10000,
+      "secondary_velocity_pps": 833,
       "target_position_counts": 42500
     }
   },
   "lmguide": {
     "pr_speed_rpm": 1200.0,
     "accel_ms": 150,
-    "decel_ms": 1500,
-    "pos_puu": -9403
+    "decel_ms": 1200,
+    "travel_pr_speed_rpm": 3000.0,
+    "travel_accel_ms": 100,
+    "travel_decel_ms": 300,
+    "pos_puu": -4379
   },
   "feed_stage": {
     "validate_encoder": false,
-    "secondary_velocity_delay_ms": 200
+    "dual_speed_enable": true,
+    "speed_switch_ms": 500
   }
 }

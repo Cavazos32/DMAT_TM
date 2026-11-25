@@ -7,7 +7,6 @@ enum SystemFault : uint8_t {
   FAULT_NONE = 0,
   FAULT_CYLINDER = 3,
   FAULT_HOLGURA = 6,
-  FAULT_LIMIT = 7,
 };
 
 // Estado que ve el maestro. Error gana sobre busy.
@@ -37,7 +36,6 @@ static inline const char* pfFaultName(SystemFault fault) {
   switch (fault) {
     case FAULT_CYLINDER: return "Cilindro";
     case FAULT_HOLGURA: return "Holgura";
-    case FAULT_LIMIT: return "Limite";
     default: return "";
   }
 }

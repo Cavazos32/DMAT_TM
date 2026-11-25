@@ -9,13 +9,12 @@
  *
  * Claves JSON (data/Motion.json) ↔ tune:
  *   feeder.R/L.profile_velocity_pps, secondary_velocity_pps, target_position_counts
- *   feed_stage.secondary_velocity_delay_ms, validate_encoder
+ *   feed_stage.validate_encoder, dual_speed_enable, speed_switch_ms
  *   lmguide.pr_speed_rpm, accel_ms, decel_ms, pos_puu
  *   set_data: target_length_mm, tolerance_mm, modelo_id, measure_comp_mm
  *
- * FeedStage: timeout láser fijo PARAM_FEED_STAGE_LASER_TIMEOUT_MS;
- * arranca con profile_velocity_pps; tras secondary_velocity_delay_ms, si
- * secondary_velocity_pps ≠ primaria, escribe 60FFh en caliente (PV).
+ * FeedStage (PV): velocidad primaria por lado; opcional secundaria tras
+ * speed_switch_ms si dual_speed_enable. Paro en su láser.
  */
 
 #include <stddef.h>
@@ -61,8 +60,8 @@ static const bool  PARAM_JOINT_ACTIVE_HIGH  = false;
 static const uint32_t PARAM_JOINT_DEBOUNCE_ON_MS  = 2;
 static const uint32_t PARAM_JOINT_DEBOUNCE_OFF_MS = 25;
 static const bool  PARAM_MATERIAL_SENSOR_ENABLE = true;
-static const int   PARAM_PIN_MATERIAL_R       = 14;
-static const int   PARAM_PIN_MATERIAL_L       = 27;
+static const int   PARAM_PIN_MATERIAL_R       = 39;
+static const int   PARAM_PIN_MATERIAL_L       = 36;
 static const bool  PARAM_MATERIAL_ACTIVE_HIGH = false;  // ON = material presente
 static const uint32_t PARAM_MATERIAL_DEBOUNCE_ON_MS  = 5;
 static const uint32_t PARAM_MATERIAL_DEBOUNCE_OFF_MS = 25;
@@ -73,8 +72,12 @@ static const int   PARAM_PIN_SAFETY         = 26;
 
 // ── [A] FeedStage (solo firmware) ─────────────────────────────────────────
 
-static const uint32_t PARAM_FEED_STAGE_LASER_TIMEOUT_MS =1000u;
+/* Alimentación real ~1.5–2 s a Vel típica; 1 s cortaba el ciclo a mitad. */
+static const uint32_t PARAM_FEED_STAGE_LASER_TIMEOUT_MS = 15000u;
 static const bool     PARAM_FEED_VALIDATE_ENCODER       = false;
+static const bool     PARAM_FEED_DUAL_SPEED_ENABLE       = true;
+static const uint32_t PARAM_FEED_SPEED_SWITCH_MS_DEFAULT = 800u;
+static const uint32_t PARAM_FEED_SPEED_SWITCH_MS_MAX     = 15000u;
 static const uint32_t PARAM_LASER_STOP_SETTLE_MS   = 80u;
 static const uint32_t PARAM_LASER_STOP_STABLE_MS   = 10u;
 static const uint32_t PARAM_LASER_STOP_STATUS_MS   = 50u;
@@ -104,8 +107,6 @@ static const int8_t   PARAM_FEED_CMD_SIGN_L       = -1;
 
 static const uint32_t PARAM_FEED_TARGET_COUNTS_DEFAULT = 42500u;
 static const uint32_t PARAM_FEED_PROFILE_VEL_DEFAULT   = 42500u;
-static const uint32_t PARAM_FEED_SECONDARY_VEL_DEFAULT = PARAM_FEED_PROFILE_VEL_DEFAULT;
-static const uint32_t PARAM_FEED_SECONDARY_VEL_DELAY_MS = 200u;
 static const uint32_t PARAM_FEED_PROFILE_ACCEL_PPS2      = 800000u;
 static const uint32_t PARAM_FEED_PROFILE_DECEL_PPS2      = 800000u;
 static const int32_t  PARAM_FEED_JOG_STEP_COUNTS         = 5000;
@@ -175,7 +176,8 @@ struct MotionTune {
   MotionFeederSideTune feeder[MOTION_SIDE_COUNT];
   MotionLMGuideTune lmguide;
   bool validateEncoder;
-  uint32_t secondaryVelocityDelayMs;
+  bool dualSpeedEnable;
+  uint32_t speedSwitchMs;
 };
 
 // ── [C] set_data / modelo (NVS) ────────────────────────────────────────────
@@ -192,7 +194,7 @@ static inline void motionTuneSetDefaults(MotionTune* tune) {
   memset(tune, 0, sizeof(MotionTune));
   for (int i = 0; i < MOTION_SIDE_COUNT; i++) {
     tune->feeder[i].profileVelocityPps = PARAM_FEED_PROFILE_VEL_DEFAULT;
-    tune->feeder[i].secondaryVelocityPps = PARAM_FEED_SECONDARY_VEL_DEFAULT;
+    tune->feeder[i].secondaryVelocityPps = PARAM_FEED_PROFILE_VEL_DEFAULT;
     tune->feeder[i].targetPositionCounts = (int32_t)PARAM_FEED_TARGET_COUNTS_DEFAULT;
   }
   tune->lmguide.prSpeedRpm = PARAM_LM_PR_SPEED_RPM;
@@ -200,7 +202,8 @@ static inline void motionTuneSetDefaults(MotionTune* tune) {
   tune->lmguide.decelMs = PARAM_LM_DECEL_MS;
   tune->lmguide.posPuu = 0;
   tune->validateEncoder = PARAM_FEED_VALIDATE_ENCODER;
-  tune->secondaryVelocityDelayMs = PARAM_FEED_SECONDARY_VEL_DELAY_MS;
+  tune->dualSpeedEnable = PARAM_FEED_DUAL_SPEED_ENABLE;
+  tune->speedSwitchMs = PARAM_FEED_SPEED_SWITCH_MS_DEFAULT;
 }
 
 static inline void motionDataSetDefaults(MotionData* data) {

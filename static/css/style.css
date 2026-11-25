@@ -1915,15 +1915,19 @@ html[data-theme="light"] body {
   min-width: 0;
 }
 
+.feeder-dual-enable {
+  margin: 0 0 0.45rem;
+}
+
 .feeder-cut-layout {
   display: grid;
-  grid-template-columns: minmax(4.5rem, 7.5rem) minmax(4.5rem, 7rem) minmax(4.75rem, 6.5rem) 4.75rem;
+  grid-template-columns: minmax(4.5rem, 7rem) minmax(4.5rem, 7rem) 4.75rem 4.75rem;
   grid-template-areas:
     "title-r title-r title-r ."
     "vel-r   vel2-r  test-r  cut"
     "title-l title-l title-l cut"
     "vel-l   vel2-l  test-l  cut"
-    "delay   delay   delay   .";
+    "switch  switch  switch  cut";
   column-gap: 0.45rem;
   row-gap: 0.25rem;
   align-items: end;
@@ -1943,9 +1947,9 @@ html[data-theme="light"] body {
 .feeder-cut-layout__vel-l { grid-area: vel-l; }
 .feeder-cut-layout__vel2-r { grid-area: vel2-r; }
 .feeder-cut-layout__vel2-l { grid-area: vel2-l; }
-.feeder-cut-layout__delay { grid-area: delay; }
 .feeder-cut-layout__test-r { grid-area: test-r; }
 .feeder-cut-layout__test-l { grid-area: test-l; }
+.feeder-cut-layout__switch { grid-area: switch; }
 
 .feeder-cut-layout__cut {
   grid-area: cut;
@@ -2138,7 +2142,7 @@ html[data-theme="light"] body {
 
 @media (max-width: 900px) {
   .feeder-cut-layout {
-    grid-template-columns: minmax(4rem, 6.5rem) minmax(4rem, 6.5rem) minmax(4rem, 5.5rem) 4.5rem;
+    grid-template-columns: minmax(4rem, 6.5rem) minmax(4rem, 6.5rem) 4.5rem 4.5rem;
   }
 
   .pf-tune-row {

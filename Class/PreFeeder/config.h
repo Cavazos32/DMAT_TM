@@ -3,7 +3,7 @@
 #include <Arduino.h>
 
 // Lado: comentar la línea siguiente para L, descomentar para R (misma base de firmware).
-#define PF_SIDE_RIGHT
+//#define PF_SIDE_RIGHT
 
 #ifndef PF_CONFIG_SIDE
 #if defined(PF_SIDE_RIGHT)
@@ -48,8 +48,6 @@ constexpr int PIN_FEEDER_STEP = 18;
 constexpr int PIN_PULLER_STEP = 32;      // MotorA (loop); distinto de Feeder MotorB
 constexpr uint8_t PIN_HOLGURA = 22;       // HIGH = holgura OK (ON)
 constexpr uint8_t HOLGURA_ON_LEVEL = HIGH;
-constexpr uint8_t PIN_LIMIT = 34;  // input-only ESP32: pull-up externo obligatorio
-constexpr uint8_t LIMIT_ACTIVE_LEVEL = LOW;  // activo = falla (línea bajada; libre/HIGH = off)
 constexpr uint8_t PIN_JOG = 23;
 constexpr uint8_t JOG_ACTIVE_LEVEL = HIGH;
 constexpr uint32_t JOG_STABLE_MS = 20;
@@ -60,13 +58,17 @@ constexpr float PULLER_RPM = 60.0f;
 // SensorMonitor
 constexpr uint32_t HOLGURA_ON_STABLE_MS = 50;
 constexpr uint32_t HOLGURA_OFF_STABLE_MS = 100;
-// Límite: ISR captura el flanco; este filtro es respaldo por sondeo (~2 ms).
-constexpr uint32_t LIMIT_ON_STABLE_MS = 2;
-constexpr uint32_t LIMIT_OFF_STABLE_MS = 20;
 // FeedingMode. Valores hasta que el maestro manda los suyos.
 constexpr uint16_t HOLGURA_SETTLE_MS = 150;
 constexpr uint16_t HOLGURA_SETTLE_MS_MIN = 10;
 constexpr uint16_t HOLGURA_SETTLE_MS_MAX = 500;
 constexpr float HOLGURA_ON_FEED_SEC = 2.0f;
-// Fijo: holgura OFF continuo → idle del lado (sin fault). No editable por HMI.
+// Holgura OFF alimentando sin recuperar → FAULT_HOLGURA (editable por HMI).
+constexpr float HOLGURA_RECOVER_SEC = 10.0f;
+constexpr float HOLGURA_RECOVER_SEC_MIN = 1.0f;
+constexpr float HOLGURA_RECOVER_SEC_MAX = 120.0f;
+// Holgura OFF y feeder quieto → FAULT_HOLGURA (gracia si ya hay demanda de giro).
+constexpr uint32_t HOLGURA_STOPPED_FAULT_MS = 500;
+constexpr uint32_t HOLGURA_STOPPED_SPINUP_MS = 2000;
+// Fijo: holgura OFF con feed_lock → idle local. Con feed desbloqueado manda el watchdog.
 constexpr uint32_t HOLGURA_EMPTY_IDLE_MS = 8000;

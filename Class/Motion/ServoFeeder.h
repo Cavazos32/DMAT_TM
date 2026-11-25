@@ -609,9 +609,14 @@ static bool feederStopAll() {
   return ok;
 }
 
-static int32_t feederFeedVelocity(MotionSide side) {
-  if (!gFeederTune) return 0;
-  int32_t v = (int32_t)gFeederTune->feeder[side].profileVelocityPps;
+/* Consigna firmada desde PPS absolutos (latch del FeedStage / tune). */
+static int32_t feederSignedVelocityPps(MotionSide side, uint32_t ppsAbs) {
+  int32_t v = (int32_t)ppsAbs;
   if (v < 0) v = -v;
   return v * (int32_t)feederCmdSign(side);
+}
+
+static int32_t feederFeedVelocity(MotionSide side) {
+  if (!gFeederTune) return 0;
+  return feederSignedVelocityPps(side, gFeederTune->feeder[side].profileVelocityPps);
 }

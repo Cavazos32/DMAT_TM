@@ -411,26 +411,31 @@
                   <div class="motion-fieldset__actions">
                     <button type="button" class="btn btn-power btn--compact" id="feederServoToggle" data-motion-op="feeder_servo" aria-pressed="false">Disable</button>
                   </div>
+                  <label class="settings-toggle settings-toggle--in-field feeder-dual-enable">
+                    <input type="checkbox" id="feedDualSpeedEnable" data-motion-path="feed_stage.dual_speed_enable">
+                    <span class="settings-toggle__switch" aria-hidden="true"></span>
+                    <span class="settings-toggle__text">Doble velocidad (PV)</span>
+                  </label>
                   <div class="feeder-cut-layout">
                     <p class="motion-side__title feeder-cut-layout__title-r">Lado R</p>
-                    <label class="motion-field motion-field--compact feeder-cut-layout__vel-r">Vel. RPM
-                      <input type="number" step="1" min="0" data-motion-path="feeder.R.profile_velocity_pps" data-motion-unit="feed_rpm">
+                    <label class="motion-field motion-field--compact feeder-cut-layout__vel-r">Primaria RPM
+                      <input type="number" step="1" min="0" max="3000" data-motion-path="feeder.R.profile_velocity_pps" data-motion-unit="feed_rpm">
                     </label>
-                    <label class="motion-field motion-field--compact feeder-cut-layout__vel2-r" title="Si es igual a Vel. RPM, no cambia en marcha">Vel2 RPM
-                      <input type="number" step="1" min="0" data-motion-path="feeder.R.secondary_velocity_pps" data-motion-unit="feed_rpm">
+                    <label class="motion-field motion-field--compact feeder-cut-layout__vel2-r">Secundaria RPM
+                      <input type="number" step="1" min="0" max="3000" data-motion-path="feeder.R.secondary_velocity_pps" data-motion-unit="feed_rpm">
                     </label>
                     <button type="button" class="btn btn-manual btn--compact feeder-cut-layout__test-r" data-motion-op="feeder_test" data-motion-side="R">Probar R</button>
                     <button type="button" class="btn btn-manual feeder-cut-layout__cut" data-plc-op="valve" data-plc-name="cutters" data-plc-keep-label aria-pressed="false" title="Activar o desactivar cortadores R y L juntos">Cortar</button>
                     <p class="motion-side__title feeder-cut-layout__title-l">Lado L</p>
-                    <label class="motion-field motion-field--compact feeder-cut-layout__vel-l">Vel. RPM
-                      <input type="number" step="1" min="0" data-motion-path="feeder.L.profile_velocity_pps" data-motion-unit="feed_rpm">
+                    <label class="motion-field motion-field--compact feeder-cut-layout__vel-l">Primaria RPM
+                      <input type="number" step="1" min="0" max="3000" data-motion-path="feeder.L.profile_velocity_pps" data-motion-unit="feed_rpm">
                     </label>
-                    <label class="motion-field motion-field--compact feeder-cut-layout__vel2-l" title="Si es igual a Vel. RPM, no cambia en marcha">Vel2 RPM
-                      <input type="number" step="1" min="0" data-motion-path="feeder.L.secondary_velocity_pps" data-motion-unit="feed_rpm">
+                    <label class="motion-field motion-field--compact feeder-cut-layout__vel2-l">Secundaria RPM
+                      <input type="number" step="1" min="0" max="3000" data-motion-path="feeder.L.secondary_velocity_pps" data-motion-unit="feed_rpm">
                     </label>
                     <button type="button" class="btn btn-manual btn--compact feeder-cut-layout__test-l" data-motion-op="feeder_test" data-motion-side="L">Probar L</button>
-                    <label class="motion-field motion-field--compact feeder-cut-layout__delay" title="Tras arrancar FeedStage, espera este tiempo y aplica Vel2 si es distinta">Vel2 tras (ms)
-                      <input type="number" step="1" min="0" max="60000" data-motion-path="feed_stage.secondary_velocity_delay_ms">
+                    <label class="motion-field motion-field--compact feeder-cut-layout__switch">Cambio (ms)
+                      <input type="number" step="1" min="0" max="15000" data-motion-path="feed_stage.speed_switch_ms">
                     </label>
                   </div>
                 </fieldset>
@@ -574,11 +579,6 @@
                     <span class="pf-sensor__name">Holgura</span>
                     <span class="motion-laser__state pf-sensor__state">—</span>
                   </p>
-                  <p class="pf-sensor" id="pfLimL" role="status" aria-label="Límite L">
-                    <span class="pf-sensor__led" aria-hidden="true"></span>
-                    <span class="pf-sensor__name">Límite</span>
-                    <span class="motion-laser__state pf-sensor__state">—</span>
-                  </p>
                 </div>
                 <div class="pf-tune-grid">
                   <label class="motion-field">RPM
@@ -592,6 +592,9 @@
                   </label>
                   <label class="motion-field">Tras flanco ON (s)
                     <input type="number" min="0.1" max="120" step="0.1" data-pf-side="L" data-pf-key="on_s">
+                  </label>
+                  <label class="motion-field">Timeout holgura (s)
+                    <input type="number" min="1" max="120" step="0.5" data-pf-side="L" data-pf-key="recover_s" title="Holgura OFF alimentando sin recuperar → error">
                   </label>
                 </div>
                 <div class="pf-side-card__actions">
@@ -612,11 +615,6 @@
                     <span class="pf-sensor__name">Holgura</span>
                     <span class="motion-laser__state pf-sensor__state">—</span>
                   </p>
-                  <p class="pf-sensor" id="pfLimR" role="status" aria-label="Límite R">
-                    <span class="pf-sensor__led" aria-hidden="true"></span>
-                    <span class="pf-sensor__name">Límite</span>
-                    <span class="motion-laser__state pf-sensor__state">—</span>
-                  </p>
                 </div>
                 <div class="pf-tune-grid">
                   <label class="motion-field">RPM
@@ -630,6 +628,9 @@
                   </label>
                   <label class="motion-field">Tras flanco ON (s)
                     <input type="number" min="0.1" max="120" step="0.1" data-pf-side="R" data-pf-key="on_s">
+                  </label>
+                  <label class="motion-field">Timeout holgura (s)
+                    <input type="number" min="1" max="120" step="0.5" data-pf-side="R" data-pf-key="recover_s" title="Holgura OFF alimentando sin recuperar → error">
                   </label>
                 </div>
                 <div class="pf-side-card__actions">
@@ -738,8 +739,8 @@
         <button type="button" class="modal__close" id="recoveryModalClose" aria-label="Cerrar">×</button>
       </header>
       <div class="modal__body recovery-body">
-        <div class="recovery-step-row">
-          <p class="recovery-step" id="recoveryStepLabel">Paso 1 de 5</p>
+        <div class="recovery-step-row" hidden>
+          <p class="recovery-step" id="recoveryStepLabel" hidden></p>
           <button type="button" class="recovery-skip-link" id="recoverySkipLink" data-recovery="skip" hidden>Skip</button>
         </div>
         <p class="recovery-lead" id="recoveryLead" hidden></p>
