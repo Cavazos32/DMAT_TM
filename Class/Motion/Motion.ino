@@ -86,26 +86,6 @@ struct FeedStageRequest {
 };
 
 static FeedStageResult gLastFeedStage = {};
-struct LaserStopDiag {
-  bool active;
-  bool printed;
-  uint32_t tLaserMs;
-  uint32_t tLaserAbsMs;
-  int32_t countsAtLaser;
-  int32_t countsAfterHalt;
-  int32_t countsSettled;
-  uint32_t settleMs;
-  bool stopOk;
-  bool settled;
-  bool statusOk;
-  uint16_t statusWord;
-  bool velOk;
-  int32_t velActual;
-  int32_t settleLast;
-  uint32_t settleStableSinceMs;
-};
-
-static LaserStopDiag gLaserStopDiag[MOTION_SIDE_COUNT];
 
 // ── Utilidades JSON plano (Serial) ──────────────────────────────────────────
 
@@ -195,99 +175,6 @@ static void encoderSetZero(MotionSide side) {
 
 static bool encoderResetHw(MotionSide side) {
   return (side == MOTION_SIDE_R) ? gEncoders.resetRight() : gEncoders.resetLeft();
-}
-
-static void laserStopDiagResetAll() {
-  memset(gLaserStopDiag, 0, sizeof(gLaserStopDiag));
-}
-
-static void laserStopDiagBegin(MotionSide side, uint32_t tLaserMs, int32_t countsAtLaser,
-                               bool stopOk, int32_t countsAfterHalt) {
-  LaserStopDiag& d = gLaserStopDiag[side];
-  d = {};
-  d.active = true;
-  d.tLaserMs = tLaserMs;
-  d.tLaserAbsMs = millis();
-  d.countsAtLaser = countsAtLaser;
-  d.countsAfterHalt = countsAfterHalt;
-  d.countsSettled = countsAfterHalt;
-  d.stopOk = stopOk;
-  d.settleLast = countsAfterHalt;
-  d.settleStableSinceMs = d.tLaserAbsMs;
-}
-
-static void printLaserStopTrace(MotionSide side, const LaserStopDiag& d) {
-  char s = (side == MOTION_SIDE_R) ? 'R' : 'L';
-  int32_t overrun = d.countsSettled - d.countsAtLaser;
-  Serial.printf(
-      "{\"op\":\"laser_stop_trace\",\"side\":\"%c\",\"t_laser_ms\":%lu,"
-      "\"counts_at_laser\":%ld,\"counts_after_halt\":%ld,\"counts_settled\":%ld,"
-      "\"overrun_counts\":%ld,\"settle_ms\":%lu,\"stop_ok\":%s,"
-      "\"status_ok\":%s,\"status_word\":%u,\"vel_ok\":%s,\"vel_actual\":%ld}\n",
-      s, (unsigned long)d.tLaserMs, (long)d.countsAtLaser, (long)d.countsAfterHalt,
-      (long)d.countsSettled, (long)overrun, (unsigned long)d.settleMs,
-      d.stopOk ? "true" : "false", d.statusOk ? "true" : "false",
-      (unsigned)d.statusWord, d.velOk ? "true" : "false", (long)d.velActual);
-}
-
-static void laserStopDiagPoll(uint32_t nowMs) {
-  for (int i = 0; i < MOTION_SIDE_COUNT; i++) {
-    LaserStopDiag& d = gLaserStopDiag[i];
-    if (!d.active || d.printed || d.settled) continue;
-
-    int32_t c = encoderCountsOfficial((MotionSide)i);
-    if (c != d.settleLast) {
-      d.settleLast = c;
-      d.settleStableSinceMs = nowMs;
-    }
-    bool stable = (nowMs - d.settleStableSinceMs) >= PARAM_LASER_STOP_STABLE_MS;
-    bool timedOut = (nowMs - d.tLaserAbsMs) >= PARAM_LASER_STOP_SETTLE_MS;
-    if (!stable && !timedOut) continue;
-
-    d.countsSettled = d.settleLast;
-    // nowMs fresco: el now del tick puede ser anterior a tLaserAbsMs (underflow).
-    uint32_t tNow = millis();
-    d.settleMs = (tNow >= d.tLaserAbsMs) ? (tNow - d.tLaserAbsMs) : 0u;
-    d.settled = true;
-  }
-}
-
-static void laserStopDiagFinalize() {
-  uint32_t t0 = millis();
-  while ((millis() - t0) < PARAM_LASER_STOP_SETTLE_MS) {
-    bool anyPending = false;
-    for (int i = 0; i < MOTION_SIDE_COUNT; i++) {
-      if (gLaserStopDiag[i].active && !gLaserStopDiag[i].settled && !gLaserStopDiag[i].printed)
-        anyPending = true;
-    }
-    if (!anyPending) break;
-    motionPollEncoders();
-    canRxService();
-    laserStopDiagPoll(millis());
-    delay(1);
-  }
-
-  for (int i = 0; i < MOTION_SIDE_COUNT; i++) {
-    LaserStopDiag& d = gLaserStopDiag[i];
-    if (!d.active || d.printed) continue;
-    MotionSide side = (MotionSide)i;
-    if (!d.settled) {
-      gEncoders.update();
-      d.countsSettled = encoderCountsOfficial(side);
-      uint32_t tNow = millis();
-      d.settleMs = (tNow >= d.tLaserAbsMs) ? (tNow - d.tLaserAbsMs) : 0u;
-      d.settled = true;
-    }
-    uint16_t sw = 0;
-    d.statusOk = canReadStatusWord(side, &sw, PARAM_LASER_STOP_STATUS_MS);
-    d.statusWord = sw;
-    int32_t vel = 0;
-    d.velOk = canReadSdoI32(feederNode(side), SERVO_OD_VELOCITY_ACTUAL, 0, &vel,
-                            PARAM_LASER_STOP_STATUS_MS);
-    d.velActual = vel;
-    printLaserStopTrace(side, d);
-    d.printed = true;
-  }
 }
 
 // ── FeedStage (Bloque 1 — alimentación y medición) ──────────────────────────
@@ -568,7 +455,6 @@ static uint8_t gFeedVelSdoAttempts[MOTION_SIDE_COUNT] = {0, 0};
 static uint8_t gFeedVelSdoPhase[MOTION_SIDE_COUNT] = {0, 0};  // 1=V1, 2=V2
 static int32_t gFeedVelSdoCmd[MOTION_SIDE_COUNT] = {0, 0};
 static uint32_t gFeedVelSdoTTx[MOTION_SIDE_COUNT] = {0, 0};
-static uint32_t gFeedVelSdoTAck[MOTION_SIDE_COUNT] = {0, 0};
 
 /* Durante feed async no tirar ACK SDO: canServiceRxDrain los descarta y el
  * solape se queda sin V2/timeout (release_part / loop). */
@@ -595,7 +481,6 @@ static void feedVelSdoClear(MotionSide side) {
   gFeedVelSdoPhase[i] = 0;
   gFeedVelSdoCmd[i] = 0;
   gFeedVelSdoTTx[i] = 0;
-  gFeedVelSdoTAck[i] = 0;
 }
 
 static void feedVelSdoArm(MotionSide side, int32_t cmd, uint8_t phase, uint32_t tTx) {
@@ -606,7 +491,6 @@ static void feedVelSdoArm(MotionSide side, int32_t cmd, uint8_t phase, uint32_t 
   gFeedVelSdoPhase[i] = phase;
   gFeedVelSdoCmd[i] = cmd;
   gFeedVelSdoTTx[i] = tTx;
-  gFeedVelSdoTAck[i] = 0;
 }
 
 /* Emite 0x60FF y arma confirmación asíncrona. No espera SDO.
@@ -632,15 +516,7 @@ static void feedVelSdoService() {
       continue;
     }
     if (gFeedVelSdo[i].done) {
-      gFeedVelSdoTAck[i] = nowMs;
-      uint8_t phase = gFeedVelSdoPhase[i];
       bool ok = gFeedVelSdo[i].ok;
-      Serial.printf(
-          "{\"op\":\"feed_pv_trace\",\"phase\":\"%s_ack\",\"side\":\"%c\",\"ok\":%s,"
-          "\"t_tx\":%lu,\"t_ack\":%lu,\"cmd\":%ld}\n",
-          (phase == 2) ? "v2" : "v1", (side == MOTION_SIDE_R) ? 'R' : 'L',
-          ok ? "true" : "false", (unsigned long)gFeedVelSdoTTx[i],
-          (unsigned long)gFeedVelSdoTAck[i], (long)gFeedVelSdoCmd[i]);
       if (ok) {
         gFeedVelSdo[i].active = false;
         continue;
@@ -672,11 +548,6 @@ static void feedVelSdoService() {
         continue;
       }
     }
-    Serial.printf(
-        "{\"op\":\"feed_pv_trace\",\"phase\":\"%s_timeout\",\"side\":\"%c\","
-        "\"t_tx\":%lu,\"cmd\":%ld}\n",
-        (gFeedVelSdoPhase[i] == 2) ? "v2" : "v1", (side == MOTION_SIDE_R) ? 'R' : 'L',
-        (unsigned long)gFeedVelSdoTTx[i], (long)gFeedVelSdoCmd[i]);
     gFeedVelSdo[i].active = false;
     gFeedFail = FEED_STAGE_ERR_FEEDER;
     feederStopAll();
@@ -699,32 +570,17 @@ static FeedStageRequest feedStageDefaultRequest() {
 static void printFeedStageResultJson(const FeedStageResult& r);
 
 /* Paro por láser (begin o tick). false = fallo de paro (gFeedFail seteado). */
-static bool feedStageStopForLaser(MotionSide side, uint32_t nowMs) {
+static bool feedStageStopForLaser(MotionSide side) {
   int i = (int)side;
   if (gFeedSideStopped[i]) return true;
   // Recoger confirms pendientes antes del flush de feederStop.
   feederVelPendService(gFeedVelSdo, MOTION_SIDE_COUNT);
   feedVelSdoClear(side);
-  gEncoders.update();
-  int32_t countsAtLaser = encoderCountsOfficial(side);
   gFeedSideStopped[i] = true;
   bool stopOk = feederStop(side);
   stopOk = canSdoDownloadU32(feederNode(side), SERVO_OD_TARGET_VELOCITY, 0, 0) && stopOk;
   gEncoders.update();
   int32_t countsAfterHalt = encoderCountsOfficial(side);
-  // t_ms desde movimiento real (T0); si aún no hubo, desde TX de ese lado.
-  uint32_t sideRef = gFeedSideT0[i] ? gFeedSideT0[i]
-                                    : (gFeedSideTxMs[i] ? gFeedSideTxMs[i] : gFeedT0);
-  uint32_t tLaser = sideRef ? (nowMs - sideRef) : 0;
-  // Diagnóstico: no leer 606C aquí (retrasaría el Halt). vel_actual va en laser_stop_trace.
-  if (gFeedDualSpeed) {
-    Serial.printf(
-        "{\"op\":\"feed_pv_trace\",\"phase\":\"laser\",\"side\":\"%c\",\"t_ms\":%lu,"
-        "\"v2_sent\":%s,\"counts\":%ld}\n",
-        (side == MOTION_SIDE_R) ? 'R' : 'L', (unsigned long)tLaser,
-        gFeedSpeed2Sent[i] ? "true" : "false", (long)countsAtLaser);
-  }
-  laserStopDiagBegin(side, tLaser, countsAtLaser, stopOk, countsAfterHalt);
   if (!stopOk) {
     gFeedFail = FEED_STAGE_ERR_FEEDER;
     return false;
@@ -770,7 +626,6 @@ static void feedStageFinish() {
     gFeedOut.side[i].countsMeasured = encoderCountsOfficial((MotionSide)i);
   }
   if (!feederStopAll() && gFeedFail == FEED_STAGE_OK) gFeedFail = FEED_STAGE_ERR_FEEDER;
-  laserStopDiagFinalize();
   if (gFeedFail != FEED_STAGE_OK) gFeedOut.error = gFeedFail;
   gLastFeedStage = gFeedOut;
   gFeedStageBusy = false;
@@ -826,7 +681,6 @@ static bool feedStageBegin(FeedStageRequest req) {
     }
     gFeedSpeed2Sent[i] = false;
   }
-  laserStopDiagResetAll();
 
   // Alimentación normal: láser ya ON = material en posición. Ese lado no se mueve.
   // R y L usan la misma regla. El flanco (esperar OFF y un ON nuevo) solo
@@ -848,18 +702,6 @@ static bool feedStageBegin(FeedStageRequest req) {
   gFeedSideStopped[MOTION_SIDE_L] = !gFeedRunL;
   gFeedSideValidated[MOTION_SIDE_R] = !req.useR;
   gFeedSideValidated[MOTION_SIDE_L] = !req.useL;
-
-  Serial.printf(
-      "{\"op\":\"feed_pv_trace\",\"phase\":\"latch\",\"enable\":%s,"
-      "\"run_r\":%s,\"run_l\":%s,"
-      "\"R\":{\"v1\":%lu,\"v2\":%lu,\"switch_ms\":%lu},"
-      "\"L\":{\"v1\":%lu,\"v2\":%lu,\"switch_ms\":%lu}}\n",
-      gFeedDualSpeed ? "true" : "false",
-      gFeedRunR ? "true" : "false", gFeedRunL ? "true" : "false",
-      (unsigned long)gFeedVel1Pps[MOTION_SIDE_R], (unsigned long)gFeedVel2Pps[MOTION_SIDE_R],
-      (unsigned long)gFeedSpeedSwitchMs[MOTION_SIDE_R],
-      (unsigned long)gFeedVel1Pps[MOTION_SIDE_L], (unsigned long)gFeedVel2Pps[MOTION_SIDE_L],
-      (unsigned long)gFeedSpeedSwitchMs[MOTION_SIDE_L]);
 
   gEncoders.update();
   if (req.useR) encoderSetZero(MOTION_SIDE_R);
@@ -929,11 +771,6 @@ static bool feedStageBegin(FeedStageRequest req) {
         gFeedSideStarted[MOTION_SIDE_L] = false;
         gFeedStartLPending = true;
         gFeedStartLAt = tTxR + PARAM_FEED_DUAL_START_SKEW_MS;
-        Serial.printf(
-            "{\"op\":\"feed_pv_trace\",\"phase\":\"v1\",\"side\":\"R\",\"ok\":true,"
-            "\"cmd\":%ld,\"pps\":%lu,\"t_tx\":%lu,\"skew_ms\":%lu,\"l_due\":%lu}\n",
-            (long)cmdR, (unsigned long)gFeedVel1Pps[MOTION_SIDE_R], (unsigned long)tTxR,
-            (unsigned long)PARAM_FEED_DUAL_START_SKEW_MS, (unsigned long)gFeedStartLAt);
       }
     } else if (gFeedRunR) {
       int32_t cmdR = feederSignedVelocityPps(MOTION_SIDE_R, gFeedVel1Pps[MOTION_SIDE_R]);
@@ -943,11 +780,6 @@ static bool feedStageBegin(FeedStageRequest req) {
       gFeedSideT0[MOTION_SIDE_R] = 0;
       gFeedSideStarted[MOTION_SIDE_R] = true;
       gFeedT0 = tTx;
-      Serial.printf(
-          "{\"op\":\"feed_pv_trace\",\"phase\":\"v1\",\"side\":\"R\",\"ok\":%s,"
-          "\"cmd\":%ld,\"pps\":%lu,\"t_tx\":%lu}\n",
-          okR ? "true" : "false", (long)cmdR, (unsigned long)gFeedVel1Pps[MOTION_SIDE_R],
-          (unsigned long)tTx);
       if (!okR) {
         gFeedFail = FEED_STAGE_ERR_FEEDER;
         feederStopAll();
@@ -960,11 +792,6 @@ static bool feedStageBegin(FeedStageRequest req) {
       gFeedSideT0[MOTION_SIDE_L] = 0;
       gFeedSideStarted[MOTION_SIDE_L] = true;
       gFeedT0 = tTx;
-      Serial.printf(
-          "{\"op\":\"feed_pv_trace\",\"phase\":\"v1\",\"side\":\"L\",\"ok\":%s,"
-          "\"cmd\":%ld,\"pps\":%lu,\"t_tx\":%lu}\n",
-          okL ? "true" : "false", (long)cmdL, (unsigned long)gFeedVel1Pps[MOTION_SIDE_L],
-          (unsigned long)tTx);
       if (!okL) {
         gFeedFail = FEED_STAGE_ERR_FEEDER;
         feederStopAll();
@@ -1008,14 +835,6 @@ static bool feedStageStartLNow() {
   gFeedSideTxMs[MOTION_SIDE_L] = tTxL;
   gFeedSideT0[MOTION_SIDE_L] = 0;  // V1→V2 al detectar movimiento de L
   gFeedStartLPending = false;
-  uint32_t skew = (gFeedSideTxMs[MOTION_SIDE_R] && tTxL >= gFeedSideTxMs[MOTION_SIDE_R])
-                      ? (tTxL - gFeedSideTxMs[MOTION_SIDE_R])
-                      : 0;
-  Serial.printf(
-      "{\"op\":\"feed_pv_trace\",\"phase\":\"v1\",\"side\":\"L\",\"ok\":true,"
-      "\"cmd\":%ld,\"pps\":%lu,\"t_tx\":%lu,\"skew_ms\":%lu}\n",
-      (long)cmdL, (unsigned long)gFeedVel1Pps[MOTION_SIDE_L], (unsigned long)tTxL,
-      (unsigned long)skew);
   return true;
 }
 
@@ -1028,14 +847,6 @@ static void feedStageArmMotionT0(uint32_t nowMs) {
     int32_t absC = (counts >= 0) ? counts : -counts;
     if (absC < PARAM_FEED_MOTION_START_COUNTS) continue;
     gFeedSideT0[i] = nowMs;
-    uint32_t lag = (gFeedSideTxMs[i] && nowMs >= gFeedSideTxMs[i])
-                       ? (nowMs - gFeedSideTxMs[i])
-                       : 0;
-    Serial.printf(
-        "{\"op\":\"feed_pv_trace\",\"phase\":\"move_t0\",\"side\":\"%c\","
-        "\"t_tx\":%lu,\"t0\":%lu,\"lag_ms\":%lu,\"counts\":%ld}\n",
-        (side == MOTION_SIDE_R) ? 'R' : 'L', (unsigned long)gFeedSideTxMs[i],
-        (unsigned long)gFeedSideT0[i], (unsigned long)lag, (long)counts);
   }
 }
 
@@ -1112,7 +923,7 @@ static bool feedStageTick() {
               gFeedLaserEdgeArmed[i] = true;
             }
           } else if (laserOn) {
-            if (!feedStageStopForLaser(side, nowMs)) break;
+            if (!feedStageStopForLaser(side)) break;
           }
         }
 
@@ -1140,17 +951,9 @@ static bool feedStageTick() {
           continue;
         }
         int32_t cmd = feederSignedVelocityPps(side, gFeedVel2Pps[i]);
-        gEncoders.update();
-        int32_t counts = encoderCountsOfficial(side);
         uint32_t tTx = 0;
         bool ok = feedVelFire(side, cmd, 2, &tTx);
         gFeedSpeed2Sent[i] = ok;  // si falla no marcar; error abajo
-        Serial.printf(
-            "{\"op\":\"feed_pv_trace\",\"phase\":\"v2\",\"side\":\"%c\",\"ok\":%s,"
-            "\"t_ms\":%lu,\"cmd\":%ld,\"pps\":%lu,\"t_tx\":%lu,\"counts\":%ld}\n",
-            (side == MOTION_SIDE_R) ? 'R' : 'L', ok ? "true" : "false",
-            (unsigned long)(nowMs - gFeedSideT0[i]), (long)cmd,
-            (unsigned long)gFeedVel2Pps[i], (unsigned long)tTx, (long)counts);
         if (!ok) {
           gFeedFail = FEED_STAGE_ERR_FEEDER;
           feederStopAll();
@@ -1165,8 +968,6 @@ static bool feedStageTick() {
     gInFeedTick = false;
     return false;
   }
-
-  laserStopDiagPoll(millis());
 
   if (gFeedSideValidated[MOTION_SIDE_R] && gFeedSideValidated[MOTION_SIDE_L]) {
     bool anyHealthy = feedStageHealthyDone(MOTION_SIDE_R) || feedStageHealthyDone(MOTION_SIDE_L);

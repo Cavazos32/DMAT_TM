@@ -63,10 +63,6 @@ constexpr uint16_t HOLGURA_SETTLE_MS = 150;
 constexpr uint16_t HOLGURA_SETTLE_MS_MIN = 10;
 constexpr uint16_t HOLGURA_SETTLE_MS_MAX = 500;
 constexpr float HOLGURA_ON_FEED_SEC = 2.0f;
-// Holgura OFF alimentando sin recuperar → FAULT_HOLGURA (editable por HMI).
-constexpr float HOLGURA_RECOVER_SEC = 10.0f;
-constexpr float HOLGURA_RECOVER_SEC_MIN = 1.0f;
-constexpr float HOLGURA_RECOVER_SEC_MAX = 120.0f;
 // Holgura OFF y feeder quieto → FAULT_HOLGURA (gracia si ya hay demanda de giro).
 constexpr uint32_t HOLGURA_STOPPED_FAULT_MS = 500;
 constexpr uint32_t HOLGURA_STOPPED_SPINUP_MS = 2000;

@@ -75,8 +75,6 @@ static void clampSide(PfSideParams& p) {
   if (p.settleMs > 500) p.settleMs = 500;
   if (p.onSec < 0.1f) p.onSec = 0.1f;
   if (p.onSec > 120.0f) p.onSec = 120.0f;
-  if (p.recoverSec < 1.0f) p.recoverSec = 1.0f;
-  if (p.recoverSec > 120.0f) p.recoverSec = 120.0f;
 }
 
 static bool jsonNum(const String& j, const char* key, float& out) {
@@ -121,8 +119,6 @@ static void appendCfg(String& j, const PfSideParams& c) {
   j += String(c.settleMs);
   j += ",\"on_s\":";
   appendFloat(j, c.onSec, 2);
-  j += ",\"recover_s\":";
-  appendFloat(j, c.recoverSec, 1);
   j += "}";
 }
 
@@ -232,7 +228,7 @@ static void sendStatus() {
 
 static bool cfgSame(const PfSideParams& a, const PfSideParams& b) {
   return a.rpm == b.rpm && a.pullerRpm == b.pullerRpm && a.settleMs == b.settleMs
-    && a.onSec == b.onSec && a.recoverSec == b.recoverSec;
+    && a.onSec == b.onSec;
 }
 
 static void cfgLoadNvsSide(char side, PfSideParams& dst) {
@@ -245,8 +241,6 @@ static void cfgLoadNvsSide(char side, PfSideParams& dst) {
   dst.settleMs = (uint16_t)gPrefs.getUShort(key, dst.settleMs);
   snprintf(key, sizeof(key), "%c_on", side);
   dst.onSec = gPrefs.getFloat(key, dst.onSec);
-  snprintf(key, sizeof(key), "%c_recover", side);
-  dst.recoverSec = gPrefs.getFloat(key, dst.recoverSec);
 }
 
 static void cfgSaveNvsSide(char side, const PfSideParams& src) {
@@ -259,8 +253,6 @@ static void cfgSaveNvsSide(char side, const PfSideParams& src) {
   gPrefs.putUShort(key, src.settleMs);
   snprintf(key, sizeof(key), "%c_on", side);
   gPrefs.putFloat(key, src.onSec);
-  snprintf(key, sizeof(key), "%c_recover", side);
-  gPrefs.putFloat(key, src.recoverSec);
 }
 
 static void cfgLoadNvs() {
@@ -344,7 +336,6 @@ static bool readCfg(const String& body, PfSideParams& cfg) {
   if (jsonNum(body, "puller_rpm", v)) { cfg.pullerRpm = v; any = true; }
   if (jsonNum(body, "settle_ms", v)) { cfg.settleMs = (uint16_t)v; any = true; }
   if (jsonNum(body, "on_s", v)) { cfg.onSec = v; any = true; }
-  if (jsonNum(body, "recover_s", v)) { cfg.recoverSec = v; any = true; }
   if (any) clampSide(cfg);
   return any;
 }

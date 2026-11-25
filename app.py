@@ -44,7 +44,6 @@ MOTION_PATH = DATA_DIR / "Motion.json"
 PFEEDER_PATH = DATA_DIR / "PreFeeder.json"
 CYCLE_PATH = DATA_DIR / "cycle.json"
 PROD_CYCLE_LOG_PATH = DATA_DIR / "cycle_production.log"
-LASER_STOP_LOG_PATH = DATA_DIR / "laser_stop.log"
 SERIAL_PATH = DATA_DIR / "serial.json"
 MANT_PATH = DATA_DIR / "mantenimiento.json"
 CHECKLIST_LOG_PATH = DATA_DIR / "checklist.json"
@@ -267,7 +266,6 @@ CYCLE_STEPS = (
 _LOT_SEQ = 0
 _PROD_CADENCE_SAMPLES: list[float] = []
 _PROD_LOG_LOCK = threading.Lock()
-_LASER_STOP_LOG_LOCK = threading.Lock()
 _PROD_CTX = {"piece": 1, "step_id": "1", "t0": 0.0}
 _PROD_STEP_DESC = {
     "1": "Configuración inicial",
@@ -551,133 +549,6 @@ def _prod_write(line: str) -> None:
     _push_event(stamped, "prod")
 
 
-def _laser_stop_log_write(msg: dict | str) -> None:
-    """Traza de parada por láser: terminal + data/laser_stop.log."""
-    if isinstance(msg, dict):
-        try:
-            raw = json.dumps(msg, ensure_ascii=False, separators=(",", ":"))
-        except (TypeError, ValueError):
-            raw = str(msg)
-        side = str(msg.get("side") or "?")
-        summary = (
-            f"side={side} t_laser={msg.get('t_laser_ms')}ms "
-            f"at={msg.get('counts_at_laser')} after_halt={msg.get('counts_after_halt')} "
-            f"settled={msg.get('counts_settled')} overrun={msg.get('overrun_counts')} "
-            f"settle={msg.get('settle_ms')}ms stop_ok={msg.get('stop_ok')} "
-            f"status=0x{int(msg.get('status_word') or 0):04X} "
-            f"vel={msg.get('vel_actual')}"
-        )
-    else:
-        raw = str(msg)
-        summary = raw
-    stamped = f"{_prod_ts()} | {summary}"
-    with _LASER_STOP_LOG_LOCK:
-        LASER_STOP_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with LASER_STOP_LOG_PATH.open("a", encoding="utf-8") as f:
-            f.write(stamped + " | " + raw + "\n")
-    print(f"[LASER_STOP] {stamped}", flush=True)
-    _push_event(f"[LASER_STOP] {stamped}", "prod")
-
-
-def _pps_to_rpm(pps) -> int:
-    try:
-        return int(round(float(pps) * 60.0 / FEED_SHAFT_INC_PER_REV))
-    except (TypeError, ValueError):
-        return 0
-
-
-def _feed_pv_log_tx(payload: dict, *, origin: str = "") -> None:
-    """Parámetros de alimentación que salen hacia MCU (terminal Flask)."""
-    if not isinstance(payload, dict) or payload.get("op") != "feed_stage":
-        return
-    v1_r = int(payload.get("feed_r_vel_pps") or 0)
-    v2_r = int(payload.get("feed_r_vel2_pps") or 0)
-    v1_l = int(payload.get("feed_l_vel_pps") or 0)
-    v2_l = int(payload.get("feed_l_vel2_pps") or 0)
-    enable = bool(payload.get("feed_dual_speed_enable"))
-    sw_r = int(payload.get("feed_r_speed_switch_ms")
-               or payload.get("feed_speed_switch_ms") or 0)
-    sw_l = int(payload.get("feed_l_speed_switch_ms")
-               or payload.get("feed_speed_switch_ms") or 0)
-    side = str(payload.get("side") or "LR")
-    mode = str(payload.get("mode") or "cycle")
-    src = f" origin={origin}" if origin else ""
-    line = (
-        f"[FEED_PV TX]{src} side={side} mode={mode} dual={enable} | "
-        f"R: V1={_pps_to_rpm(v1_r)}rpm/{v1_r}pps V2={_pps_to_rpm(v2_r)}rpm/{v2_r}pps "
-        f"sw={sw_r}ms | "
-        f"L: V1={_pps_to_rpm(v1_l)}rpm/{v1_l}pps V2={_pps_to_rpm(v2_l)}rpm/{v2_l}pps "
-        f"sw={sw_l}ms"
-    )
-    print(line, flush=True)
-    _push_event(line, "prod")
-
-
-def _feed_pv_log_rx(msg: dict) -> None:
-    """Ack/trazas feed_pv_trace del MCU → terminal Flask."""
-    if not isinstance(msg, dict) or msg.get("op") != "feed_pv_trace":
-        return
-    phase = str(msg.get("phase") or "?")
-    if phase == "latch":
-        r = msg.get("R") if isinstance(msg.get("R"), dict) else {}
-        l = msg.get("L") if isinstance(msg.get("L"), dict) else {}
-        v1_r = int(r.get("v1") or 0)
-        v2_r = int(r.get("v2") or 0)
-        v1_l = int(l.get("v1") or 0)
-        v2_l = int(l.get("v2") or 0)
-        sw_r = int(r.get("switch_ms") or msg.get("switch_ms") or 0)
-        sw_l = int(l.get("switch_ms") or msg.get("switch_ms") or 0)
-        line = (
-            f"[FEED_PV MCU latch] dual={msg.get('enable')} "
-            f"run_r={msg.get('run_r')} run_l={msg.get('run_l')} | "
-            f"R: V1={_pps_to_rpm(v1_r)}rpm/{v1_r}pps V2={_pps_to_rpm(v2_r)}rpm/{v2_r}pps "
-            f"sw={sw_r}ms | "
-            f"L: V1={_pps_to_rpm(v1_l)}rpm/{v1_l}pps V2={_pps_to_rpm(v2_l)}rpm/{v2_l}pps "
-            f"sw={sw_l}ms"
-        )
-    elif phase == "v1":
-        side = str(msg.get("side") or "?")
-        pps = int(msg.get("pps") or 0)
-        skew = msg.get("skew_ms")
-        skew_s = f" skew_ms={skew}" if skew is not None else ""
-        line = (
-            f"[FEED_PV MCU v1] side={side} ok={msg.get('ok')} "
-            f"cmd={msg.get('cmd')} {_pps_to_rpm(pps)}rpm/{pps}pps "
-            f"t_tx={msg.get('t_tx')}{skew_s}"
-        )
-    elif phase == "move_t0":
-        line = (
-            f"[FEED_PV MCU move_t0] side={msg.get('side')} "
-            f"t_tx={msg.get('t_tx')} t0={msg.get('t0')} lag_ms={msg.get('lag_ms')} "
-            f"counts={msg.get('counts')}"
-        )
-    elif phase in ("v1_ack", "v2_ack", "v1_timeout", "v2_timeout"):
-        line = (
-            f"[FEED_PV MCU {phase}] side={msg.get('side')} ok={msg.get('ok')} "
-            f"cmd={msg.get('cmd')} t_tx={msg.get('t_tx')} t_ack={msg.get('t_ack')}"
-        )
-    elif phase == "v2":
-        side = str(msg.get("side") or "?")
-        pps = int(msg.get("pps") or 0)
-        line = (
-            f"[FEED_PV MCU v2] side={side} ok={msg.get('ok')} t_ms={msg.get('t_ms')} "
-            f"cmd={msg.get('cmd')} {_pps_to_rpm(pps)}rpm/{pps}pps "
-            f"t_tx={msg.get('t_tx')} counts={msg.get('counts')}"
-        )
-    elif phase == "laser":
-        line = (
-            f"[FEED_PV MCU laser] side={msg.get('side')} t_ms={msg.get('t_ms')} "
-            f"v2_sent={msg.get('v2_sent')} counts={msg.get('counts')}"
-        )
-    else:
-        try:
-            line = f"[FEED_PV MCU] {json.dumps(msg, ensure_ascii=False, separators=(',', ':'))}"
-        except (TypeError, ValueError):
-            line = f"[FEED_PV MCU] {msg}"
-    print(line, flush=True)
-    _push_event(line, "prod")
-
-
 def _prod_enc_counts_side(feed: dict | None, side: str) -> str:
     """Solo counts enteros del MCU. Sin inventar counts desde mm."""
     block = (feed or {}).get(side)
@@ -855,7 +726,7 @@ _DEFAULT_CYCLE_PARAMS = {
     "ms_lm_at_discharge": 100,
     "ms_cutter_on": 50,
     "ms_after_cutter": 100,
-    "ms_after_grip_release": 100,
+    "ms_after_grip_release": 50,
     "ms_blower_delay": 200,
     "ms_at_home_end": 50,
     "tolerance_mm": 2.0,
@@ -1094,6 +965,9 @@ def _canonical_motion_tune(src):
                 LMGUIDE_TRAVEL_DECEL_MS,
             ),
             "pos_puu": _as_int(src, ("lmguide", "pos_puu"), 0),
+            "steps_per_mm": _clamp_lm_steps_per_mm(
+                _as_float(src, ("lmguide", "steps_per_mm"), LMGUIDE_STEPS_PER_MM)
+            ),
         },
         "feed_stage": {
             "validate_encoder": _as_bool(src, ("feed_stage", "validate_encoder"), False),
@@ -1128,28 +1002,20 @@ def _canonical_prefeeder_side(src: dict, side: str) -> dict:
             "puller_rpm": 60.0,
             "settle_ms": 150,
             "on_s": 2.0,
-            "recover_s": 10.0,
         },
         "R": {
             "rpm": 60.0,
             "puller_rpm": 60.0,
             "settle_ms": 150,
             "on_s": 2.0,
-            "recover_s": 10.0,
         },
     }[side]
     block = src.get(side) if isinstance(src.get(side), dict) else {}
-    recover = _as_float(block, ("recover_s",), defaults["recover_s"])
-    if recover < 1.0:
-        recover = 1.0
-    if recover > 120.0:
-        recover = 120.0
     return {
         "rpm": _as_float(block, ("rpm",), defaults["rpm"]),
         "puller_rpm": _as_float(block, ("puller_rpm",), defaults["puller_rpm"]),
         "settle_ms": _as_int(block, ("settle_ms",), defaults["settle_ms"]),
         "on_s": _as_float(block, ("on_s",), defaults["on_s"]),
-        "recover_s": recover,
     }
 
 
@@ -1186,7 +1052,6 @@ def _prefeeder_cfg_signature(side_cfg: dict) -> tuple:
         round(c["puller_rpm"], 2),
         c["settle_ms"],
         round(c["on_s"], 3),
-        round(c.get("recover_s", 10.0), 1),
     )
 
 
@@ -1246,6 +1111,34 @@ def _compact(obj) -> str:
     return json.dumps(obj, separators=(",", ":"), ensure_ascii=False)
 
 
+def _clamp_lm_steps_per_mm(value, default=None) -> float:
+    """Escala PUU/mm del LM Guide. Acotada ±50 % respecto al default de fábrica."""
+    base = float(LMGUIDE_STEPS_PER_MM if default is None else default)
+    try:
+        x = float(value)
+    except (TypeError, ValueError):
+        return base
+    if not math.isfinite(x) or x <= 0:
+        return base
+    lo = LMGUIDE_STEPS_PER_MM * 0.5
+    hi = LMGUIDE_STEPS_PER_MM * 1.5
+    return max(lo, min(hi, x))
+
+
+def _lm_steps_per_mm(tune=None) -> float:
+    """Escala activa (Motion.json) o default de fábrica."""
+    if tune is None:
+        try:
+            tune = _load_motion_tune()
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            return float(LMGUIDE_STEPS_PER_MM)
+    if isinstance(tune, dict):
+        lm = tune.get("lmguide")
+        if isinstance(lm, dict) and lm.get("steps_per_mm") is not None:
+            return _clamp_lm_steps_per_mm(lm.get("steps_per_mm"))
+    return float(LMGUIDE_STEPS_PER_MM)
+
+
 def _snap_lm_mm(mm) -> float:
     """Redondea mm a la resolución del LM Guide (0.01 mm)."""
     try:
@@ -1257,18 +1150,43 @@ def _snap_lm_mm(mm) -> float:
     return round(x / LMGUIDE_MM_RES) * LMGUIDE_MM_RES
 
 
-def _puu_to_mm(puu) -> float:
+def _puu_to_mm(puu, tune=None) -> float:
     """PUU → mm absolutos a 0.01 mm (misma escala que la HMI)."""
     try:
         counts = abs(int(puu))
     except (TypeError, ValueError):
         return 0.0
-    return _snap_lm_mm(counts / LMGUIDE_STEPS_PER_MM)
+    return _snap_lm_mm(counts / _lm_steps_per_mm(tune))
 
 
-def _mm_to_puu(mm) -> int:
+def _mm_to_puu(mm, tune=None) -> int:
     snapped = _snap_lm_mm(mm)
-    return int(round(LMGUIDE_PUU_SIGN * snapped * LMGUIDE_STEPS_PER_MM))
+    return int(round(LMGUIDE_PUU_SIGN * snapped * _lm_steps_per_mm(tune)))
+
+
+def _calibrate_lm_steps_per_mm(tune: dict, mm_cmd, mm_real) -> dict:
+    """Recalcula steps_per_mm con un punto: pedido vs real medido."""
+    try:
+        cmd = abs(float(mm_cmd))
+        real = abs(float(mm_real))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("mm pedido y mm real tienen que ser números.") from exc
+    if not math.isfinite(cmd) or not math.isfinite(real):
+        raise ValueError("mm pedido y mm real tienen que ser números finitos.")
+    if cmd < 1.0 or real < 1.0:
+        raise ValueError("Usa al menos 1 mm de recorrido para calibrar.")
+    old = _lm_steps_per_mm(tune)
+    new = _clamp_lm_steps_per_mm(old * (cmd / real))
+    out = _canonical_motion_tune(tune)
+    out["lmguide"]["steps_per_mm"] = new
+    return {
+        "tune": out,
+        "steps_per_mm_old": old,
+        "steps_per_mm": new,
+        "mm_cmd": _snap_lm_mm(cmd),
+        "mm_real": _snap_lm_mm(real),
+        "puu_cmd": _mm_to_puu(cmd, {**out, "lmguide": {**out["lmguide"], "steps_per_mm": old}}),
+    }
 
 
 def _num(value, default=0.0) -> float:
@@ -1460,6 +1378,25 @@ def _active_cut_plan() -> dict | None:
     if length <= 0:
         return None
     return _build_cut_plan(length, params, _feed_sides_of(params))
+
+
+def _sync_active_lot_cut_comp(params: dict | None = None) -> bool:
+    """Aplica compensaciones R/L al lote en curso (corte/depósito siguientes)."""
+    if not _LOT.get("active"):
+        return False
+    comps = _cut_comp_params_of(params)
+    comp_r = float(comps["cut_comp_r_mm"])
+    comp_l = float(comps["cut_comp_l_mm"])
+    prev_r = float(_LOT.get("cut_comp_r_mm") or 0.0)
+    prev_l = float(_LOT.get("cut_comp_l_mm") or 0.0)
+    changed = abs(prev_r - comp_r) >= LMGUIDE_MM_RES or abs(prev_l - comp_l) >= LMGUIDE_MM_RES
+    _LOT["cut_comp_mode"] = True
+    _LOT["cut_comp_r_mm"] = comp_r
+    _LOT["cut_comp_l_mm"] = comp_l
+    plan = _active_cut_plan()
+    if plan is not None:
+        _LOT["cut_mm"] = float(plan["last_mm"])
+    return changed
 
 
 def _clear_of(deposit: float, clearance: float) -> float:
@@ -1684,12 +1621,13 @@ def _announce_trays(cycles: int, plan: dict) -> None:
     )
 
 
-def _motion_scale() -> dict:
+def _motion_scale(tune=None) -> dict:
     return {
-        "steps_per_mm": LMGUIDE_STEPS_PER_MM,
+        "steps_per_mm": _lm_steps_per_mm(tune),
         "puu_sign": LMGUIDE_PUU_SIGN,
         "mm_res": LMGUIDE_MM_RES,
         "feed_shaft_inc_per_rev": FEED_SHAFT_INC_PER_REV,
+        "steps_per_mm_default": LMGUIDE_STEPS_PER_MM,
     }
 
 
@@ -1732,7 +1670,7 @@ def _build_motion_lines(op: str, tune: dict, body: dict):
     if op == "lmguide_move":
         if body.get("mm") is None or body.get("mm") == "":
             raise ValueError("Falta la posición en mm.")
-        puu = _mm_to_puu(body.get("mm"))
+        puu = _mm_to_puu(body.get("mm"), tune)
         tune["lmguide"]["pos_puu"] = puu
         payload = {"op": "lmguide_move", "puu": puu}
         # Manual: for_cut elige perfil de corte o movimientos comunes.
@@ -1747,7 +1685,7 @@ def _build_motion_lines(op: str, tune: dict, body: dict):
         if jog_mm == 0:
             raise ValueError("El jog en mm tiene que ser distinto de cero.")
         direction = 1 if int(body.get("dir") or 1) >= 0 else -1
-        delta = _mm_to_puu(direction * abs(jog_mm))
+        delta = _mm_to_puu(direction * abs(jog_mm), tune)
         payload = {"op": "lmguide_jog", "delta_puu": delta}
         payload.update(_lm_cmd_fields(tune, for_cut=False))
         return tune, [_compact(payload)]
@@ -1794,16 +1732,25 @@ def _build_motion_lines(op: str, tune: dict, body: dict):
     raise ValueError("Orden Motion no reconocida.")
 
 
-# Firmware: PARAM_LM_MOVE_DONE_TIMEOUT_MS (45s) × PARAM_LM_MOVE_MAX_ATTEMPTS (1).
-_MOTION_LM_MOVE_TIMEOUT_S = 50.0
+# Respaldo Python ante falta de respuesta. El timeout funcional vive en el MCU.
+# Feed: PARAM_FEED_STAGE_LASER_TIMEOUT_MS (4 s). LM: PARAM_LM_MOVE_DONE_TIMEOUT_MS (2 s).
+_MOTION_FEED_TIMEOUT_S = 5.0  # firmware 4 s + margen COM (MCU reporta E033/E034 antes)
+_MOTION_FEED_OVERLAP_TIMEOUT_S = 5.0
+_MOTION_LM_MOVE_TIMEOUT_S = 4.0  # firmware 2 s + margen COM
+_MOTION_RELEASE_PART_TIMEOUT_S = 6.0  # tabla 5 s; log real OK a 5.14 s (clear+home)
 _MOTION_STATUS_TIMEOUT_S = 3.0
+_MOTION_SIMPLE_CMD_TIMEOUT_S = 3.0
+_PLC_CONFIRM_TIMEOUT_S = 4.0
+_OVERLAP_HOLDER_WAIT_S = 4.0
 
 
 def _reply_wait_s(line: str) -> float:
     if "release_part" in line:
-        return _MOTION_LM_MOVE_TIMEOUT_S * 2.0
+        return _MOTION_RELEASE_PART_TIMEOUT_S
     if "lmguide_home" in line or "lmguide_move" in line:
         return _MOTION_LM_MOVE_TIMEOUT_S
+    if "feed_stage" in line:
+        return _MOTION_FEED_TIMEOUT_S
     if "motion_hw_init" in line:
         return 55.0
     if "feeder_init" in line or "lmguide_servo_on" in line:
@@ -1814,10 +1761,10 @@ def _reply_wait_s(line: str) -> float:
             ms = int(json.loads(line).get("ms") or 200)
         except (TypeError, ValueError, json.JSONDecodeError):
             pass
-        return max(2.0, (ms / 1000.0) + 2.0)
+        return max(_MOTION_SIMPLE_CMD_TIMEOUT_S, (ms / 1000.0) + 2.0)
     if '"op":"status"' in line:
         return _MOTION_STATUS_TIMEOUT_S
-    return 2.0
+    return _MOTION_SIMPLE_CMD_TIMEOUT_S
 
 
 def _normalize_online_map(raw, motion: str, plc: str, andon: str, prefeeder: str) -> dict:
@@ -1912,6 +1859,14 @@ def _plc_mirror_invalidate() -> None:
         _PLC_MIRROR["known"] = False
 
 
+def _plc_mirror_clear_outputs() -> None:
+    """Tras all_off/reset ok: todas las salidas quedan apagadas."""
+    with _PLC_MIRROR_LOCK:
+        for key in ("holder", "encoder", "gripper", "cutter_r", "cutter_l"):
+            _PLC_MIRROR[key] = False
+        _PLC_MIRROR["known"] = True
+
+
 def _plc_mirror_apply(msg: dict | None) -> None:
     """Actualiza banderas desde status/valve reply del PLC."""
     if not isinstance(msg, dict):
@@ -1924,6 +1879,19 @@ def _plc_mirror_apply(msg: dict | None) -> None:
             if key in msg:
                 _PLC_MIRROR[key] = bool(msg[key])
         _PLC_MIRROR["known"] = True
+
+
+def _plc_mirror_public() -> dict:
+    """Copia del espejo para la HMI (sin consultar el PLC)."""
+    with _PLC_MIRROR_LOCK:
+        return {
+            "known": bool(_PLC_MIRROR.get("known")),
+            "holder": bool(_PLC_MIRROR.get("holder")),
+            "encoder": bool(_PLC_MIRROR.get("encoder")),
+            "gripper": bool(_PLC_MIRROR.get("gripper")),
+            "cutter_r": bool(_PLC_MIRROR.get("cutter_r")),
+            "cutter_l": bool(_PLC_MIRROR.get("cutter_l")),
+        }
 
 
 def _plc_mirror_check(expected: dict) -> tuple[bool, str | None]:
@@ -2302,10 +2270,6 @@ def _read_lines_until_op(
         op = msg.get("op")
         if op:
             seen.add(op)
-            if op == "laser_stop_trace":
-                _laser_stop_log_write(msg)
-            if op == "feed_pv_trace":
-                _feed_pv_log_rx(msg)
             if on_line is not None:
                 on_line(msg)
         if want_op not in seen:
@@ -2445,7 +2409,7 @@ def _send_plc_serial(lines):
                     request = {}
                     expected_op = ""
                 if expected_op:
-                    wait_s = 2.0
+                    wait_s = _PLC_CONFIRM_TIMEOUT_S
                     if expected_op == "valve":
                         for key in ("ms", "settle_ms"):
                             if request.get(key):
@@ -2454,7 +2418,7 @@ def _send_plc_serial(lines):
                                 )
                     replies.extend(_read_lines_until_op(ser, expected_op, wait_s))
                 else:
-                    reply = _read_serial_line(ser, 2.0)
+                    reply = _read_serial_line(ser, _PLC_CONFIRM_TIMEOUT_S)
                     if reply:
                         replies.append(reply)
     except Exception as exc:
@@ -2468,8 +2432,12 @@ def _send_plc_serial(lines):
             msg = json.loads(raw)
         except (TypeError, json.JSONDecodeError):
             continue
-        if msg.get("op") in ("status", "valve"):
+        op = str(msg.get("op") or "")
+        if op in ("status", "valve"):
             _plc_mirror_apply(msg)
+        elif op in ("all_off", "reset") and bool(msg.get("ok", True)):
+            # replyOk no trae GPIO; all_off/reset apagan salidas → espejo a falso.
+            _plc_mirror_clear_outputs()
     return {"sent": True, "reason": "", "replies": replies}
 
 
@@ -2872,24 +2840,13 @@ def _prefeeder_offline_sides(status: dict | None) -> tuple[str, ...]:
 
 
 def _prefeeder_not_ready_message(status: dict | None) -> str:
-    """Motivo concreto de E099 (evita ‘no listo’ genérico cuando un esclavo cayó)."""
+    """Mensaje de catálogo para PreAlimentador no listo (E092 / fallas / E099)."""
     if not status:
         return error_codes.format_message("E092")
     faults = _prefeeder_fault_codes_active(status)
     if faults:
         _, msg = _machine_fault_message(tuple(faults))
         return msg
-    offline = _prefeeder_offline_sides(status)
-    if offline:
-        sides = "/".join(offline)
-        return (
-            f"Error E099 PreAlimentador: lado {sides} sin enlace WiFi al maestro "
-            "(revisa alimentación/red del esclavo)."
-        )
-    if not status.get("feed_lock"):
-        return (
-            "Error E099 PreAlimentador: desbloqueado — pulsa Iniciar para estabilizar y bloquear."
-        )
     return error_codes.format_message("E099")
 
 
@@ -3295,6 +3252,8 @@ def _joint_begin_common(
     _JOINT["healthy_side"] = healthy if side != "RL" else ""
     _JOINT["segregate_only"] = side == "RL" or not healthy
     _side_disable(side, reason)
+    # Lado omitido → Disable; el sano sigue. Enable del afectado va en Reset (antes de purga).
+    _joint_disable_alarmed_feeder(side)
     if origin in ("feed", "fabricate") and side != "RL" and healthy and not cut_confirmed:
         _JOINT["finish_piece"] = True
         _JOINT["hold_grippers"] = True
@@ -3359,6 +3318,7 @@ def _warn_apply_event(
         if merged != prev:
             _JOINT["skip_cut"] = merged
             _side_disable(side, reason)
+            _joint_disable_alarmed_feeder(side)
             code = _joint_code_for_side(merged, first_reason)
             msg = _warn_banner_text(merged, first_reason)
             _recovery_set(side=merged, code=code, mensaje=msg)
@@ -4422,7 +4382,7 @@ def _plc_status_after_command(sent: dict) -> dict | None:
     return _plc_status_get()
 
 
-def _plc_wait_ready(timeout_s: float = 3.0) -> dict | None:
+def _plc_wait_ready(timeout_s: float = _PLC_CONFIRM_TIMEOUT_S) -> dict | None:
     """Obtiene el estado actual; las salidas por nivel no tienen cola pendiente."""
     return _plc_status_get()
 
@@ -4502,7 +4462,7 @@ def _plc_fault_codes_ops(status: dict | None) -> list[str]:
     return error_codes.plc_fault_codes(status)
 
 
-def _plc_confirm(expected: dict, timeout_s: float = 3.0) -> tuple[bool, str | None]:
+def _plc_confirm(expected: dict, timeout_s: float = _PLC_CONFIRM_TIMEOUT_S) -> tuple[bool, str | None]:
     """Confirma salidas lógicas. Sin COM no se da por bueno."""
     if not _plc_serial_configured():
         return False, "E017"
@@ -5084,6 +5044,7 @@ def _public_machine_state() -> dict:
         }
     state["checklist_log"] = _checklist_log_read()
     state["prefeeder"] = _prefeeder_public_summary()
+    state["plc_outputs"] = _plc_mirror_public()
     return state
 
 
@@ -5314,14 +5275,55 @@ def _cycle_sleep_ms(ms: int) -> bool:
     return not _cycle_should_abort()
 
 
+def _cycle_gripper_off_overlap_wait(params: dict) -> bool:
+    """Depósito: manda gripper OFF y cuenta ms_after_grip_release en paralelo.
+
+    PLC con settle_ms=0 (ack al aplicar GPIO). El orquestador no bloquea el
+    paso 8 a esa confirmación: cuenta el tiempo de UI y sigue. Si el ack llega
+    en falso durante la espera, aborta antes de home.
+    """
+    wait_ms = int(params["ms_after_grip_release"])
+    box: dict = {"done": False, "ok": False, "code": None}
+    worker_gen = getattr(_CYCLE_WORKER_TLS, "gen", None)
+
+    def run() -> None:
+        if worker_gen is not None:
+            _CYCLE_WORKER_TLS.gen = worker_gen
+        ok_g, code_g = _plc_accept_valve(
+            _cycle_plc_send(
+                {
+                    "op": "valve",
+                    "name": "gripper",
+                    "on": False,
+                    "settle_ms": 0,
+                }
+            ),
+            {"gripper": False},
+        )
+        box["ok"] = bool(ok_g)
+        box["code"] = code_g
+        box["done"] = True
+
+    threading.Thread(target=run, daemon=True).start()
+    if not _cycle_sleep_ms(wait_ms):
+        return False
+    if box["done"] and not box["ok"]:
+        if box["code"]:
+            _cycle_fail(box["code"])
+        if _cycle_should_stop():
+            _overlap_reset()
+        return False
+    return True
+
+
 def _cycle_plc_send(payload: dict):
     return _plc_send_payload(payload, push_log=True)
 
 
-def _cycle_motion_send(payload: dict, timeout_s: float = 2.0, inject=None, on_line=None):
+def _cycle_motion_send(
+    payload: dict, timeout_s: float = _MOTION_SIMPLE_CMD_TIMEOUT_S, inject=None, on_line=None
+):
     line = _compact(payload)
-    if isinstance(payload, dict) and payload.get("op") == "feed_stage":
-        _feed_pv_log_tx(payload, origin="cycle_motion_send")
     sent = _send_motion_serial(
         [line], line_timeout_s=timeout_s, inject=inject, on_line=on_line
     )
@@ -5876,16 +5878,34 @@ def _cycle_feeder_servo(on: bool, side: str | None = None) -> bool:
     )
 
 
-def _joint_reenable_healthy_feeder() -> None:
-    """Tras omitir el lado alarmado: volver a Enable el motor del lado sano."""
-    healthy = str(_JOINT.get("healthy_side") or "").strip().upper()
-    if healthy not in ("R", "L"):
-        healthy = _feeder_servo_target_side()
-    if healthy not in ("R", "L"):
+def _joint_disable_alarmed_feeder(side: str) -> None:
+    """Al omitir el lado alarmado: Disable ServoCAN (el sano sigue trabajando)."""
+    s = str(side or "").strip().upper()
+    if s == "RL":
+        _joint_disable_alarmed_feeder("R")
+        _joint_disable_alarmed_feeder("L")
         return
-    if not _cycle_feeder_servo(True, healthy):
+    if s not in ("R", "L"):
+        return
+    if not _cycle_feeder_servo(False, s):
         _push_event(
-            f"ServoCAN {healthy} Enable (lado sano tras Warning) no confirmó.",
+            f"ServoCAN {s} Disable (lado alarmado) no confirmó.",
+            "warn",
+        )
+
+
+def _joint_enable_affected_feeder_for_purga(side: str | None = None) -> None:
+    """Antes de purgar: Enable del lado afectado (si no, no puede Alimentar/Expulsar)."""
+    s = str(side or _recovery_get().get("side") or "").strip().upper()
+    if s == "RL":
+        _joint_enable_affected_feeder_for_purga("R")
+        _joint_enable_affected_feeder_for_purga("L")
+        return
+    if s not in ("R", "L"):
+        return
+    if not _cycle_feeder_servo(True, s):
+        _push_event(
+            f"ServoCAN {s} Enable (antes de purga) no confirmó.",
             "warn",
         )
 
@@ -6033,7 +6053,7 @@ def _cycle_run_step(step_id: str, params: dict) -> bool:
         payload = _feed_stage_payload(sides if sides in ("R", "L") else None)
         side_name = {"R": "derecho", "L": "izquierdo", "LR": "L y R"}.get(sides, sides)
         _set_machine_ui(mensaje=_cycle_piece_prefix() + f"Alimentación {side_name}.")
-        sent = _cycle_motion_send(payload, timeout_s=65.0)
+        sent = _cycle_motion_send(payload, timeout_s=_MOTION_FEED_TIMEOUT_S)
         found, ok, error_name, feed, warn_name = _read_feed_stage(sent)
         if not sent.get("sent"):
             _cycle_fail(sent.get("code") or "E043")
@@ -6056,8 +6076,6 @@ def _cycle_run_step(step_id: str, params: dict) -> bool:
             _joint_begin_from_feed(warn_side, warn_reason or "joint")
             if warn_side == "RL" or not _JOINT.get("finish_piece"):
                 return False
-            # Lado omitido: re-Enable el motor del lado sano (no quedar en Disable).
-            _joint_reenable_healthy_feeder()
         empty = _feed_stage_empty_error(feed, sides)
         if sides == "LR" and not (_JOINT.get("active") and _JOINT.get("finish_piece")):
             skip = str(_JOINT.get("skip_cut") or "").upper()
@@ -6276,25 +6294,11 @@ def _cycle_run_step(step_id: str, params: dict) -> bool:
         # Error en el tramo con pieza sujeta: no abrir pinzas (retención).
         if _cycle_should_abort():
             return False
-        ok_g, code_g = _plc_accept_valve(
-            _cycle_plc_send(
-                {
-                    "op": "valve",
-                    "name": "gripper",
-                    "on": False,
-                    "settle_ms": int(params["ms_after_grip_release"]),
-                }
-            ),
-            {"gripper": False},
-        )
-        if not ok_g:
-            if code_g:
-                _cycle_fail(code_g)
-            if _cycle_should_stop():
-                _overlap_reset()
+        # Abrir pinzas + conteo UI en paralelo; no esperar settle/ack para el paso 8.
+        if not _cycle_gripper_off_overlap_wait(params):
             return False
         _gripper_holding_set(False)
-        # Cadencia = liberación confirmada (no fin del paso 8).
+        # Cadencia = mando de abrir + conteo local (no fin del paso 8).
         _cadence_on_gripper_off()
         # REVERTIR: este era el arranque del solape (pinzas ya abiertas).
         # Hoy solo cubre si el paso 6 no alcanzó a armar.
@@ -6383,7 +6387,7 @@ def _cycle_run_step(step_id: str, params: dict) -> bool:
         feed_inject, feed_line = _overlap_feed_hook()
         sent = _cycle_motion_send(
             payload,
-            timeout_s=_MOTION_LM_MOVE_TIMEOUT_S * 2.0,
+            timeout_s=_MOTION_RELEASE_PART_TIMEOUT_S,
             inject=feed_inject,
             on_line=feed_line,
         )
@@ -6515,7 +6519,7 @@ def _feed_prime_run(params: dict) -> bool:
         return False
     # FeedStage aplica tune + set0 interno: una sola orden Motion.
     payload = _feed_stage_payload(sides if sides in ("R", "L") else None)
-    sent = _cycle_motion_send(payload, timeout_s=65.0)
+    sent = _cycle_motion_send(payload, timeout_s=_MOTION_FEED_TIMEOUT_S)
     if _cycle_should_stop():
         return False
     found, ok, _err, feed, _warn = _read_feed_stage(sent)
@@ -6881,7 +6885,7 @@ def _overlap_send_feed_blocking() -> bool:
     if _OVERLAP["holder_error"] and not _OVERLAP["holder_ready"].is_set():
         _cycle_fail(_OVERLAP["holder_error"] if _OVERLAP["holder_error"] != "stop" else "E010")
         return False
-    if not _OVERLAP["holder_ready"].wait(3.0):
+    if not _OVERLAP["holder_ready"].wait(_OVERLAP_HOLDER_WAIT_S):
         if _cycle_should_stop():
             return False
         _cycle_fail(_OVERLAP["holder_error"] or "E010")
@@ -6897,7 +6901,7 @@ def _overlap_send_feed_blocking() -> bool:
     payload = _feed_stage_payload(
         next_sides if next_sides in ("R", "L") else None, edge=True
     )
-    sent = _cycle_motion_send(payload, timeout_s=65.0)
+    sent = _cycle_motion_send(payload, timeout_s=_MOTION_FEED_TIMEOUT_S)
     if _cycle_should_stop():
         return False
     if not sent.get("sent"):
@@ -6933,11 +6937,10 @@ def _overlap_start_feed_task() -> None:
     threading.Thread(target=run, daemon=True).start()
 
 
-def _overlap_wait_feed_done(timeout_s: float = 25.0) -> bool:
+def _overlap_wait_feed_done(timeout_s: float = _MOTION_FEED_OVERLAP_TIMEOUT_S) -> bool:
     """Espera la alimentación solapada antes de entregar el paso 4 al siguiente ciclo.
 
-    25 s ≈ laser timeout Motion (15 s) + margen de home/release; antes 120 s
-    dejaba la UI al 94 % con el feed ya colgado.
+    Tope Python = firmware FeedStage (4 s) + margen COM; el MCU reporta E033/E034.
     """
     if not _OVERLAP["on"]:
         return True
@@ -7906,6 +7909,8 @@ def _warning_reset_to_recovery() -> tuple[bool, str]:
     _gripper_holding_set(False)
     _JOINT["hold_grippers"] = False
     _feed_prime_clear()
+    # Enable del lado afectado ANTES de la purga (Alimentar/Expulsar lo necesitan).
+    _joint_enable_affected_feeder_for_purga(side)
     with _STATE_LOCK:
         _MACHINE_STATE["post_error_purga"] = True
     _recovery_set(
@@ -7929,7 +7934,10 @@ def _warning_reset_to_recovery() -> tuple[bool, str]:
         mensaje=msg,
         en_curso=keep,
     )
-    _push_event("Reset Warning — pinzas liberadas; sigue la recuperación.")
+    _push_event(
+        "Reset Warning — pinzas liberadas; ServoCAN del lado afectado en Enable; "
+        "sigue la recuperación."
+    )
     return True, ""
 
 
@@ -8411,7 +8419,7 @@ def _push_saved_motion_tune() -> dict:
 
 def _feed_once(side: str | None):
     payload = _feed_stage_payload(side)
-    sent = _cycle_motion_send(payload, timeout_s=65.0)
+    sent = _cycle_motion_send(payload, timeout_s=_MOTION_FEED_TIMEOUT_S)
     found, ok, error_name, feed, warn_name = _read_feed_stage(sent)
     _set_machine_ui(feed=feed)
     if not sent.get("sent"):
@@ -8466,7 +8474,7 @@ def _feeder_test(side: str, tune: dict) -> dict:
     feed_payload["side"] = side
     # Probar: siempre hasta el láser (sin Joint/Material/encoder).
     feed_payload["mode"] = "laser"
-    feed_payload["timeout_ms"] = 60000
+    feed_payload["timeout_ms"] = 60000  # Probar individual: no usa el tope de ciclo (4 s)
     feed_payload["feed_validate_encoder"] = False
     feed_sent = _cycle_motion_send(feed_payload, timeout_s=65.0)
     found, feed_ok, error_name, feed, _warn = _read_feed_stage(feed_sent)
@@ -8837,6 +8845,9 @@ def _purga_start(_data=None) -> tuple[bool, str]:
         return False, err
     # En ruta post-error se conserva el paso pausado; no rearmar a paso 1 al terminar.
     recovery = bool(_MACHINE_STATE.get("post_error_purga"))
+    # Si hay Warning activo: Enable del lado afectado antes de Alimentar/Expulsar.
+    if _joint_active():
+        _joint_enable_affected_feeder_for_purga()
     _ROUTINE["from_lote"] = bool(_MACHINE_STATE.get("ciclo_en_curso")) and not recovery
     _set_routine_ui(
         rutina="purga",
@@ -9082,6 +9093,8 @@ def _purga_limpiar_action(data=None) -> tuple[bool, str]:
     side = str((data or {}).get("side") or "").strip().upper()
     if side not in ("R", "L"):
         side = None
+    # Expulsar necesita Enable del lado que se va a mover.
+    _joint_enable_affected_feeder_for_purga(side or None)
     ok, err = _start_routine(lambda: _purga_limpiar_run(side))
     if not ok:
         _set_routine_ui(rutina_fase="espera", rutina_manos=False)
@@ -9547,6 +9560,7 @@ def _purga_claim(fase: str) -> bool:
 def _purga_alimentar_action(data=None) -> tuple[bool, str]:
     if not _purga_claim("alimentar"):
         return False, "La purga no está esperando alimentación."
+    _joint_enable_affected_feeder_for_purga()
     ok, err = _start_routine(_purga_alimentar_run)
     if not ok:
         _set_routine_ui(rutina_fase="espera")
@@ -9722,6 +9736,8 @@ def _recovery_start_auto_purga() -> tuple[bool, str]:
     ready, err = _require_links()
     if not ready:
         return False, err
+    if _joint_active():
+        _joint_enable_affected_feeder_for_purga()
     _ROUTINE.pop("purga_user_cancel", None)
     label, aviso = _purga_continuar_banner()
     _recovery_set(step="purga", busy=True)
@@ -10131,6 +10147,16 @@ def cycle_config():
         )
     except OSError:
         return jsonify({"ok": False, "error": "No se pudo guardar cycle.json"}), 500
+    lot_comp_changed = False
+    if ("cut_comp_r_mm" in patch or "cut_comp_l_mm" in patch) and _LOT.get("active"):
+        lot_comp_changed = _sync_active_lot_cut_comp(params)
+        if lot_comp_changed:
+            _push_event(
+                f"Compensación aplicada al lote: "
+                f"R {float(params['cut_comp_r_mm']):+.2f} / "
+                f"L {float(params['cut_comp_l_mm']):+.2f} mm "
+                f"(siguiente corte)."
+            )
     if tray_warn:
         _push_event(tray_warn, "warn" if not tray_error else "error")
     elif tray_plan and int(tray_plan.get("stacks") or 0) > 0:
@@ -10171,7 +10197,7 @@ def motion_tune():
             {
                 "ok": True,
                 "tune": tune,
-                **_motion_scale(),
+                **_motion_scale(tune),
                 "esp32_line": _motion_tune_flat(tune),
             }
         )
@@ -10190,7 +10216,7 @@ def motion_tune():
         {
             "ok": True,
             "tune": tune,
-            **_motion_scale(),
+            **_motion_scale(tune),
             "esp32_line": _motion_tune_flat(tune),
         }
     )
@@ -10300,8 +10326,34 @@ def motion_cmd():
         except OSError:
             return jsonify({"ok": False, "error": "No se pudo guardar Motion.json"}), 500
         result = _feeder_test(side, tune)
-        result.update({"op": op, "tune": tune, **_motion_scale()})
+        result.update({"op": op, "tune": tune, **_motion_scale(tune)})
         return jsonify(result)
+
+    if op == "lmguide_calibrate":
+        # Un punto: mm pedido vs mm real → nueva escala. Sin Serial.
+        try:
+            cal = _calibrate_lm_steps_per_mm(tune, body.get("mm_cmd"), body.get("mm_real"))
+        except (TypeError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        tune = cal["tune"]
+        try:
+            _save_motion_tune(tune)
+        except OSError:
+            return jsonify({"ok": False, "error": "No se pudo guardar Motion.json"}), 500
+        return jsonify(
+            {
+                "ok": True,
+                "op": op,
+                "tune": tune,
+                "sent": False,
+                "command_ok": True,
+                "mm_cmd": cal["mm_cmd"],
+                "mm_real": cal["mm_real"],
+                "puu_cmd": cal["puu_cmd"],
+                "steps_per_mm_old": cal["steps_per_mm_old"],
+                **_motion_scale(tune),
+            }
+        )
 
     try:
         tune, lines = _build_motion_lines(op, tune, body)
@@ -10352,7 +10404,7 @@ def motion_cmd():
             "tune": tune,
             "lines": lines,
             "command_ok": command_ok,
-            **_motion_scale(),
+            **_motion_scale(tune),
             **sent,
         }
     )

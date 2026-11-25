@@ -19,7 +19,6 @@ struct FeedParams {
   float pullerRpm = PULLER_RPM;
   uint16_t settleMs = HOLGURA_SETTLE_MS;
   float onSec = HOLGURA_ON_FEED_SEC;
-  float recoverSec = HOLGURA_RECOVER_SEC;
 };
 
 struct StatusPod {
@@ -57,8 +56,6 @@ static void clampFeed(FeedParams& p) {
   if (p.settleMs > HOLGURA_SETTLE_MS_MAX) p.settleMs = HOLGURA_SETTLE_MS_MAX;
   if (p.onSec < 0.1f) p.onSec = 0.1f;
   if (p.onSec > 120.0f) p.onSec = 120.0f;
-  if (p.recoverSec < HOLGURA_RECOVER_SEC_MIN) p.recoverSec = HOLGURA_RECOVER_SEC_MIN;
-  if (p.recoverSec > HOLGURA_RECOVER_SEC_MAX) p.recoverSec = HOLGURA_RECOVER_SEC_MAX;
 }
 
 // --- Motores vía MotorControl: Puller=A (loop, 10:1), Feeder=B (tarea, 1:1). ---
@@ -152,7 +149,6 @@ static uint32_t holguraTimedEndMs = 0;
 static bool holguraLastOn = false;
 static bool holguraSawOn = false;
 static uint32_t holguraOffSinceMs = 0;
-static uint32_t holguraOffMovingSinceMs = 0;   // OFF + feeder moviendo
 static uint32_t holguraOffStoppedSinceMs = 0;  // OFF + feeder quieto
 static bool gEmptyIdle = false;  // material agotado: idle local hasta iniciar / clear
 static bool gFeedLockPrev = true;
@@ -240,29 +236,16 @@ static void serviceHolguraEmptyIdle(uint32_t nowMs, const SensorSnapshot& s) {
   stopFeederDemand();
 }
 
-// Holgura OFF desbloqueado:
-//  - feeder quieto → FAULT_HOLGURA
-//  - feeder moviendo recover_s sin reponer ON → FAULT_HOLGURA
-static void serviceHolguraWatchdog(uint32_t nowMs, const SensorSnapshot& s, const FeedParams& p) {
+// Holgura OFF desbloqueado y feeder quieto → FAULT_HOLGURA
+static void serviceHolguraWatchdog(uint32_t nowMs, const SensorSnapshot& s) {
   if (gFeedLock || forceFeedActive() || fault != FAULT_NONE || gEmptyIdle) {
-    holguraOffMovingSinceMs = 0;
     holguraOffStoppedSinceMs = 0;
     return;
   }
-  if (s.holguraOn) {
-    holguraOffMovingSinceMs = 0;
+  if (s.holguraOn || FeedMotorMoving()) {
     holguraOffStoppedSinceMs = 0;
     return;
   }
-  if (FeedMotorMoving()) {
-    holguraOffStoppedSinceMs = 0;
-    if (!holguraOffMovingSinceMs) holguraOffMovingSinceMs = nowMs;
-    const uint32_t limMs = (uint32_t)(p.recoverSec * 1000.0f);
-    if (limMs && (nowMs - holguraOffMovingSinceMs) >= limMs)
-      enterFault(FAULT_HOLGURA);
-    return;
-  }
-  holguraOffMovingSinceMs = 0;
   if (!holguraOffStoppedSinceMs) holguraOffStoppedSinceMs = nowMs;
   // Con demanda: espera arranque del RMT. Sin demanda: falla pronto.
   const uint32_t stopLim =
@@ -336,7 +319,6 @@ static void FeedingMode(uint32_t nowMs) {
     tryClearFault(s);
     gEmptyIdle = false;
     holguraOffSinceMs = 0;
-    holguraOffMovingSinceMs = 0;
     holguraOffStoppedSinceMs = 0;
   }
 
@@ -344,7 +326,6 @@ static void FeedingMode(uint32_t nowMs) {
   if (gFeedLockPrev && !gFeedLock) {
     gEmptyIdle = false;
     holguraOffSinceMs = 0;
-    holguraOffMovingSinceMs = 0;
     holguraOffStoppedSinceMs = 0;
   }
   gFeedLockPrev = gFeedLock;
@@ -377,7 +358,7 @@ static void FeedingMode(uint32_t nowMs) {
 
   serviceHolguraEmptyIdle(nowMs, s);
   applyFeedOutputs(p);
-  serviceHolguraWatchdog(nowMs, s, p);
+  serviceHolguraWatchdog(nowMs, s);
 }
 
 // --- HTTP hacia el maestro. No corre en el lazo de alimentación. ---
@@ -491,7 +472,6 @@ static void applyConfigJson(const String& body) {
   if (jsonNum(cfg, "puller_rpm", v)) next.pullerRpm = v;
   if (jsonNum(cfg, "settle_ms", v)) next.settleMs = (uint16_t)v;
   if (jsonNum(cfg, "on_s", v)) next.onSec = v;
-  if (jsonNum(cfg, "recover_s", v)) next.recoverSec = v;
   bool bit = false;
   if (jsonBoolCfg(body, "feed_lock", bit)) gFeedLock = bit;
   if (jsonBoolCfg(body, "force_feed", bit)) {
@@ -506,13 +486,12 @@ static void applyConfigJson(const String& body) {
   if (!paramMux) return;
   if (xSemaphoreTake(paramMux, portMAX_DELAY)) {
     const bool changed = next.rpm != gFeed.rpm || next.pullerRpm != gFeed.pullerRpm
-      || next.settleMs != gFeed.settleMs || next.onSec != gFeed.onSec
-      || next.recoverSec != gFeed.recoverSec;
+      || next.settleMs != gFeed.settleMs || next.onSec != gFeed.onSec;
     gFeed = next;
     xSemaphoreGive(paramMux);
     if (changed)
-      Serial.printf("[PF] config rpm %.1f puller %.1f settle %u on %.2f recover %.1f\n",
-                    next.rpm, next.pullerRpm, next.settleMs, next.onSec, next.recoverSec);
+      Serial.printf("[PF] config rpm %.1f puller %.1f settle %u on %.2f\n",
+                    next.rpm, next.pullerRpm, next.settleMs, next.onSec);
   }
 }
 

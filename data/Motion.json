@@ -2,28 +2,29 @@
   "feeder": {
     "R": {
       "profile_velocity_pps": 8333,
-      "secondary_velocity_pps": 833,
+      "secondary_velocity_pps": 8333,
       "speed_switch_ms": 350,
       "target_position_counts": 42500
     },
     "L": {
       "profile_velocity_pps": 8333,
-      "secondary_velocity_pps": 833,
+      "secondary_velocity_pps": 8333,
       "speed_switch_ms": 350,
       "target_position_counts": 42500
     }
   },
   "lmguide": {
     "pr_speed_rpm": 3000.0,
-    "accel_ms": 150,
-    "decel_ms": 500,
+    "accel_ms": 80,
+    "decel_ms": 80,
     "travel_pr_speed_rpm": 3000.0,
-    "travel_accel_ms": 100,
-    "travel_decel_ms": 300,
-    "pos_puu": -8587
+    "travel_accel_ms": 80,
+    "travel_decel_ms": 80,
+    "pos_puu": -8570,
+    "steps_per_mm": 17.13928185801956
   },
   "feed_stage": {
     "validate_encoder": false,
-    "dual_speed_enable": true
+    "dual_speed_enable": false
   }
 }

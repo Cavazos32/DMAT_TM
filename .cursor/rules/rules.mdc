@@ -1,12 +1,12 @@
 ---
-description: Cortadora de tubo — Firmware y lógica de control (rules.md v0.7)
+description: Cortadora de tubo — Firmware y lógica de control (rules.md v0.8)
 alwaysApply: true
 ---
 
 # rules.md
 # Cortadora de tubo — Firmware y lógica de control
 
-**Estado del documento:** Borrador — v0.7  
+**Estado del documento:** Borrador — v0.8  
 **Proyecto:** Cortadora de tubo dual / espejo  
 **Requisito principal:** Tolerancia de corte de ±2 mm por lado  
 **Alcance:** Firmware, responsabilidades de los MCU, secuencias de control, comunicación y reglas de desarrollo de software.
@@ -287,8 +287,9 @@ Al confirmar los cortadores apagados, si hay otra pieza, arranca el Bloque 1 de 
 
 1. Mover el LM Guide a la posición de descarga.
 2. Esperar 100 ms.
-3. Desactivar Grippers Dual.
-4. Esperar 100 ms.
+3. Desactivar Grippers Dual (mando al PLC sin settle bloqueante).
+4. En paralelo al mando, el orquestador cuenta `ms_after_grip_release` (valor de UI; inicial 50 ms) y continúa al paso 8 al vencer ese conteo, sin esperar la confirmación/settle del PLC para arrancar ReleasePart.
+5. Si el ack del PLC llega en falso durante el conteo, la máquina no avanza a home.
 
 La alimentación de la siguiente pieza ya puede estar en curso desde que se apagaron los cortadores. La liberación del gripper no es el disparo de esa alimentación.
 
@@ -420,7 +421,7 @@ Parámetros identificados hasta el momento:
 | Espera en posición de descarga del LM Guide | 100 ms |
 | Tiempo de activación de cortadores | 50 ms |
 | Espera después de liberar cortadores | 100 ms |
-| Espera después de liberar pinzas | 100 ms |
+| Conteo tras mando de abrir pinzas (paralelo a ack; UI) | 50 ms |
 | Retardo de activación del blower | 200 ms |
 | Espera final en home | 50 ms |
 

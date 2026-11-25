@@ -152,6 +152,8 @@
   let statePollTimer = null;
   let cycleStepsCatalog = [];
   let plcPollTimer = null;
+  /** Último espejo PLC del /api/state (para Liberar en purga). */
+  let lastPlcOutputs = null;
   let pfPollTimer = null;
   let checklistViewKey = "";
   let empleadoWait = null;
@@ -786,12 +788,16 @@
   function syncPlcHolderEncoderButton(status) {
     const btn = plcHolderEncoderButton();
     if (!btn || !status) return;
+    // No pisar el toggle optimista mientras la orden Liberar está en vuelo.
+    if (btn.dataset.plcBusy === "1") return;
+    if (status.known === false) return;
     if (
       typeof status.holder !== "boolean" ||
       typeof status.encoder !== "boolean"
     ) {
       return;
     }
+    // Activo = holder y encoder ON (cerrados / sujetando).
     setPlcPressed(btn, status.holder && status.encoder);
   }
 
@@ -897,29 +903,22 @@
   function formatErrorStandard(parsed, fallbackCode) {
     function one(it) {
       const code = String((it && it.code) || fallbackCode || "").trim() || "E000";
-      const moduleName = String((it && it.module) || "").trim() || "Sistema";
+      const moduleName = String((it && it.module) || "").trim() || "Main";
       let desc = String((it && it.desc) || "").trim();
       if (!desc) desc = "La máquina se detuvo.";
-      // Evitar "Error Error E090…" si el texto ya traía el prefijo.
-      desc = desc.replace(/^Error\s+[A-Z]?\d+\s+[^:]+:\s*/i, "").trim() || desc;
+      // Quitar prefijo legado "Error E090…" si el texto ya lo traía.
+      desc = desc.replace(/^(?:Error\s+)?[A-Z]?\d+\s+[^:]+:\s*/i, "").trim() || desc;
       if (isLinkComError(code)) {
         desc = stripLinkComSolution(desc) || desc;
       }
       desc = stripErrorInstructions(desc) || desc;
-      return "Error " + code + " " + moduleName + ": " + desc;
+      return code + " " + moduleName + ": " + desc;
     }
     const items = parsed && parsed.items && parsed.items.length ? parsed.items : null;
     if (items && items.length > 1) {
-      const seen = [];
       const lines = [];
       items.forEach(function (it) {
         const line = one(it);
-        const key = String((it && it.desc) || "")
-          .trim()
-          .toLowerCase();
-        // Misma descripción → no repetir el texto.
-        if (key && seen.indexOf(key) >= 0) return;
-        if (key) seen.push(key);
         if (lines.indexOf(line) >= 0) return;
         lines.push(line);
       });
@@ -1241,7 +1240,7 @@
       } else if (step === "listo") {
         els.btnOpenRecovery.textContent = "Ver recuperación";
       } else if (enError) {
-        els.btnOpenRecovery.textContent = "Abrir Error";
+        els.btnOpenRecovery.textContent = "Abrir";
       } else {
         els.btnOpenRecovery.textContent = "Continuar recuperación";
       }
@@ -1278,7 +1277,7 @@
 
     const viewStep = step || (enError ? "error" : "");
     // Solo auto-abrir al surgir un error/paso nuevo. Si el operador cierra (X),
-    // no volver a forzar el popup en cada poll: puede usar «Abrir Error».
+    // no volver a forzar el popup en cada poll: puede usar «Abrir».
     const autoKey =
       (active ? "a" : "e") +
       "|" +
@@ -1872,6 +1871,17 @@
     return cur;
   }
 
+  function motionRefreshCalScaleHint(data) {
+    const hint = document.getElementById("lmCalScaleHint");
+    if (!hint) return;
+    const steps = Number((data && data.steps_per_mm) || motionStepsPerMm);
+    if (!Number.isFinite(steps) || steps <= 0) {
+      hint.textContent = "Escala: — PUU/mm";
+      return;
+    }
+    hint.textContent = "Escala: " + steps.toFixed(6) + " PUU/mm";
+  }
+
   function motionApplyScale(data) {
     if (!data) return;
     const steps = Number(data.steps_per_mm);
@@ -1881,6 +1891,9 @@
     if (Number.isFinite(res) && res > 0) motionMmRes = res;
     const shaft = Number(data.feed_shaft_inc_per_rev);
     if (Number.isFinite(shaft) && shaft > 0) motionFeedShaftIncPerRev = shaft;
+    motionRefreshCalScaleHint(data);
+    motionRefreshPuuReadout();
+    motionRefreshCalPuuReadout();
   }
 
   function feedRpmToPps(rpm) {
@@ -1916,6 +1929,19 @@
       return;
     }
     out.textContent = String(motionMmToPuu(mm));
+  }
+
+  function motionRefreshCalPuuReadout() {
+    const input = document.getElementById("lmCalMm");
+    const out = document.getElementById("lmCalPuu");
+    if (!input || !out) return;
+    const raw = input.value.trim();
+    const mm = Number(raw);
+    if (raw === "" || !Number.isFinite(mm)) {
+      out.textContent = "PUU —";
+      return;
+    }
+    out.textContent = "PUU " + String(motionMmToPuu(mm));
   }
 
   function motionFormatMm(puu) {
@@ -2183,17 +2209,19 @@
       }
     }
     if (op === "lmguide_move") {
-      const raw = (document.getElementById("lmMoveMm") || {}).value || "";
+      const mmInputId = btn.getAttribute("data-mm-input") || "lmMoveMm";
+      const input = document.getElementById(mmInputId);
+      const raw = (input && input.value) || "";
       const mm = motionSnapMm(String(raw).trim());
       if (!Number.isFinite(mm)) {
         pushLocalEvent("Escribe la posición del LM Guide en mm.", "error");
         return;
       }
       extra.mm = mm;
-      const input = document.getElementById("lmMoveMm");
       if (input) {
         input.value = mm.toFixed(1);
-        motionRefreshPuuReadout();
+        if (mmInputId === "lmCalMm") motionRefreshCalPuuReadout();
+        else motionRefreshPuuReadout();
       }
     }
     if (op === "encoder_reset") {
@@ -3449,6 +3477,82 @@
     });
   }
 
+  const lmCalMm = document.getElementById("lmCalMm");
+  if (lmCalMm) {
+    lmCalMm.addEventListener("input", motionRefreshCalPuuReadout);
+    lmCalMm.addEventListener("change", function () {
+      const raw = lmCalMm.value.trim();
+      if (raw === "") return;
+      const snapped = motionSnapMm(raw);
+      if (!Number.isFinite(snapped)) return;
+      lmCalMm.value = snapped.toFixed(1);
+      motionRefreshCalPuuReadout();
+    });
+  }
+
+  const lmCalibrateBtn = document.getElementById("lmCalibrateBtn");
+  if (lmCalibrateBtn) {
+    lmCalibrateBtn.addEventListener("click", async function () {
+      flashButton(lmCalibrateBtn);
+      const cmdInput = document.getElementById("lmCalMm");
+      const realInput = document.getElementById("lmCalRealMm");
+      const mmCmd = motionSnapMm(String((cmdInput && cmdInput.value) || "").trim());
+      const mmReal = Number(String((realInput && realInput.value) || "").trim());
+      if (!Number.isFinite(mmCmd) || mmCmd < 1) {
+        pushLocalEvent("Escribe el mm pedido (mover) para calibrar.", "error");
+        return;
+      }
+      if (!Number.isFinite(mmReal) || mmReal < 1) {
+        pushLocalEvent("Escribe el mm real medido para calibrar.", "error");
+        return;
+      }
+      if (motionCommandInFlight) {
+        pushLocalEvent(
+          "Motion está ejecutando otra orden. Espera a que termine.",
+          "error"
+        );
+        return;
+      }
+      motionCommandInFlight = true;
+      try {
+        const res = await fetch("/api/motion/cmd", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            op: "lmguide_calibrate",
+            mm_cmd: mmCmd,
+            mm_real: mmReal,
+          }),
+        });
+        const data = await res.json();
+        if (!data.ok) {
+          pushLocalEvent(data.error || "No se pudo calibrar el LM Guide.", "error");
+          return;
+        }
+        motionApplyScale(data);
+        if (data.tune) motionFormFromTune(data.tune);
+        const oldK = Number(data.steps_per_mm_old);
+        const newK = Number(data.steps_per_mm);
+        pushLocalEvent(
+          "LM Guide calibrado: " +
+            mmCmd.toFixed(1) +
+            " mm pedido → " +
+            mmReal.toFixed(2) +
+            " mm real. Escala " +
+            (Number.isFinite(oldK) ? oldK.toFixed(6) : "?") +
+            " → " +
+            (Number.isFinite(newK) ? newK.toFixed(6) : "?") +
+            " PUU/mm."
+        );
+        setMotionHint("Escala LM Guide actualizada.");
+      } catch (err) {
+        pushLocalEvent("Error al calibrar el LM Guide.", "error");
+      } finally {
+        motionCommandInFlight = false;
+      }
+    });
+  }
+
   if (els.motionTuneForm) {
     els.motionTuneForm.querySelectorAll("[data-motion-op]").forEach(function (btn) {
       btn.addEventListener("click", function () {
@@ -3495,6 +3599,19 @@
     PLC_OUTPUTS.forEach(function (pair) {
       if (typeof status[pair[0]] === "boolean") setPlcPressed(plcButton(pair[1]), status[pair[0]]);
     });
+    if (
+      typeof status.holder === "boolean" &&
+      typeof status.encoder === "boolean"
+    ) {
+      lastPlcOutputs = {
+        known: true,
+        holder: status.holder,
+        encoder: status.encoder,
+        gripper: status.gripper === true,
+        cutter_r: status.cutter_r === true,
+        cutter_l: status.cutter_l === true,
+      };
+    }
     syncPlcHolderEncoderButton(status);
     syncMotionCuttersButton(status);
   }
@@ -3556,12 +3673,23 @@
     flashButton(btn);
     if (op === "valve") {
       const name = btn.getAttribute("data-plc-name");
-      const on = btn.getAttribute("aria-pressed") !== "true";
+      // Liberar: decidir con el espejo si está fresco; si no, con aria-pressed.
+      let on = btn.getAttribute("aria-pressed") !== "true";
+      if (name === "holder_encoder" && lastPlcOutputs && lastPlcOutputs.known) {
+        const closed =
+          lastPlcOutputs.holder === true && lastPlcOutputs.encoder === true;
+        on = !closed;
+      }
       btn.dataset.plcBusy = "1";
       setPlcPressed(btn, on);
       const data = await sendPlcOp("valve", { name: name, on: on });
       btn.dataset.plcBusy = "0";
-      if (!data || data.command_ok !== true) setPlcPressed(btn, !on);
+      if (!data || data.command_ok !== true) {
+        setPlcPressed(btn, !on);
+      } else if (data.status) {
+        // sendPlcOp ya aplicó status; reforzar Liberar por si el reply fue parcial.
+        syncPlcHolderEncoderButton(data.status);
+      }
       return;
     }
     if (op === "blower") {
@@ -3987,6 +4115,19 @@
           btn.hidden = !show;
           btn.disabled = !show;
         });
+      // Liberar sigue al espejo PLC (Alimentar/Continuar cambian válvulas sin /api/plc).
+      const outs = state.plc_outputs;
+      if (outs && outs.known) {
+        lastPlcOutputs = {
+          known: true,
+          holder: outs.holder === true,
+          encoder: outs.encoder === true,
+          gripper: outs.gripper === true,
+          cutter_r: outs.cutter_r === true,
+          cutter_l: outs.cutter_l === true,
+        };
+        if (showPurge) syncPlcHolderEncoderButton(lastPlcOutputs);
+      }
     }
     renderChecklist(state);
     if (els.mantCounterValue) {

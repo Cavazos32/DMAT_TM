@@ -56,7 +56,7 @@
         <p class="status-banner__detail" id="statusBannerDetail"></p>
       </div>
       <div class="status-banner__divider" aria-hidden="true"></div>
-      <button type="button" class="btn btn-reset status-banner__open-error" id="btnOpenRecovery" hidden>Abrir Error</button>
+      <button type="button" class="btn btn-reset status-banner__open-error" id="btnOpenRecovery" hidden>Abrir</button>
       <div class="status-banner__actions" id="statusBannerActions" hidden>
         <button type="button" class="btn btn-manual" data-action="purga_alimentar">Alimentar</button>
         <button type="button" class="btn btn-manual" data-action="purga_limpiar" data-side="R">Expulsar R</button>
@@ -281,7 +281,7 @@
               <label class="motion-field">Tras cortadores
                 <input type="number" min="0" step="1" data-cycle-param="ms_after_cutter">
               </label>
-              <label class="motion-field">Tras pinzas
+              <label class="motion-field" title="Tras mandar abrir pinzas en depósito: conteo local en paralelo antes del paso 8 (home). Si se atora, súbelo.">Tras abrir pinzas
                 <input type="number" min="0" step="1" data-cycle-param="ms_after_grip_release">
               </label>
               <label class="motion-field">Retardo blower
@@ -495,6 +495,23 @@
                       <button type="button" class="btn btn-manual" data-motion-op="lmguide_home">Buscar Home</button>
                       <button type="button" class="btn btn-estop" data-motion-op="lmguide_stop">Paro de emergencia</button>
                     </div>
+                    <p class="lm-guide__segment-label">Calibración de escala</p>
+                    <div class="lm-guide__cal" aria-label="Calibración LM Guide">
+                      <div class="lm-guide__row lm-guide__row--cal-move">
+                        <label class="motion-field">Pedido (mm)
+                          <input type="number" step="0.1" min="1" id="lmCalMm" placeholder="mm" title="Posición a mover para medir">
+                        </label>
+                        <span class="lm-guide__cal-puu" id="lmCalPuu" title="PUU que se mandará">PUU —</span>
+                        <button type="button" class="btn btn-manual" data-motion-op="lmguide_move" data-for-cut="0" data-mm-input="lmCalMm">Mover</button>
+                      </div>
+                      <div class="lm-guide__row lm-guide__row--cal-apply">
+                        <label class="motion-field">Real (mm)
+                          <input type="number" step="0.01" min="1" id="lmCalRealMm" placeholder="medido" title="Lo que midió en físico tras el mover">
+                        </label>
+                        <button type="button" class="btn btn-manual" id="lmCalibrateBtn">Calibrar</button>
+                      </div>
+                      <p class="lm-guide__cal-hint" id="lmCalScaleHint">Escala: — PUU/mm</p>
+                    </div>
                   </div>
                 </fieldset>
               </div>
@@ -597,9 +614,6 @@
                   <label class="motion-field">Tras flanco ON (s)
                     <input type="number" min="0.1" max="120" step="0.1" data-pf-side="L" data-pf-key="on_s">
                   </label>
-                  <label class="motion-field">Timeout holgura (s)
-                    <input type="number" min="1" max="120" step="0.5" data-pf-side="L" data-pf-key="recover_s" title="Holgura OFF alimentando sin recuperar → error">
-                  </label>
                 </div>
                 <div class="pf-side-card__actions">
                   <button type="button" class="btn btn-config" data-pf-save="L">Guardar L</button>
@@ -632,9 +646,6 @@
                   </label>
                   <label class="motion-field">Tras flanco ON (s)
                     <input type="number" min="0.1" max="120" step="0.1" data-pf-side="R" data-pf-key="on_s">
-                  </label>
-                  <label class="motion-field">Timeout holgura (s)
-                    <input type="number" min="1" max="120" step="0.5" data-pf-side="R" data-pf-key="recover_s" title="Holgura OFF alimentando sin recuperar → error">
                   </label>
                 </div>
                 <div class="pf-side-card__actions">

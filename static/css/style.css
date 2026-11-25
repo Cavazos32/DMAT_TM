@@ -2546,6 +2546,45 @@ html[data-theme="light"] body {
   border: 0;
 }
 
+.lm-guide__cal {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  width: 100%;
+  max-width: 36rem;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+  border-radius: 0.4rem;
+  background: color-mix(in srgb, var(--bg-elevated, var(--bg)) 92%, var(--text-muted));
+}
+
+.lm-guide__row--cal-move {
+  grid-template-columns: minmax(0, 1fr) auto minmax(4.75rem, 5.75rem);
+  align-items: end;
+}
+
+.lm-guide__row--cal-apply {
+  grid-template-columns: minmax(0, 1fr) minmax(5rem, 6.5rem);
+  align-items: end;
+}
+
+.lm-guide__cal-puu {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.25rem;
+  padding: 0 0.35rem;
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.lm-guide__cal-hint {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
 .plc-io {
   display: flex;
   flex-direction: column;
@@ -2650,6 +2689,8 @@ html[data-theme="light"] body {
   .lm-guide__row--servo,
   .lm-guide__row--pos,
   .lm-guide__row--profile,
+  .lm-guide__row--cal-move,
+  .lm-guide__row--cal-apply,
   .plc-io__row,
   .plc-io__row--blower,
   .plc-io__group--cutters {
@@ -2657,8 +2698,18 @@ html[data-theme="light"] body {
     grid-template-columns: 1fr 5.25rem 1fr;
   }
 
-  .lm-guide__row--pos {
+  .lm-guide__row--pos,
+  .lm-guide__row--cal-move,
+  .lm-guide__row--cal-apply {
     grid-template-columns: 1fr;
+  }
+
+  .lm-guide__cal {
+    max-width: none;
+  }
+
+  .lm-guide__cal-puu {
+    justify-content: flex-start;
   }
 
   .lm-guide__row--profile {
