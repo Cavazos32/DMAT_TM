@@ -31,6 +31,7 @@ static bool gFeedTickable = false;   // begin terminó; tick puede avanzar
 static bool gFeedAsync = false;      // solape: reply al completar tick (no bloquea LM)
 static bool gReleasePartBusy = false;
 static bool gInFeedTick = false;     // evita reentrada feedStageTick vía feederPoll
+static uint32_t gFeedBeginMs = 0;    // watchdog absoluto del feed (async/solape)
 static uint8_t gSerialPollDepth = 0; // pollSerial anidado (SDO/CAN → feederPoll)
 static char gDeferredSerialLine[512];
 static bool gDeferredSerialPending = false;
@@ -173,6 +174,7 @@ static MotionSide sideFromToken(const char* tok) {
 
 static void pollSerial();
 static void motionYieldMs(uint32_t ms);
+static void canRxService();
 static bool safetyIsActive();
 
 static EncoderPCNT::Reading encoderReading(MotionSide side) {
@@ -260,7 +262,7 @@ static void laserStopDiagFinalize() {
     }
     if (!anyPending) break;
     motionPollEncoders();
-    canServiceRxDrain();
+    canRxService();
     laserStopDiagPoll(millis());
     delay(1);
   }
@@ -555,7 +557,7 @@ static FeedStageSideWarn gFeedSideWarn[MOTION_SIDE_COUNT] = {
     FEED_WARN_NONE, FEED_WARN_NONE};
 /* Latch del perfil PV del feed en curso (set_tune no altera el movimiento actual). */
 static bool gFeedDualSpeed = false;
-static uint32_t gFeedSpeedSwitchMs = 0;
+static uint32_t gFeedSpeedSwitchMs[MOTION_SIDE_COUNT] = {0, 0};  // independiente R/L
 static uint32_t gFeedVel1Pps[MOTION_SIDE_COUNT] = {0, 0};
 static uint32_t gFeedVel2Pps[MOTION_SIDE_COUNT] = {0, 0};
 static bool gFeedSpeed2Sent[MOTION_SIDE_COUNT] = {false, false};
@@ -567,6 +569,16 @@ static uint8_t gFeedVelSdoPhase[MOTION_SIDE_COUNT] = {0, 0};  // 1=V1, 2=V2
 static int32_t gFeedVelSdoCmd[MOTION_SIDE_COUNT] = {0, 0};
 static uint32_t gFeedVelSdoTTx[MOTION_SIDE_COUNT] = {0, 0};
 static uint32_t gFeedVelSdoTAck[MOTION_SIDE_COUNT] = {0, 0};
+
+/* Durante feed async no tirar ACK SDO: canServiceRxDrain los descarta y el
+ * solape se queda sin V2/timeout (release_part / loop). */
+static void canRxService() {
+  if (gFeedStageBusy && gFeedTickable) {
+    feederVelPendService(gFeedVelSdo, MOTION_SIDE_COUNT);
+  } else {
+    canServiceRxDrain();
+  }
+}
 
 static bool feedStageHealthyDone(MotionSide side) {
   if (side == MOTION_SIDE_R && !gFeedReq.useR) return false;
@@ -789,6 +801,7 @@ static bool feedStageBegin(FeedStageRequest req) {
   gFeedFail = FEED_STAGE_OK;
   gFeedSideWarn[MOTION_SIDE_R] = FEED_WARN_NONE;
   gFeedSideWarn[MOTION_SIDE_L] = FEED_WARN_NONE;
+  gFeedBeginMs = millis();
   gFeedT0 = 0;
   gFeedSideTxMs[MOTION_SIDE_R] = 0;
   gFeedSideTxMs[MOTION_SIDE_L] = 0;
@@ -801,11 +814,16 @@ static bool feedStageBegin(FeedStageRequest req) {
   feedVelSdoClear(MOTION_SIDE_R);
   feedVelSdoClear(MOTION_SIDE_L);
   gFeedDualSpeed = gTune.dualSpeedEnable;
-  gFeedSpeedSwitchMs = gTune.speedSwitchMs;
   for (int i = 0; i < MOTION_SIDE_COUNT; i++) {
+    gFeedSpeedSwitchMs[i] = gTune.feeder[i].speedSwitchMs;
     gFeedVel1Pps[i] = gTune.feeder[i].profileVelocityPps;
     gFeedVel2Pps[i] = gTune.feeder[i].secondaryVelocityPps;
     if (gFeedVel2Pps[i] > gFeedVel1Pps[i]) gFeedVel2Pps[i] = gFeedVel1Pps[i];
+    // dual OFF: sin cambio V1→V2 (evita arrastre a 5 rpm con latch viejo).
+    if (!gFeedDualSpeed) {
+      gFeedVel2Pps[i] = gFeedVel1Pps[i];
+      gFeedSpeedSwitchMs[i] = 0;
+    }
     gFeedSpeed2Sent[i] = false;
   }
   laserStopDiagResetAll();
@@ -833,12 +851,15 @@ static bool feedStageBegin(FeedStageRequest req) {
 
   Serial.printf(
       "{\"op\":\"feed_pv_trace\",\"phase\":\"latch\",\"enable\":%s,"
-      "\"switch_ms\":%lu,\"run_r\":%s,\"run_l\":%s,"
-      "\"R\":{\"v1\":%lu,\"v2\":%lu},\"L\":{\"v1\":%lu,\"v2\":%lu}}\n",
-      gFeedDualSpeed ? "true" : "false", (unsigned long)gFeedSpeedSwitchMs,
+      "\"run_r\":%s,\"run_l\":%s,"
+      "\"R\":{\"v1\":%lu,\"v2\":%lu,\"switch_ms\":%lu},"
+      "\"L\":{\"v1\":%lu,\"v2\":%lu,\"switch_ms\":%lu}}\n",
+      gFeedDualSpeed ? "true" : "false",
       gFeedRunR ? "true" : "false", gFeedRunL ? "true" : "false",
       (unsigned long)gFeedVel1Pps[MOTION_SIDE_R], (unsigned long)gFeedVel2Pps[MOTION_SIDE_R],
-      (unsigned long)gFeedVel1Pps[MOTION_SIDE_L], (unsigned long)gFeedVel2Pps[MOTION_SIDE_L]);
+      (unsigned long)gFeedSpeedSwitchMs[MOTION_SIDE_R],
+      (unsigned long)gFeedVel1Pps[MOTION_SIDE_L], (unsigned long)gFeedVel2Pps[MOTION_SIDE_L],
+      (unsigned long)gFeedSpeedSwitchMs[MOTION_SIDE_L]);
 
   gEncoders.update();
   if (req.useR) encoderSetZero(MOTION_SIDE_R);
@@ -1106,12 +1127,13 @@ static bool feedStageTick() {
       }
     }
 
-    // V2 por lado: solo con T0 de movimiento propio de ese lado.
-    if (gFeedFail == FEED_STAGE_OK && gFeedDualSpeed && gFeedSpeedSwitchMs > 0) {
+    // V2 por lado: T0 de movimiento + switch_ms de ese lado.
+    if (gFeedFail == FEED_STAGE_OK && gFeedDualSpeed) {
       for (int i = 0; i < MOTION_SIDE_COUNT; i++) {
         if (gFeedSideStopped[i] || !gFeedSideStarted[i] || gFeedSpeed2Sent[i] || !gFeedSideT0[i])
           continue;
-        if (nowMs - gFeedSideT0[i] < gFeedSpeedSwitchMs) continue;
+        if (gFeedSpeedSwitchMs[i] == 0 || (nowMs - gFeedSideT0[i] < gFeedSpeedSwitchMs[i]))
+          continue;
         MotionSide side = (MotionSide)i;
         if (gFeedVel2Pps[i] == gFeedVel1Pps[i]) {
           gFeedSpeed2Sent[i] = true;
@@ -1160,6 +1182,23 @@ static bool feedStageTick() {
     gInFeedTick = false;
     return false;
   }
+
+  // Watchdog absoluto: cubre lado stopped sin validar / tick irregular en solape.
+  {
+    uint32_t feedRef = gFeedT0 ? gFeedT0 : gFeedBeginMs;
+    if (feedRef && (nowMs - feedRef >= gFeedReq.laserTimeoutMs)) {
+      if (gFeedReq.useR && !gFeedSideValidated[MOTION_SIDE_R])
+        gFeedFail = FEED_STAGE_ERR_LASER_R;
+      else if (gFeedReq.useL && !gFeedSideValidated[MOTION_SIDE_L])
+        gFeedFail = FEED_STAGE_ERR_LASER_L;
+      else
+        gFeedFail = FEED_STAGE_ERR_FEEDER;
+      feedStageFinish();
+      gInFeedTick = false;
+      return false;
+    }
+  }
+
   gInFeedTick = false;
   return true;
 }
@@ -1282,7 +1321,7 @@ static bool releasePartHomeWithBlower(uint32_t blowerDelayMs, uint32_t blowerMs)
 
   while ((uint32_t)(millis() - t0) < PARAM_LM_MOVE_DONE_TIMEOUT_MS) {
     pollSerial();
-    canServiceRxDrain();
+    canRxService();
     sensorEventsService();
     serviceBlower(millis());
 
@@ -1480,7 +1519,7 @@ static void releasePartRun(const char* line) {
     uint32_t tSettle = millis();
     while ((uint32_t)(millis() - tSettle) < homeSettleMs) {
       pollSerial();
-      canServiceRxDrain();
+      canRxService();
       sensorEventsService();
       serviceBlower(millis());
       delay(1);
@@ -1631,10 +1670,18 @@ static void applyTuneFromJson(const char* json) {
   gTune.lmguide.posPuu = (int32_t)jsonReadLong(json, "lm_pos_puu", gTune.lmguide.posPuu);
   gTune.validateEncoder = jsonReadBool(json, "feed_validate_encoder", gTune.validateEncoder);
   gTune.dualSpeedEnable = jsonReadBool(json, "feed_dual_speed_enable", gTune.dualSpeedEnable);
-  long sw = jsonReadLong(json, "feed_speed_switch_ms", (long)gTune.speedSwitchMs);
-  if (sw < 0) sw = 0;
-  if ((uint32_t)sw > PARAM_FEED_SPEED_SWITCH_MS_MAX) sw = (long)PARAM_FEED_SPEED_SWITCH_MS_MAX;
-  gTune.speedSwitchMs = (uint32_t)sw;
+  // Preferente por lado; feed_speed_switch_ms legado aplica a ambos si no vienen R/L.
+  long swLegacy = jsonReadLong(json, "feed_speed_switch_ms", -1);
+  long swR = jsonReadLong(json, "feed_r_speed_switch_ms", -1);
+  long swL = jsonReadLong(json, "feed_l_speed_switch_ms", -1);
+  if (swR < 0) swR = (swLegacy >= 0) ? swLegacy : (long)gTune.feeder[MOTION_SIDE_R].speedSwitchMs;
+  if (swL < 0) swL = (swLegacy >= 0) ? swLegacy : (long)gTune.feeder[MOTION_SIDE_L].speedSwitchMs;
+  if (swR < 0) swR = 0;
+  if (swL < 0) swL = 0;
+  if ((uint32_t)swR > PARAM_FEED_SPEED_SWITCH_MS_MAX) swR = (long)PARAM_FEED_SPEED_SWITCH_MS_MAX;
+  if ((uint32_t)swL > PARAM_FEED_SPEED_SWITCH_MS_MAX) swL = (long)PARAM_FEED_SPEED_SWITCH_MS_MAX;
+  gTune.feeder[MOTION_SIDE_R].speedSwitchMs = (uint32_t)swR;
+  gTune.feeder[MOTION_SIDE_L].speedSwitchMs = (uint32_t)swL;
 }
 
 static void applyDataFromJson(const char* json) {
@@ -1810,7 +1857,8 @@ static void handleSerialLine(char* line) {
     if (strstr(line, "feed_r_vel_pps") || strstr(line, "feed_l_vel_pps") ||
         strstr(line, "feed_r_vel2_pps") || strstr(line, "feed_l_vel2_pps") ||
         strstr(line, "feed_validate_encoder") || strstr(line, "feed_dual_speed_enable") ||
-        strstr(line, "feed_speed_switch_ms") ||
+        strstr(line, "feed_speed_switch_ms") || strstr(line, "feed_r_speed_switch_ms") ||
+        strstr(line, "feed_l_speed_switch_ms") ||
         strstr(line, "feed_r_target_counts") || strstr(line, "feed_l_target_counts") ||
         strstr(line, "lm_pos_puu")) {
       applyTuneFromJson(line);
@@ -2064,11 +2112,7 @@ static void motionYieldMs(uint32_t ms) {
   uint32_t t0 = millis();
   while ((uint32_t)(millis() - t0) < ms) {
     pollSerial();
-    if (gFeedStageBusy && gFeedTickable) {
-      feederVelPendService(gFeedVelSdo, MOTION_SIDE_COUNT);
-    } else {
-      canServiceRxDrain();
-    }
+    canRxService();
     sensorEventsService();
     delay(1);
   }
@@ -2110,7 +2154,11 @@ void setup() {
 
 void loop() {
   pollSerial();
-  canServiceRxDrain();
+  // Solape: el feed async debe avanzar aunque no haya tráfico serial nuevo.
+  if (gFeedAsync && gFeedStageBusy && gFeedTickable && !gInFeedTick) {
+    feedStageServiceAsync();
+  }
+  canRxService();
   sensorEventsService();
 
   uint32_t now = millis();

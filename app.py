@@ -591,14 +591,19 @@ def _feed_pv_log_tx(payload: dict, *, origin: str = "") -> None:
     v1_l = int(payload.get("feed_l_vel_pps") or 0)
     v2_l = int(payload.get("feed_l_vel2_pps") or 0)
     enable = bool(payload.get("feed_dual_speed_enable"))
-    switch_ms = int(payload.get("feed_speed_switch_ms") or 0)
+    sw_r = int(payload.get("feed_r_speed_switch_ms")
+               or payload.get("feed_speed_switch_ms") or 0)
+    sw_l = int(payload.get("feed_l_speed_switch_ms")
+               or payload.get("feed_speed_switch_ms") or 0)
     side = str(payload.get("side") or "LR")
     mode = str(payload.get("mode") or "cycle")
     src = f" origin={origin}" if origin else ""
     line = (
-        f"[FEED_PV TX]{src} side={side} mode={mode} dual={enable} switch_ms={switch_ms} | "
-        f"R: V1={_pps_to_rpm(v1_r)}rpm/{v1_r}pps V2={_pps_to_rpm(v2_r)}rpm/{v2_r}pps | "
-        f"L: V1={_pps_to_rpm(v1_l)}rpm/{v1_l}pps V2={_pps_to_rpm(v2_l)}rpm/{v2_l}pps"
+        f"[FEED_PV TX]{src} side={side} mode={mode} dual={enable} | "
+        f"R: V1={_pps_to_rpm(v1_r)}rpm/{v1_r}pps V2={_pps_to_rpm(v2_r)}rpm/{v2_r}pps "
+        f"sw={sw_r}ms | "
+        f"L: V1={_pps_to_rpm(v1_l)}rpm/{v1_l}pps V2={_pps_to_rpm(v2_l)}rpm/{v2_l}pps "
+        f"sw={sw_l}ms"
     )
     print(line, flush=True)
     _push_event(line, "prod")
@@ -616,11 +621,15 @@ def _feed_pv_log_rx(msg: dict) -> None:
         v2_r = int(r.get("v2") or 0)
         v1_l = int(l.get("v1") or 0)
         v2_l = int(l.get("v2") or 0)
+        sw_r = int(r.get("switch_ms") or msg.get("switch_ms") or 0)
+        sw_l = int(l.get("switch_ms") or msg.get("switch_ms") or 0)
         line = (
-            f"[FEED_PV MCU latch] dual={msg.get('enable')} switch_ms={msg.get('switch_ms')} "
+            f"[FEED_PV MCU latch] dual={msg.get('enable')} "
             f"run_r={msg.get('run_r')} run_l={msg.get('run_l')} | "
-            f"R: V1={_pps_to_rpm(v1_r)}rpm/{v1_r}pps V2={_pps_to_rpm(v2_r)}rpm/{v2_r}pps | "
-            f"L: V1={_pps_to_rpm(v1_l)}rpm/{v1_l}pps V2={_pps_to_rpm(v2_l)}rpm/{v2_l}pps"
+            f"R: V1={_pps_to_rpm(v1_r)}rpm/{v1_r}pps V2={_pps_to_rpm(v2_r)}rpm/{v2_r}pps "
+            f"sw={sw_r}ms | "
+            f"L: V1={_pps_to_rpm(v1_l)}rpm/{v1_l}pps V2={_pps_to_rpm(v2_l)}rpm/{v2_l}pps "
+            f"sw={sw_l}ms"
         )
     elif phase == "v1":
         side = str(msg.get("side") or "?")
@@ -1031,16 +1040,31 @@ def _canonical_motion_tune(src):
     if sec_l > pri_l:
         sec_l = pri_l
 
+    # Legado feed_stage.speed_switch_ms → ambos lados si no hay valor por lado.
+    sw_legacy = _dig(src, ("feed_stage", "speed_switch_ms"), None)
+    sw_r = _clamp_speed_switch_ms(
+        _dig(src, ("feeder", "R", "speed_switch_ms"), sw_legacy
+             if sw_legacy is not None else FEED_SPEED_SWITCH_MS_DEFAULT),
+        FEED_SPEED_SWITCH_MS_DEFAULT,
+    )
+    sw_l = _clamp_speed_switch_ms(
+        _dig(src, ("feeder", "L", "speed_switch_ms"), sw_legacy
+             if sw_legacy is not None else FEED_SPEED_SWITCH_MS_DEFAULT),
+        FEED_SPEED_SWITCH_MS_DEFAULT,
+    )
+
     return {
         "feeder": {
             "R": {
                 "profile_velocity_pps": pri_r,
                 "secondary_velocity_pps": sec_r,
+                "speed_switch_ms": sw_r,
                 "target_position_counts": _as_int(src, ("feeder", "R", "target_position_counts"), 42500),
             },
             "L": {
                 "profile_velocity_pps": pri_l,
                 "secondary_velocity_pps": sec_l,
+                "speed_switch_ms": sw_l,
                 "target_position_counts": _as_int(src, ("feeder", "L", "target_position_counts"), 42500),
             },
         },
@@ -1070,9 +1094,6 @@ def _canonical_motion_tune(src):
         "feed_stage": {
             "validate_encoder": _as_bool(src, ("feed_stage", "validate_encoder"), False),
             "dual_speed_enable": _as_bool(src, ("feed_stage", "dual_speed_enable"), True),
-            "speed_switch_ms": _clamp_speed_switch_ms(
-                _dig(src, ("feed_stage", "speed_switch_ms"), FEED_SPEED_SWITCH_MS_DEFAULT)
-            ),
         },
     }
 
@@ -1210,7 +1231,8 @@ def _motion_tune_flat(tune: dict) -> dict:
         "lm_pos_puu": lm["pos_puu"],
         "feed_validate_encoder": fs["validate_encoder"],
         "feed_dual_speed_enable": fs["dual_speed_enable"],
-        "feed_speed_switch_ms": fs["speed_switch_ms"],
+        "feed_r_speed_switch_ms": feed["R"]["speed_switch_ms"],
+        "feed_l_speed_switch_ms": feed["L"]["speed_switch_ms"],
     }
     flat.update(_lm_cmd_fields(tune, for_cut=True))
     return flat
@@ -2227,12 +2249,12 @@ def _read_lines_until_op(
         if want_op not in seen:
             return False
         # La descarga sigue al llegar el LM. El feed async se recoge después.
-        # ReleasePart sí espera el feed_stage si todavía no cerró.
-        # REVERTIR: quitar want_op == "release_part" para volver a esperar
-        # el feed_stage en cualquier orden con inject (también el viaje al montón).
+        # ReleasePart espera feed_stage si el solape ya mandó feed (aunque
+        # inject sea None porque el feed salió en la descarga).
+        # REVERTIR: exigir también inject is not None (feed solo si se inyecta
+        # en esta misma orden).
         overlap_feed_pending = (
             want_op == "release_part"
-            and inject is not None
             and _OVERLAP.get("on")
             and _OVERLAP.get("feed_sent")
             and not _OVERLAP.get("feed_done")
@@ -6110,10 +6132,8 @@ def _cycle_run_step(step_id: str, params: dict) -> bool:
         return finish_after_cutters_off(pulsed=True)
 
     # Step 7. Depósito + soltar pinzas.
-    # REVERTIR solape: quitar el inject de este viaje. El feed no salía aquí;
-    # el armado de respaldo de abajo (pinzas abiertas) era el arranque, y el
-    # feed solo se inyectaba en ReleasePart. El láser ON en el traslado cerraba
-    # FeedStage con counts 0.
+    # Feed del solape: solo en paso 8 (ReleasePart). Aquí el láser aún ve la
+    # pieza cortada (ON) y el flanco edge no arma → V2 lento o cuelgue.
     if step_id == "7":
         # Warning antes de corte: retener pinzas y LM en posición de corte.
         # False detiene la pieza aquí (sin descarga/home ni crédito automático).
@@ -6128,22 +6148,12 @@ def _cycle_run_step(step_id: str, params: dict) -> bool:
             return False
         _cut_mm, disc_mm, stack = pos
         _push_event(f"Depósito montón {stack}: {disc_mm:.2f} mm.")
-        # ServoCAN ON antes del feed del solape (si quedó suelto en paso 4).
-        if CYCLE_FEEDER_SOFT_AFTER_GRIP:
-            if not _cycle_feeder_servo(True):
-                _push_event(
-                    "ServoCAN ON (antes de la descarga) no confirmó.",
-                    "warn",
-                )
-                return False
         # Gripper OFF espera llegada al montón (lmguide_move ok + settle).
         # Descarga: viaje 3000 rpm (perfil de corte solo en paso 5/6).
-        # REVERTIR: este viaje iba sin inject (feed solo en el paso 8).
-        # El feed del solape sale en este viaje y no detiene el ack del LM.
-        feed_inject, feed_line = _overlap_feed_hook()
-        if not _cycle_move_lm_mm(
-            disc_mm, inject=feed_inject, on_line=feed_line, for_cut=False
-        ):
+        # Feed del solape NO va aquí: con edge el láser sigue ON por la pieza
+        # cortada → flanco imposible / V2 a 5 rpm / cuelgue. Va en ReleasePart
+        # (pinzas ya abiertas, láser puede hacer OFF→ON).
+        if not _cycle_move_lm_mm(disc_mm, for_cut=False):
             return False
         if not _cycle_sleep_ms(int(params["ms_lm_at_discharge"])):
             return False
@@ -6227,6 +6237,20 @@ def _cycle_run_step(step_id: str, params: dict) -> bool:
                 f"ReleasePart: home + blower {blower_ms} ms "
                 f"(L {_cycle_blower_length_mm():.1f} mm)."
             )
+
+        # ServoCAN ON justo antes del feed solapado (paso 4 lo apaga tras pinzas).
+        if (
+            _OVERLAP["on"]
+            and not _OVERLAP["feed_done"]
+            and not _OVERLAP.get("feed_sent")
+            and CYCLE_FEEDER_SOFT_AFTER_GRIP
+        ):
+            if not _cycle_feeder_servo(True):
+                _push_event(
+                    "ServoCAN ON (antes de ReleasePart/feed) no confirmó.",
+                    "warn",
+                )
+                return False
 
         feed_inject, feed_line = _overlap_feed_hook()
         sent = _cycle_motion_send(
@@ -6536,16 +6560,13 @@ def _overlap_arm(params: dict) -> bool:
 def _overlap_feed_hook():
     """Alimentación del siguiente ciclo mientras el eje todavía se mueve.
 
-    Si feed_stage ya se inyectó (p. ej. en el depósito) o ya falló, no rearmar
-    inject en ReleasePart: eso haría esperar otra respuesta que nunca llega.
+    Si feed_stage ya se inyectó (p. ej. en el depósito), no reenviar inject en
+    ReleasePart; sí se mantiene on_line para no perder el ack del solape.
     """
-    if (
-        not _OVERLAP["on"]
-        or _OVERLAP["feed_done"]
-        or _OVERLAP.get("feed_error")
-        or _OVERLAP.get("feed_sent")
-    ):
+    if not _OVERLAP["on"] or _OVERLAP["feed_done"] or _OVERLAP.get("feed_error"):
         return None, None
+    if _OVERLAP.get("feed_sent"):
+        return None, _overlap_on_feed_line
     return _overlap_feed_inject, _overlap_on_feed_line
 
 
@@ -6615,7 +6636,10 @@ def _overlap_accept_feed(replies) -> bool:
     if _OVERLAP["feed_done"]:
         return True
     found, ok, error_name, feed, warn_name = _read_feed_stage({"replies": replies})
-    if _cycle_should_stop() and (not found or not ok):
+    # Solo trazas / ruido serial: seguir esperando el feed_stage final.
+    if not found:
+        return False
+    if _cycle_should_stop() and not ok:
         return False
     next_sides = str(_OVERLAP.get("sides") or "") or _lot_predict_next_cycle_sides()
     warn_side, warn_reason = _feed_stage_warn_side(feed, next_sides)
@@ -6634,14 +6658,12 @@ def _overlap_accept_feed(replies) -> bool:
             "warn",
         )
         return False
-    empty = _feed_stage_empty_error(feed, next_sides) if found and ok else ""
-    if not found or not ok or empty:
+    empty = _feed_stage_empty_error(feed, next_sides) if ok else ""
+    if not ok or empty:
         # No latchear ciclo_error aquí: tumbaría la pieza actual a media descarga.
         # Se aplica en _overlap_wait_feed_done tras acreditar la pieza en curso.
         _OVERLAP["feed_error"] = True
-        _OVERLAP["feed_error_name"] = empty or (
-            error_name if found else "feed_no_reply"
-        )
+        _OVERLAP["feed_error_name"] = empty or (error_name or "feed_no_reply")
         if empty:
             _push_event(
                 "Alimentación solapada sin avance de encoder. "
@@ -6783,8 +6805,12 @@ def _overlap_start_feed_task() -> None:
     threading.Thread(target=run, daemon=True).start()
 
 
-def _overlap_wait_feed_done(timeout_s: float = 120.0) -> bool:
-    """Espera la alimentación solapada antes de entregar el paso 4 al siguiente ciclo."""
+def _overlap_wait_feed_done(timeout_s: float = 25.0) -> bool:
+    """Espera la alimentación solapada antes de entregar el paso 4 al siguiente ciclo.
+
+    25 s ≈ laser timeout Motion (15 s) + margen de home/release; antes 120 s
+    dejaba la UI al 94 % con el feed ya colgado.
+    """
     if not _OVERLAP["on"]:
         return True
     if _OVERLAP["feed_error"]:
@@ -6828,6 +6854,13 @@ def _overlap_wait_feed_done(timeout_s: float = 120.0) -> bool:
                         return False
                 blocking_after = time.time() + 2.0
         time.sleep(0.05)
+    # Último intento de drenar antes de declarar timeout.
+    _overlap_poll_feed(2.0)
+    if _OVERLAP["feed_done"]:
+        return True
+    if _OVERLAP["feed_error"]:
+        _overlap_apply_feed_error()
+        return False
     _cycle_fail("E038", detail="feed_overlap_timeout")
     return False
 
@@ -8149,6 +8182,16 @@ def _feed_stage_payload(side: str | None = None, *, with_tune: bool = True, edge
         payload.pop("lm_pr_speed_rpm", None)
         payload.pop("lm_accel_ms", None)
         payload.pop("lm_decel_ms", None)
+        # Doble velocidad OFF: no mandar V2/switch que el MCU pueda aplicar
+        # por un latch viejo (dual=false debe quedar inequívoco en el JSON).
+        if not bool(tune["feed_stage"]["dual_speed_enable"]):
+            payload["feed_dual_speed_enable"] = False
+            v1_r = int(payload.get("feed_r_vel_pps") or 0)
+            v1_l = int(payload.get("feed_l_vel_pps") or 0)
+            payload["feed_r_vel2_pps"] = v1_r
+            payload["feed_l_vel2_pps"] = v1_l
+            payload["feed_r_speed_switch_ms"] = 0
+            payload["feed_l_speed_switch_ms"] = 0
     else:
         payload = {
             "op": "feed_stage",

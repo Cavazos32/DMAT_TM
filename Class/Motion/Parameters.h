@@ -9,12 +9,13 @@
  *
  * Claves JSON (data/Motion.json) ↔ tune:
  *   feeder.R/L.profile_velocity_pps, secondary_velocity_pps, target_position_counts
- *   feed_stage.validate_encoder, dual_speed_enable, speed_switch_ms
+ *   feed_stage.validate_encoder, dual_speed_enable
+ *   feeder.R/L.speed_switch_ms (cambio V1→V2 independiente por lado)
  *   lmguide.pr_speed_rpm, accel_ms, decel_ms, pos_puu
  *   set_data: target_length_mm, tolerance_mm, modelo_id, measure_comp_mm
  *
  * FeedStage (PV): velocidad primaria por lado; opcional secundaria tras
- * speed_switch_ms si dual_speed_enable. Paro en su láser.
+ * speed_switch_ms de ese lado si dual_speed_enable. Paro en su láser.
  */
 
 #include <stddef.h>
@@ -166,6 +167,7 @@ enum MotionSide : uint8_t { MOTION_SIDE_R = 0, MOTION_SIDE_L = 1, MOTION_SIDE_CO
 struct MotionFeederSideTune {
   uint32_t profileVelocityPps;
   uint32_t secondaryVelocityPps;
+  uint32_t speedSwitchMs;  // V1→V2 desde movimiento de ese lado
   int32_t targetPositionCounts;
 };
 
@@ -181,7 +183,6 @@ struct MotionTune {
   MotionLMGuideTune lmguide;
   bool validateEncoder;
   bool dualSpeedEnable;
-  uint32_t speedSwitchMs;
 };
 
 // ── [C] set_data / modelo (NVS) ────────────────────────────────────────────
@@ -199,6 +200,7 @@ static inline void motionTuneSetDefaults(MotionTune* tune) {
   for (int i = 0; i < MOTION_SIDE_COUNT; i++) {
     tune->feeder[i].profileVelocityPps = PARAM_FEED_PROFILE_VEL_DEFAULT;
     tune->feeder[i].secondaryVelocityPps = PARAM_FEED_PROFILE_VEL_DEFAULT;
+    tune->feeder[i].speedSwitchMs = PARAM_FEED_SPEED_SWITCH_MS_DEFAULT;
     tune->feeder[i].targetPositionCounts = (int32_t)PARAM_FEED_TARGET_COUNTS_DEFAULT;
   }
   tune->lmguide.prSpeedRpm = PARAM_LM_PR_SPEED_RPM;
@@ -207,7 +209,6 @@ static inline void motionTuneSetDefaults(MotionTune* tune) {
   tune->lmguide.posPuu = 0;
   tune->validateEncoder = PARAM_FEED_VALIDATE_ENCODER;
   tune->dualSpeedEnable = PARAM_FEED_DUAL_SPEED_ENABLE;
-  tune->speedSwitchMs = PARAM_FEED_SPEED_SWITCH_MS_DEFAULT;
 }
 
 static inline void motionDataSetDefaults(MotionData* data) {

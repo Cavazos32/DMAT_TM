@@ -424,6 +424,9 @@
                     <label class="motion-field motion-field--compact feeder-cut-layout__vel2-r">Secundaria RPM
                       <input type="number" step="1" min="0" max="3000" data-motion-path="feeder.R.secondary_velocity_pps" data-motion-unit="feed_rpm">
                     </label>
+                    <label class="motion-field motion-field--compact feeder-cut-layout__switch-r">Cambio R (ms)
+                      <input type="number" step="1" min="0" max="15000" data-motion-path="feeder.R.speed_switch_ms">
+                    </label>
                     <button type="button" class="btn btn-manual btn--compact feeder-cut-layout__test-r" data-motion-op="feeder_test" data-motion-side="R">Probar R</button>
                     <button type="button" class="btn btn-manual feeder-cut-layout__cut" data-plc-op="valve" data-plc-name="cutters" data-plc-keep-label aria-pressed="false" title="Activar o desactivar cortadores R y L juntos">Cortar</button>
                     <p class="motion-side__title feeder-cut-layout__title-l">Lado L</p>
@@ -433,10 +436,10 @@
                     <label class="motion-field motion-field--compact feeder-cut-layout__vel2-l">Secundaria RPM
                       <input type="number" step="1" min="0" max="3000" data-motion-path="feeder.L.secondary_velocity_pps" data-motion-unit="feed_rpm">
                     </label>
-                    <button type="button" class="btn btn-manual btn--compact feeder-cut-layout__test-l" data-motion-op="feeder_test" data-motion-side="L">Probar L</button>
-                    <label class="motion-field motion-field--compact feeder-cut-layout__switch">Cambio (ms)
-                      <input type="number" step="1" min="0" max="15000" data-motion-path="feed_stage.speed_switch_ms">
+                    <label class="motion-field motion-field--compact feeder-cut-layout__switch-l">Cambio L (ms)
+                      <input type="number" step="1" min="0" max="15000" data-motion-path="feeder.L.speed_switch_ms">
                     </label>
+                    <button type="button" class="btn btn-manual btn--compact feeder-cut-layout__test-l" data-motion-op="feeder_test" data-motion-side="L">Probar L</button>
                   </div>
                 </fieldset>
 

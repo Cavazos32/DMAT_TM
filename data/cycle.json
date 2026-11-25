@@ -20,8 +20,8 @@
   "feed_sides": "LR",
   "blower_ms_per_mm": 10.0,
   "blower_ms_min": 200,
-  "cantidad": 2,
-  "numero_modelo": "030-2780-1-A-T-TUBE-M",
-  "longitud_modelo_mm": 603.0,
-  "modelo_desc": "WIP, 7113-500009 (.603)"
+  "cantidad": 10,
+  "numero_modelo": "130-7250-2-R-TUBE-M",
+  "longitud_modelo_mm": 310.0,
+  "modelo_desc": "WIP, 7113-500009 (.310)"
 }

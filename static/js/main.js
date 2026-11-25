@@ -2089,14 +2089,15 @@
       if (p < 0) pri.value = "0";
       if (Number(sec.value) < 0) sec.value = "0";
     });
-    const sw = els.motionTuneForm.querySelector(
-      '[data-motion-path="feed_stage.speed_switch_ms"]'
-    );
-    if (sw) {
+    ["R", "L"].forEach(function (side) {
+      const sw = els.motionTuneForm.querySelector(
+        '[data-motion-path="feeder.' + side + '.speed_switch_ms"]'
+      );
+      if (!sw) return;
       let ms = Number(sw.value);
       if (!Number.isFinite(ms) || ms < 0) sw.value = "0";
       else if (ms > 15000) sw.value = "15000";
-    }
+    });
   }
 
   async function saveMotionTune(ev) {
