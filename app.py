@@ -2007,17 +2007,15 @@ def _invalidate_serial_handle(ser) -> None:
 
 
 def _port_compare_key(device: str) -> str:
-    """Clave de comparación case-insensitive para COMx."""
-    return str(device or "").strip().upper()
-
-
-def _is_windows_com_name(device: str) -> bool:
-    text = str(device or "").strip().upper()
-    return text.startswith("COM") and text[3:].isdigit()
+    """Compare serial ports on Windows and Linux."""
+    text = str(device or "").strip()
+    if text.upper().startswith("COM"):
+        return text.upper()
+    return text
 
 
 def _list_com_ports() -> list[dict]:
-    """Lista puertos COM disponibles (Windows)."""
+    """List available serial ports on Windows and Linux."""
     try:
         from serial.tools import list_ports
     except ImportError:
@@ -2026,7 +2024,7 @@ def _list_com_ports() -> list[dict]:
     seen = set()
     for port in list_ports.comports():
         device = str(port.device or "").strip()
-        if not device or not _is_windows_com_name(device):
+        if not device:
             continue
         key = _port_compare_key(device)
         if key in seen:
