@@ -702,7 +702,7 @@
       });
       const data = await res.json();
       if (!data.ok) {
-        pushLocalEvent("No se guardaron parámetros de ciclo.", "error");
+        pushLocalEvent(data.error || "No se guardaron parámetros de ciclo.", "error");
         return;
       }
       cycleParamsDirty = false;
@@ -718,7 +718,13 @@
         });
       }
       if (data.state) applyState(data.state);
-      pushLocalEvent("Parámetros de ciclo guardados.");
+      if (data.tray_error) {
+        pushLocalEvent(data.tray_error, "error");
+      } else if (data.warn) {
+        pushLocalEvent(data.warn, "warn");
+      } else {
+        pushLocalEvent("Parámetros de ciclo guardados.");
+      }
     } catch (err) {
       pushLocalEvent("Sin conexión al guardar ciclo.", "error");
     }
@@ -1052,12 +1058,25 @@
     syncRecoverySkipLink(step, rutina, !!joint);
     if (joint) {
       const busy = !!(joint && joint.busy);
-      if (step === "await_piece" || step === "post_cut" || step === "await_home" || step === "park") {
+      // Tras Reset el Warning sigue el flujo normal piezas → manguera → purga.
+      if (
+        step === "piezas" ||
+        step === "manguera" ||
+        step === "purga" ||
+        step === "purga_error"
+      ) {
+        /* cae al render de recuperación estándar más abajo */
+      } else if (
+        step === "await_piece" ||
+        step === "post_cut" ||
+        step === "await_home" ||
+        step === "park"
+      ) {
         const wait = recoveryPrimaryButton(
           step === "await_piece"
             ? "Terminando pieza del lado sano… espera"
             : step === "post_cut"
-              ? "Terminando descarga… luego Purga"
+              ? "Terminando descarga… luego Reset"
               : step === "await_home"
                 ? "Regresando a Home… espera"
                 : "Preparando… espera",
@@ -1067,20 +1086,18 @@
         wait.disabled = true;
         els.recoveryActions.appendChild(wait);
         return;
-      }
-      if (step === "segregate") {
+      } else if (step === "await_reset" || step === "segregate" || step === "operator") {
         const required = recoveryActionsGroup("required", "Siguiente");
-        const liberar = recoveryPrimaryButton(
-          "Liberar",
-          "btn-start",
-          "joint_liberar"
+        const resetBtn = recoveryPrimaryButton(
+          "Reset",
+          "btn-reset",
+          "reset"
         );
-        liberar.disabled = busy;
-        required.appendChild(liberar);
+        resetBtn.disabled = busy;
+        required.appendChild(resetBtn);
         els.recoveryActions.appendChild(required);
         return;
-      }
-      if (step === "classify") {
+      } else if (step === "classify") {
         const required = recoveryActionsGroup("required", "Clasificación");
         if (joint.segregateOnly) {
           const done = recoveryPrimaryButton(
@@ -1108,30 +1125,7 @@
         }
         els.recoveryActions.appendChild(required);
         return;
-      }
-      if (step === "operator") {
-        const required = recoveryActionsGroup("required", "Siguiente");
-        const liberar = recoveryPrimaryButton(
-          "Liberar",
-          "btn-start",
-          "joint_liberar"
-        );
-        liberar.disabled = busy;
-        required.appendChild(liberar);
-        els.recoveryActions.appendChild(required);
-        return;
-      }
-      if (step === "purga") {
-        const wait = recoveryPrimaryButton(
-          "Usa la Purga manual…",
-          "btn-secondary",
-          "wait"
-        );
-        wait.disabled = true;
-        els.recoveryActions.appendChild(wait);
-        return;
-      }
-      if (step === "listo") {
+      } else if (step === "listo") {
         els.recoveryActions.appendChild(
           recoveryPrimaryButton(
             "Volver a la pantalla principal",
@@ -1139,8 +1133,10 @@
             "listo"
           )
         );
+        return;
+      } else {
+        return;
       }
-      return;
     }
     if (step === "error") {
       els.recoveryActions.appendChild(
@@ -1421,9 +1417,12 @@
     const showSensors =
       (jointKind &&
         (viewStep === "segregate" ||
+          viewStep === "await_reset" ||
           viewStep === "classify" ||
           viewStep === "operator" ||
-          viewStep === "await_piece")) ||
+          viewStep === "await_piece" ||
+          viewStep === "piezas" ||
+          viewStep === "manguera")) ||
       (!jointKind && (viewStep === "manguera" || viewStep === "purga_error"));
     if (els.recoveryJointLegend) {
       // Las descripciones breves van en «Funciones Extras» de las acciones.
@@ -2358,6 +2357,8 @@
       purga: "Purga",
       purga_alimentar: "Alimentar",
       purga_limpiar: "Expulsar",
+      purga_limpiar_r: "Expulsar R",
+      purga_limpiar_l: "Expulsar L",
       purga_continuar: "Continuar",
       purga_terminar: "Terminar",
       posicion_inicial: "Posición inicial",
@@ -4270,7 +4271,10 @@
       const btn = e.target.closest("[data-action]");
       if (!btn || btn.disabled) return;
       flashButton(btn);
-      sendAction("operacion_manual", btn.dataset.action);
+      const extra = {};
+      const side = String(btn.dataset.side || "").toUpperCase();
+      if (side === "R" || side === "L") extra.side = side;
+      sendAction("operacion_manual", btn.dataset.action, extra);
     });
   }
 

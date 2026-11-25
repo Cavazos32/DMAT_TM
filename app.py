@@ -55,6 +55,10 @@ PURGE_DEPOSIT_MM = 100.0
 PURGE_CLEAN_MS = 3000
 PURGE_AFTER_CUT_MS = 500
 LMGUIDE_PIECE_OFFSET_MM = 55.0
+# Carrera útil del LM Guide (hard stop). El plan de montones/despeje no puede pasarla.
+LMGUIDE_MAX_TRAVEL_MM = 1460.0
+# Margen para avisar “casi al borde” antes de aceptar el último montón.
+LMGUIDE_TRAVEL_WARN_MARGIN_MM = 30.0
 CHECKLIST_MAX_CYCLES = 10000
 LMGUIDE_STEPS_PER_MM = (770.0 / 45.0) * (550.0 / 548.0) # ServoLMGuide.h: fábrica 770 PUU / 45 mm; campo 550 mm pedido → 548 mm reales.
 LMGUIDE_PUU_SIGN = -1 # El sentido de trabajo es PUU negativo.
@@ -861,7 +865,7 @@ _DEFAULT_CYCLE_PARAMS = {
     "cut_comp_l_mm": 0.0,
     "deposit_batch_size": 50,
     "deposit_stack_gap_mm": 100.0,
-    "deposit_max_travel_mm": 1450.0,
+    "deposit_max_travel_mm": LMGUIDE_MAX_TRAVEL_MM,
     "gripper_clearance_mm": 20.0,
     "feed_sides": "R",
     "blower_ms_per_mm": 8.0,
@@ -1494,7 +1498,8 @@ def _tray_plan(length: float, params: dict):
         return None, "El tamaño del batch tiene que ser al menos 1."
     gap = _num(params.get("deposit_stack_gap_mm"), 100.0)
     clearance = abs(_num(params.get("gripper_clearance_mm"), 20.0))
-    travel = _num(params.get("deposit_max_travel_mm"), 0.0)
+    # Carrera fija del LM Guide (no se edita por HMI).
+    travel = float(LMGUIDE_MAX_TRAVEL_MM)
     cut = _cut_mm_of(length, params)
     deposit1 = cut + gap
     clear1 = _clear_of(deposit1, clearance)
@@ -1503,26 +1508,65 @@ def _tray_plan(length: float, params: dict):
         if abs(cut) > travel:
             passed.append(f"corte en {cut:.1f} mm")
         if abs(clear1) > travel:
-            passed.append(f"primer montón con despeje en {clear1:.1f} mm")
+            passed.append(
+                f"primer montón con despeje en {clear1:.1f} mm "
+                f"(depósito {deposit1:.1f} + despeje {clearance:.1f})"
+            )
         if passed:
             return None, (
-                f"No cabe en la carrera de {travel:.1f} mm: " + " y ".join(passed) + "."
+                f"No cabe en la carrera del LM Guide ({travel:.0f} mm): "
+                + " y ".join(passed)
+                + "."
             )
     stacks = _stack_count(cut, length, gap, clearance, travel)
     if travel > 0 and stacks < 1:
         return None, (
-            f"No cabe en la carrera de {travel:.1f} mm: "
-            f"primer montón con despeje en {clear1:.1f} mm."
+            f"No cabe en la carrera del LM Guide ({travel:.0f} mm): "
+            f"primer montón con despeje en {clear1:.1f} mm "
+            f"(depósito {deposit1:.1f} + despeje {clearance:.1f})."
         )
+    max_deposit = deposit1
+    max_clear = clear1
+    if stacks > 0:
+        max_deposit, _ = _deposit_at(cut, length, gap, 1, stacks, stacks)
+        max_clear = _clear_of(max_deposit, clearance)
+    warn = ""
+    if travel > 0 and stacks > 0:
+        margin = travel - abs(max_clear)
+        if margin < LMGUIDE_TRAVEL_WARN_MARGIN_MM:
+            warn = (
+                f"Último montón cerca del límite del LM Guide ({travel:.0f} mm): "
+                f"depósito {max_deposit:.1f} mm"
+                + (
+                    f" + despeje {clearance:.1f} = {max_clear:.1f} mm"
+                    if clearance > 0
+                    else f" (despeje 0)"
+                )
+                + f", margen {margin:.1f} mm."
+            )
     return {
         "batch_size": batch,
         "gap_mm": gap,
         "clearance_mm": clearance,
+        "travel_mm": travel,
         "cut_mm": cut,
         "length_mm": abs(length),
         "stacks": stacks,
         "deposits": (stacks * batch) if stacks else 0,
+        "max_deposit_mm": max_deposit,
+        "max_clear_mm": max_clear,
+        "warn": warn,
     }, ""
+
+
+def _lm_within_travel(mm: float, *, label: str) -> tuple[bool, str]:
+    """True si |mm| cabe en la carrera del LM Guide."""
+    travel = float(LMGUIDE_MAX_TRAVEL_MM)
+    if abs(mm) <= travel + 1e-9:
+        return True, ""
+    return False, (
+        f"{label} en {mm:.1f} mm supera el límite del LM Guide ({travel:.0f} mm)."
+    )
 
 
 def _order_cycles(qty, sides: str):
@@ -1611,11 +1655,31 @@ def _cycle_piece_prefix() -> str:
 
 def _announce_trays(cycles: int, plan: dict) -> None:
     deposits = int(plan["deposits"] or 0)
+    stacks = int(plan.get("stacks") or 0)
+    travel = _num(plan.get("travel_mm"), LMGUIDE_MAX_TRAVEL_MM)
+    max_dep = _num(plan.get("max_deposit_mm"), 0.0)
+    max_clr = _num(plan.get("max_clear_mm"), 0.0)
+    clearance = _num(plan.get("clearance_mm"), 0.0)
+    if stacks > 0:
+        reach = (
+            f"Alcance máximo: depósito {max_dep:.1f} mm"
+            + (
+                f" + despeje {clearance:.1f} = {max_clr:.1f} mm"
+                if clearance > 0
+                else ""
+            )
+            + f" / límite {travel:.0f} mm."
+        )
+        _push_event(
+            f"Caben {stacks} montones, {deposits} depósitos por charola. {reach}"
+        )
+    warn = str(plan.get("warn") or "").strip()
+    if warn:
+        _push_event(warn, "warn")
     if not deposits or cycles <= deposits:
         return
     trays = math.ceil(cycles / deposits)
     _push_event(
-        f"Caben {plan['stacks']} montones, {deposits} depósitos por charola. "
         f"El lote pide {trays} charolas y pausa cada {deposits} ciclos."
     )
 
@@ -3118,7 +3182,18 @@ def _joint_blocks_next_piece() -> bool:
     if _joint_active() and str(_recovery_get().get("step") or "") not in ("listo",):
         # Tras clasificación/listo se permite continuar; durante intervención no.
         step = str(_recovery_get().get("step") or "")
-        if step in ("await_piece", "segregate", "classify", "await_home", "park", "operator", "purga"):
+        if step in (
+            "await_piece",
+            "await_reset",
+            "segregate",
+            "classify",
+            "await_home",
+            "park",
+            "operator",
+            "purga",
+            "piezas",
+            "manguera",
+        ):
             return True
     if not _sides_ready_mask() and (_LOT.get("active") or _MACHINE_STATE.get("ciclo_en_curso")):
         return True
@@ -3294,15 +3369,17 @@ def _warn_apply_event(
                 _JOINT["healthy_side"] = ""
                 _JOINT["segregate_only"] = True
                 _JOINT["hold_grippers"] = True
+                _recovery_set(step="await_reset", busy=False)
                 _joint_set_guide(
-                    "Ambos lados afectados. Segrega el material y confirma."
+                    "Ambos lados afectados. Proceso en pausa. "
+                    "Pulsa Reset para seguir la recuperación."
                 )
         return
     step = "await_piece"
     if cut_confirmed:
         step = "post_cut"
     elif side == "RL":
-        step = "segregate"
+        step = "await_reset"
     _joint_begin_common(
         side, origin=origin, step=step, reason=reason, cut_confirmed=cut_confirmed
     )
@@ -3314,13 +3391,17 @@ def _warn_apply_event(
     elif side == "RL":
         if _serial_port("motion"):
             _send_motion_urgent(['{"op":"feeder_stop"}', '{"op":"lmguide_stop"}'])
+        _JOINT["hold_grippers"] = True
+        _recovery_set(step="await_reset", busy=False)
         _joint_set_guide(
-            "Ambos lados afectados. Pulsa Liberar para segregar el material."
+            "Ambos lados afectados. Proceso en pausa. "
+            "Pulsa Reset para seguir la recuperación."
         )
     else:
         _joint_set_guide(
             f"{_warn_banner_text(side, reason)}. "
-            "Se omite el lado afectado y se termina la pieza del lado sano."
+            "Se omite el lado afectado y se termina la pieza del lado sano. "
+            "Al terminar quedará en pausa con pinzas cerradas hasta Reset."
         )
 
 
@@ -3392,48 +3473,40 @@ def _joint_check_during_cycle(step_id: str) -> bool:
     return bool(_JOINT.get("finish_piece"))
 
 
-def _joint_enter_operator_after_piece() -> None:
-    """Corte del lado sano listo → retener grippers y pedir Liberar/clasificación."""
+def _joint_enter_await_reset(*, grippers_closed: bool = True) -> None:
+    """Sale el Warning: pausa con pinzas cerradas hasta Reset → recuperación."""
     _JOINT["finish_piece"] = False
-    _JOINT["hold_grippers"] = True
+    _JOINT["hold_grippers"] = bool(grippers_closed)
+    if grippers_closed:
+        _gripper_holding_set(True)
     side = str(_recovery_get().get("side") or "")
-    healthy = str(_JOINT.get("healthy_side") or "")
-    if _JOINT.get("segregate_only") or not healthy:
-        _recovery_set(step="segregate", busy=False)
-        _joint_set_guide(
-            "Segrega el material afectado. Pulsa Liberar para abrir pinzas."
-        )
-        return
-    _recovery_set(step="segregate", busy=False)
+    reason = str(_JOINT.get("reason") or "joint")
+    _recovery_set(step="await_reset", busy=False)
     _joint_set_guide(
-        f"Pieza del lado {healthy} lista. Pulsa Liberar, segrega y clasifica "
-        f"(el lado {_joint_side_label(side)} no se contabiliza)."
-    )
-
-
-def _joint_enter_purga_after_cut() -> None:
-    """Tras corte ya confirmado: abrir rutina de Purga existente con el motivo."""
-    side = str(_recovery_get().get("side") or "")
-    msg = _warn_banner_text(side)
-    _JOINT["finish_piece"] = False
-    _JOINT["hold_grippers"] = False
-    with _STATE_LOCK:
-        _MACHINE_STATE["post_error_purga"] = True
-    _recovery_set(step="purga", busy=False)
-    _joint_set_guide(
-        f"{msg}. Usa la Purga manual para recuperar el lado afectado."
+        f"{_warn_banner_text(side, reason)}. "
+        "Proceso en pausa con pinzas cerradas. Pulsa Reset para seguir la recuperación."
     )
     _set_machine_ui(
         estado="paused",
-        estado_label="Purga requerida",
-        mensaje=msg,
-        en_curso=bool(_LOT.get("active") or _LOT.get("tray_wait")),
+        estado_label="Warning Material" if reason == "material" else "Warning Joint",
+        mensaje=_warn_banner_text(side, reason),
+        en_curso=bool(
+            _MACHINE_STATE.get("ciclo_en_curso")
+            or _LOT.get("active")
+            or _LOT.get("tray_wait")
+        ),
+        ciclo_error="",
     )
-    # Abre la misma rutina de purga (controles manuales); no mueve sola.
-    try:
-        _purga_start()
-    except Exception:
-        pass
+
+
+def _joint_enter_operator_after_piece() -> None:
+    """Corte del lado sano listo → retener pinzas y esperar Reset."""
+    _joint_enter_await_reset(grippers_closed=True)
+
+
+def _joint_enter_purga_after_cut() -> None:
+    """Tras descarga/home con evento post-corte: pausa hasta Reset → recuperación."""
+    _joint_enter_await_reset(grippers_closed=False)
 
 
 def _feed_clean_side(side: str | None):
@@ -4700,6 +4773,8 @@ def _load_cycle_params():
         for key in _HMI_CYCLE_EXTRA_KEYS:
             if key in raw:
                 params[key] = raw[key]
+    # Carrera del LM Guide: fuente única (no se edita por HMI ni por cycle.json viejo).
+    params["deposit_max_travel_mm"] = float(LMGUIDE_MAX_TRAVEL_MM)
     return params
 
 
@@ -5770,15 +5845,51 @@ def _cycle_encoder_set0() -> bool:
     )
 
 
-def _cycle_feeder_servo(on: bool) -> bool:
-    """Enable (on=True) / Disable (on=False) — mismo op que el botón feeder_servo de la UI."""
+def _feeder_servo_target_side(side: str | None = None) -> str:
+    """Lado R/L, '' = ambos. En Warning solo el lado sano (no exigir el omitido)."""
+    raw = str(side or "").strip().upper()
+    if raw in ("R", "L"):
+        return raw
+    if not _joint_active():
+        return ""
+    skip = str(_JOINT.get("skip_cut") or "").strip().upper()
+    ready = _sides_ready_mask()
+    if skip == "RL" or ready == "":
+        return ""
+    if skip == "R" or ready == "L":
+        return "L"
+    if skip == "L" or ready == "R":
+        return "R"
+    healthy = str(_JOINT.get("healthy_side") or "").strip().upper()
+    if healthy in ("R", "L"):
+        return healthy
+    return ""
+
+
+def _cycle_feeder_servo(on: bool, side: str | None = None) -> bool:
+    """Enable/Disable ServoCAN. side R|L o None (ambos; en Warning solo el sano)."""
+    target = _feeder_servo_target_side(side)
+    payload = {"op": "feeder_servo_on" if on else "feeder_servo_off"}
+    if target in ("R", "L"):
+        payload["side"] = target
     return _motion_cmd_serial_ok(
-        _cycle_motion_send(
-            {"op": "feeder_servo_on" if on else "feeder_servo_off"},
-            timeout_s=3.0,
-        ),
+        _cycle_motion_send(payload, timeout_s=3.0),
         "E043",
     )
+
+
+def _joint_reenable_healthy_feeder() -> None:
+    """Tras omitir el lado alarmado: volver a Enable el motor del lado sano."""
+    healthy = str(_JOINT.get("healthy_side") or "").strip().upper()
+    if healthy not in ("R", "L"):
+        healthy = _feeder_servo_target_side()
+    if healthy not in ("R", "L"):
+        return
+    if not _cycle_feeder_servo(True, healthy):
+        _push_event(
+            f"ServoCAN {healthy} Enable (lado sano tras Warning) no confirmó.",
+            "warn",
+        )
 
 
 def _cycle_set_holder_encoder(
@@ -5947,6 +6058,8 @@ def _cycle_run_step(step_id: str, params: dict) -> bool:
             _joint_begin_from_feed(warn_side, warn_reason or "joint")
             if warn_side == "RL" or not _JOINT.get("finish_piece"):
                 return False
+            # Lado omitido: re-Enable el motor del lado sano (no quedar en Disable).
+            _joint_reenable_healthy_feeder()
         empty = _feed_stage_empty_error(feed, sides)
         if sides == "LR" and not (_JOINT.get("active") and _JOINT.get("finish_piece")):
             skip = str(_JOINT.get("skip_cut") or "").upper()
@@ -6147,6 +6260,11 @@ def _cycle_run_step(step_id: str, params: dict) -> bool:
             _cycle_fail("E007")
             return False
         _cut_mm, disc_mm, stack = pos
+        ok_travel, travel_err = _lm_within_travel(disc_mm, label="Depósito")
+        if not ok_travel:
+            _cycle_fail("E007", mensaje=travel_err)
+            _push_event(travel_err, "error")
+            return False
         _push_event(f"Depósito montón {stack}: {disc_mm:.2f} mm.")
         # Gripper OFF espera llegada al montón (lmguide_move ok + settle).
         # Descarga: viaje 3000 rpm (perfil de corte solo en paso 5/6).
@@ -6207,6 +6325,18 @@ def _cycle_run_step(step_id: str, params: dict) -> bool:
             else abs(_num(params.get("gripper_clearance_mm"), 0.0))
         )
         clear_at = _clear_of(deposit, clearance)
+        if abs(clear_at - deposit) >= 0.05:
+            ok_clear, clear_err = _lm_within_travel(
+                clear_at,
+                label=(
+                    f"Despeje (depósito {deposit:.1f} + "
+                    f"{clearance:.1f} mm)"
+                ),
+            )
+            if not ok_clear:
+                _cycle_fail("E007", mensaje=clear_err)
+                _push_event(clear_err, "error")
+                return False
         if (
             _next_piece_follows()
             and not _OVERLAP["on"]
@@ -7144,9 +7274,12 @@ def _cycle_worker(start_index: int = 0, gen: int = 0) -> None:
                 if _joint_active() and _JOINT.get("cut_confirmed"):
                     _joint_enter_purga_after_cut()
                     return
-                if (
-                    _joint_active()
-                    and str(_recovery_get().get("step") or "") == "segregate"
+                if _joint_active() and str(_recovery_get().get("step") or "") in (
+                    "segregate",
+                    "await_reset",
+                    "piezas",
+                    "manguera",
+                    "purga",
                 ):
                     return
                 if _cycle_worker_is_current(gen):
@@ -7183,9 +7316,12 @@ def _cycle_worker(start_index: int = 0, gen: int = 0) -> None:
             if _joint_active() and _JOINT.get("cut_confirmed"):
                 _joint_enter_purga_after_cut()
                 return
-            if (
-                _joint_active()
-                and str(_recovery_get().get("step") or "") == "segregate"
+            if _joint_active() and str(_recovery_get().get("step") or "") in (
+                "segregate",
+                "await_reset",
+                "piezas",
+                "manguera",
+                "purga",
             ):
                 return
             if _lot_targets_met():
@@ -7374,6 +7510,7 @@ def _cycle_start(*, step_mode: bool = False) -> tuple[bool, str]:
             if _SIDE_READY.get("need_purge_" + s):
                 _side_mark_purge_ok(s)
                 _side_try_reenable(s, mst0)
+    # Aviso de alcance (y “casi al borde”) antes de arrancar el lote.
     if not step_mode:
         _announce_trays(cycles, plan)
     global _LOT_SEQ, _PROD_CADENCE_SAMPLES, _PREV_PIECE_END_T, _PIECE_TICK0, _LOT_T0
@@ -7741,12 +7878,77 @@ def _wait_error_physical_clear_stable() -> bool:
     return False
 
 
+def _warning_reset_to_recovery() -> tuple[bool, str]:
+    """Warning Joint/Material: Reset suelta pinzas y entra al flujo de recuperación."""
+    if _JOINT.get("finish_piece"):
+        return False, "Espera a que termine la pieza del lado sano."
+    rec = _recovery_get()
+    step = str(rec.get("step") or "")
+    if step not in ("await_reset", "segregate", "operator", "post_cut"):
+        return False, "Reset del Warning no aplica en este paso."
+    keep = bool(
+        _MACHINE_STATE.get("ciclo_en_curso")
+        or _LOT.get("active")
+        or _LOT.get("tray_wait")
+    )
+    kind = str(rec.get("kind") or _JOINT.get("reason") or "joint")
+    if kind not in ("joint", "material"):
+        kind = "joint"
+    side = str(rec.get("side") or "")
+    code = str(rec.get("code") or "").strip()
+    msg = str(rec.get("mensaje") or "").strip() or _warn_banner_text(side, kind)
+    if _serial_port("plc"):
+        sent = _cycle_plc_send({"op": "reset"})
+        if not sent.get("sent"):
+            fail_code = str(sent.get("code") or "E019")
+            if fail_code not in _RECOVERY_LINK_SOFT_RESET:
+                return False, error_codes.format_message(fail_code)
+        else:
+            _plc_wait_ready(1.5)
+    _gripper_holding_set(False)
+    _JOINT["hold_grippers"] = False
+    _feed_prime_clear()
+    with _STATE_LOCK:
+        _MACHINE_STATE["post_error_purga"] = True
+    _recovery_set(
+        active=True,
+        kind=kind,
+        side=side,
+        step="piezas",
+        origin=str(rec.get("origin") or ""),
+        code=code,
+        mensaje=msg,
+        guide="Confirma que las piezas están bien.",
+        busy=False,
+        lm_at_park=False,
+        segregate_only=bool(_JOINT.get("segregate_only")),
+        healthy_side=str(_JOINT.get("healthy_side") or ""),
+    )
+    _set_machine_ui(
+        estado="paused" if keep else "idle",
+        estado_label="Recuperación",
+        ciclo_error="",
+        mensaje=msg,
+        en_curso=keep,
+    )
+    _push_event("Reset Warning — pinzas liberadas; sigue la recuperación.")
+    return True, ""
+
+
 def _cycle_reset_error() -> tuple[bool, str]:
     global _pf_last_fault_sig, _PF_ERROR_LATCH
     with _STATE_LOCK:
         code = str(_MACHINE_STATE.get("ciclo_error") or "").strip()
         in_err = _MACHINE_STATE.get("estado") == "error" or bool(code)
         msg_now = str(_MACHINE_STATE.get("mensaje") or "")
+    # Warning: pausa con pinzas cerradas → Reset abre recuperación.
+    if _joint_active() and not in_err:
+        step = str(_recovery_get().get("step") or "")
+        if step in ("await_reset", "segregate", "operator", "post_cut"):
+            return _warning_reset_to_recovery()
+        if step == "await_piece" and _JOINT.get("finish_piece"):
+            return False, "Espera a que termine la pieza del lado sano."
+        return True, ""
     if not in_err:
         return True, ""
     def _keep_lot() -> bool:
@@ -8297,7 +8499,14 @@ def _feeder_test(side: str, tune: dict) -> dict:
 
 
 def _purge_feed_side() -> str | None:
-    """Lado de purga según feed_sides. None = ambos (LR)."""
+    """Lado de purga. Warning: lado afectado. Si no: feed_sides activos. None = ambos."""
+    rec = _recovery_get()
+    if rec.get("active") and rec.get("kind") in ("joint", "material"):
+        side = str(rec.get("side") or "").strip().upper()
+        if side in ("R", "L"):
+            return side
+        if side == "RL":
+            return None
     sides = _run_sides()
     return sides if sides in ("R", "L") else None
 
@@ -8368,9 +8577,10 @@ def _feed_laser():
     return True, "", feed
 
 
-def _feed_clean():
-    side = _purge_feed_side()
-    payload = _feed_stage_payload(side)
+def _feed_clean(side: str | None = None):
+    """Expulsar (clean). side R|L fuerza un lado; None = lados activos de purga."""
+    feed_side = side if side in ("R", "L") else _purge_feed_side()
+    payload = _feed_stage_payload(feed_side)
     payload["mode"] = "clean"
     payload["timeout_ms"] = PURGE_CLEAN_MS
     sent = _cycle_motion_send(payload, timeout_s=8.0)
@@ -8824,7 +9034,8 @@ def _purga_cut_run() -> None:
             _purga_finish(False)
 
 
-def _purga_limpiar_run() -> None:
+def _purga_limpiar_run(side: str | None = None) -> None:
+    label = {"R": "derecho", "L": "izquierdo"}.get(side or "", "ambos lados")
     _set_routine_ui(
         rutina_fase="limpiar",
         estado_label="Proceso de limpieza",
@@ -8846,9 +9057,9 @@ def _purga_limpiar_run() -> None:
         return
     _set_routine_ui(
         estado_label="Proceso de limpieza",
-        mensaje="Se está expulsando el material residual. Espera a que termine.",
+        mensaje=f"Expulsando material residual ({label}). Espera a que termine.",
     )
-    ok, code, _feed = _feed_clean()
+    ok, code, _feed = _feed_clean(side if side in ("R", "L") else None)
     if _ROUTINE["stop"].is_set():
         _purga_finish(True)
         return
@@ -8867,13 +9078,20 @@ def _purga_limpiar_run() -> None:
     )
 
 
-def _purga_limpiar_action(_data=None) -> tuple[bool, str]:
+def _purga_limpiar_action(data=None) -> tuple[bool, str]:
     if not _purga_claim("limpiar"):
         return False, "La purga no está en espera."
-    ok, err = _start_routine(_purga_limpiar_run)
+    side = str((data or {}).get("side") or "").strip().upper()
+    if side not in ("R", "L"):
+        side = None
+    ok, err = _start_routine(lambda: _purga_limpiar_run(side))
     if not ok:
         _set_routine_ui(rutina_fase="espera", rutina_manos=False)
         return False, err
+    if side == "R":
+        return True, "Expulsando R."
+    if side == "L":
+        return True, "Expulsando L."
     return True, "Expulsando."
 
 
@@ -9876,7 +10094,6 @@ def cycle_config():
     params["cut_offset_mm"] = 0.0
     for key in (
         "deposit_stack_gap_mm",
-        "deposit_max_travel_mm",
         "gripper_clearance_mm",
         "tolerance_mm",
         "blower_ms_per_mm",
@@ -9884,6 +10101,7 @@ def cycle_config():
         "cut_comp_l_mm",
     ):
         params[key] = _num(params.get(key), _DEFAULT_CYCLE_PARAMS[key])
+    params["deposit_max_travel_mm"] = float(LMGUIDE_MAX_TRAVEL_MM)
     params["deposit_batch_size"] = int(_num(params.get("deposit_batch_size"), 50))
     _MOTION_DATA["tolerance_mm"] = _num(params.get("tolerance_mm"), 2.0)
     try:
@@ -9897,6 +10115,16 @@ def cycle_config():
         params["longitud_modelo_mm"] = float(length) if length is not None else None
     except (TypeError, ValueError):
         params["longitud_modelo_mm"] = None
+    tray_warn = ""
+    tray_error = ""
+    tray_plan = None
+    length_mm = _target_length_mm()
+    if length_mm > 0:
+        tray_plan, tray_error = _tray_plan(length_mm, params)
+        if tray_plan and tray_plan.get("warn"):
+            tray_warn = str(tray_plan["warn"])
+        if tray_error:
+            tray_warn = tray_error
     try:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         CYCLE_PATH.write_text(
@@ -9905,12 +10133,30 @@ def cycle_config():
         )
     except OSError:
         return jsonify({"ok": False, "error": "No se pudo guardar cycle.json"}), 500
+    if tray_warn:
+        _push_event(tray_warn, "warn" if not tray_error else "error")
+    elif tray_plan and int(tray_plan.get("stacks") or 0) > 0:
+        clr = _num(tray_plan.get("clearance_mm"), 0.0)
+        reach = (
+            f"Plan de montones: {int(tray_plan['stacks'])} caben "
+            f"(depósito máx. {_num(tray_plan['max_deposit_mm'], 0):.1f} mm"
+            + (
+                f" + despeje {clr:.1f} = {_num(tray_plan['max_clear_mm'], 0):.1f} mm"
+                if clr > 0
+                else ""
+            )
+            + f" / límite {LMGUIDE_MAX_TRAVEL_MM:.0f} mm)."
+        )
+        _push_event(reach)
     return jsonify(
         {
             "ok": True,
             "steps": list(CYCLE_STEPS),
             "params": params,
             "state": _public_machine_state(),
+            "tray_plan": tray_plan,
+            "warn": tray_warn or None,
+            "tray_error": tray_error or None,
         }
     )
 

@@ -1310,16 +1310,40 @@ static void initBlowerHw() {
   gBlowerOn = false;
 }
 
-// Home a PUU 0 con blower: delay → ON → OFF al llegar (o al vencer ms).
+// Home a PUU 0 con blower: al iniciar regreso cuenta delay → ON → OFF al llegar.
+// delay 0 = ON inmediato al emitir home (antes de poll/feed). Si ya está en home, omite.
 static bool releasePartHomeWithBlower(uint32_t blowerDelayMs, uint32_t blowerMs) {
   gLmAbortRequested = false;
   gRt.lmguideHomed = false;
+
+  int32_t startPuu = 0;
+  if (modbusReadReg32(ASDA_REG_P5_016, &startPuu) &&
+      lmPositionWithinTol(startPuu, 0, PARAM_LM_MOVE_TOLERANCE_MM)) {
+    gRt.lmguideHomed = true;
+    gRt.lmguideServoOn = true;
+    return true;
+  }
+
   if (!lmguideIssueMovePr1(0)) return false;
 
   uint32_t t0 = millis();
   bool blowerStarted = false;
 
+  // delay 0: GPIO ON al arrancar el regreso, sin esperar pollSerial/Modbus.
+  if (blowerMs > 0 && blowerDelayMs == 0) {
+    (void)blowerOn(blowerMs);
+    blowerStarted = true;
+  }
+
   while ((uint32_t)(millis() - t0) < PARAM_LM_MOVE_DONE_TIMEOUT_MS) {
+    uint32_t elapsed = (uint32_t)(millis() - t0);
+
+    // delay > 0: ON en cuanto vence, antes del trabajo pesado del ciclo.
+    if (!blowerStarted && blowerMs > 0 && elapsed >= blowerDelayMs) {
+      (void)blowerOn(blowerMs);
+      blowerStarted = true;
+    }
+
     pollSerial();
     canRxService();
     sensorEventsService();
@@ -1346,21 +1370,17 @@ static bool releasePartHomeWithBlower(uint32_t blowerDelayMs, uint32_t blowerMs)
       }
     }
 
-    uint32_t elapsed = (uint32_t)(millis() - t0);
-    if (!blowerStarted && blowerMs > 0 && elapsed >= blowerDelayMs) {
-      if (atTarget) {
-        gRt.lmguideHomed = true;
-        gRt.lmguideServoOn = true;
-        return true;
-      }
-      (void)blowerOn(blowerMs);
-      blowerStarted = true;
+    // Llegó a home antes de vencer el delay → omitir blower (rules §4.8).
+    if (atTarget && !blowerStarted) {
+      gRt.lmguideHomed = true;
+      gRt.lmguideServoOn = true;
+      return true;
     }
 
     if (atTarget) {
       gRt.lmguideHomed = true;
       gRt.lmguideServoOn = true;
-      if (blowerStarted) blowerOff();
+      blowerOff();
       return true;
     }
     delay(5);
