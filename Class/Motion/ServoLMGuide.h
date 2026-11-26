@@ -348,9 +348,9 @@ static bool lmguideIssueMove(int32_t targetPuu, LmMoveProfile profile) {
 
 // Espera DO.TPOS (P0.046). Más rápido que ZSPD + P5.016 en cada vuelta:
 // un solo registro 16-bit hasta llegar; P5.016 solo una vez al confirmar.
-// Moves cortos (2º corte dual ~0.5–1 mm) a veces no bajan TPOS: hay que
-// aceptar por posición si ya no estamos en la partida. No aceptar TPOS+tol
-// pegado en la misma partida (falso “llegué” sin moverse).
+// Moves cortos (2º corte dual ~0.25–1 mm) a veces no bajan TPOS: aceptar
+// con TPOS+tol solo si hubo flanco OFF o recorrido ≥50 % del delta pedido.
+// No aceptar TPOS+tol pegado en la partida (falso “llegué” sin moverse).
 static bool lmguideWaitForTarget(int32_t targetPuu, float tolMm, uint32_t timeoutMs,
                                  int32_t startPuu, bool haveStart) {
   uint32_t t0 = millis();
@@ -380,9 +380,16 @@ static bool lmguideWaitForTarget(int32_t targetPuu, float tolMm, uint32_t timeou
       }
       continue;
     }
-    if (!haveStart || startPuu == targetPuu || sawLeave || pos != startPuu) {
+    if (!haveStart || startPuu == targetPuu || sawLeave) {
       return true;
     }
+    int32_t cmd = targetPuu - startPuu;
+    if (cmd < 0) cmd = -cmd;
+    int32_t traveled = pos - startPuu;
+    if (traveled < 0) traveled = -traveled;
+    int32_t minTravel = cmd / 2;
+    if (minTravel < 1) minTravel = 1;
+    if (traveled >= minTravel) return true;
     for (uint8_t s = 0; s < 5; s++) {
       lmPoll();
       delay(1);
@@ -396,8 +403,8 @@ static bool lmguideMove(int32_t targetPuu, LmMoveProfile profile) {
   *gLmAbort = false;
   gLmModbusWrites = 0;
   if (targetPuu != 0) gLmRt->lmguideHomed = false;
-  // No saltar el comando por la tol de llegada (0.5 mm): un 2º corte dual con
-  // offset 0.3–0.7 mm debe moverse. Solo omitir si ya está en el PUU pedido.
+  // No saltar el comando por la tol de llegada (0.10 mm): un 2º corte dual con
+  // offset 0.25–0.7 mm debe moverse. Solo omitir si ya está en el PUU pedido.
   for (uint8_t attempt = 1; attempt <= PARAM_LM_MOVE_MAX_ATTEMPTS; attempt++) {
     int32_t startPuu = 0;
     bool haveStart = modbusReadReg32(ASDA_REG_P5_016, &startPuu);

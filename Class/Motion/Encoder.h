@@ -1,4 +1,9 @@
 #pragma once
+/*
+ * EncoderPCNT — API PCNT A/B/Z (OM).
+ * Uso activo en el proyecto: solo dual-speed T0 (raw counts en FeedStage).
+ * Medición / set0 / reset / validate ya no van en el ciclo; reintegrar desde aquí.
+ */
 #include <Arduino.h>
 #include <stdint.h>
 
@@ -7,7 +12,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
-class EncoderPCNT {
+    class EncoderPCNT {
 public:
     // Encoder de 2000 P/R. En X4 se cuentan 4 flancos por pulso.
     static constexpr uint32_t PULSES_PER_REV = 2000;

@@ -59,8 +59,6 @@
       <button type="button" class="btn btn-reset status-banner__open-error" id="btnOpenRecovery" hidden>Abrir</button>
       <div class="status-banner__actions" id="statusBannerActions" hidden>
         <button type="button" class="btn btn-manual" data-action="purga_alimentar">Alimentar</button>
-        <button type="button" class="btn btn-manual" data-action="purga_limpiar" data-side="R">Expulsar R</button>
-        <button type="button" class="btn btn-manual" data-action="purga_limpiar" data-side="L">Expulsar L</button>
         <button type="button" class="btn btn-manual" data-plc-op="valve" data-plc-name="holder_encoder" data-plc-keep-label aria-pressed="false" title="Abrir o cerrar holder y encoder juntos">Liberar</button>
         <button type="button" class="btn btn-start" data-action="charola_vacia" hidden>Charola vacía</button>
         <button type="button" class="btn btn-resume" data-action="purga_continuar">Continuar</button>
@@ -78,8 +76,15 @@
             <button type="button" class="btn btn-neutral" data-action="pause">Pausar</button>
             <button type="button" class="btn btn-stop" data-action="stop">Detener</button>
             <button type="button" class="btn btn-neutral" data-action="reset">Reset</button>
-            <button type="button" class="btn btn-manual" data-action="purga">Purga</button>
-            <button type="button" class="btn btn-outline" data-action="posicion_inicial">Posición inicial</button>
+          </div>
+          <div class="proceso-helpers">
+            <h3 class="proceso-helpers__title">Helpers</h3>
+            <div class="btn-grid btn-grid--proceso">
+              <button type="button" class="btn btn-manual" data-action="purga">Purga</button>
+              <button type="button" class="btn btn-outline" data-action="posicion_inicial">Posición inicial</button>
+              <button type="button" class="btn btn-feeder" data-can-hold="L" title="Mantén pulsado para alimentar el ServoCAN izquierdo">Alimentar L</button>
+              <button type="button" class="btn btn-feeder" data-can-hold="R" title="Mantén pulsado para alimentar el ServoCAN derecho">Alimentar R</button>
+            </div>
           </div>
         </section>
       </aside>
@@ -107,7 +112,7 @@
           <div class="piece-visual" id="pieceVisual" aria-live="polite">
             <div class="piece-figure" id="pieceTube" style="--piece-scale: 0.35">
               <div class="piece-tube" aria-hidden="true"></div>
-              <div class="piece-cota" title="Longitud nominal con tolerancia">
+              <div class="piece-cota" title="Longitud nominal. Tolerancia de referencia visual ±3 mm (no es parámetro de ciclo).">
                 <span class="piece-cota__ext piece-cota__ext--l" aria-hidden="true"></span>
                 <span class="piece-cota__ext piece-cota__ext--r" aria-hidden="true"></span>
                 <span class="piece-cota__dim" aria-hidden="true">
@@ -117,7 +122,7 @@
                 </span>
                 <span class="piece-cota__label">
                   <span class="piece-cota__value" id="metricLongitud">—</span>
-                  <span class="piece-cota__tol">±3</span>
+                  <span class="piece-cota__tol" id="metricTolerancia">±3</span>
                   <span class="piece-cota__unit">mm</span>
                 </span>
               </div>
@@ -137,16 +142,16 @@
               <input type="number" min="1" step="1" id="metricCantidad" class="prod-field__input" value="1" inputmode="numeric" aria-label="Kanban: piezas objetivo del lote">
             </label>
             <label class="prod-field" for="metricCutCompL">
-              <span class="prod-field__key">Compensación izq.</span>
+              <span class="prod-field__key">Compensación izquierdo.</span>
               <div class="prod-field__with-unit">
-                <input type="number" step="0.01" id="metricCutCompL" class="prod-field__input" value="0" inputmode="decimal" aria-label="Compensación de corte lado izquierdo en milímetros">
+                <input type="number" step="0.1" id="metricCutCompL" class="prod-field__input" value="0" inputmode="decimal" aria-label="Compensación de corte lado izquierdo en milímetros">
                 <span class="prod-field__unit">mm</span>
               </div>
             </label>
             <label class="prod-field" for="metricCutCompR">
-              <span class="prod-field__key">Compensación der.</span>
+              <span class="prod-field__key">Compensación derecho.</span>
               <div class="prod-field__with-unit">
-                <input type="number" step="0.01" id="metricCutCompR" class="prod-field__input" value="0" inputmode="decimal" aria-label="Compensación de corte lado derecho en milímetros">
+                <input type="number" step="0.1" id="metricCutCompR" class="prod-field__input" value="0" inputmode="decimal" aria-label="Compensación de corte lado derecho en milímetros">
                 <span class="prod-field__unit">mm</span>
               </div>
             </label>
@@ -173,17 +178,17 @@
         <section class="panel panel--prefeeder" data-block="prealimentador">
           <h2 class="panel-title">Prealimentador</h2>
           <div class="btn-grid">
-            <button type="button" class="btn btn-feeder" data-action="iniciar">Iniciar prealimentador</button>
-            <button type="button" class="btn btn-feeder" data-pf-hold="L" data-action="alimentar_izquierda">Mover lado izquierdo</button>
-            <button type="button" class="btn btn-feeder" data-pf-hold="R" data-action="alimentar_derecha">Mover lado derecho</button>
+            <button type="button" class="btn btn-start" data-action="iniciar">Iniciar prealimentador</button>
+            <button type="button" class="btn btn-feeder" data-pf-hold="R" data-action="alimentar_derecha">Prealimentar (R)</button>
+            <button type="button" class="btn btn-feeder" data-pf-hold="L" data-action="alimentar_izquierda">Prealimentar (L)</button>
           </div>
         </section>
         <section class="panel panel--andon" data-block="andon">
           <h2 class="panel-title">Andon</h2>
           <div class="btn-grid">
-            <button type="button" class="btn btn-andon" data-andon-call="materialista">Materialista</button>
-            <button type="button" class="btn btn-andon" data-andon-call="tecnico">Técnico</button>
-            <button type="button" class="btn btn-andon" data-andon-call="jefe">Jefe de grupo</button>
+            <button type="button" class="btn btn-andon btn-andon--materialista" data-andon-call="materialista">Materialista</button>
+            <button type="button" class="btn btn-andon btn-andon--tecnico" data-andon-call="tecnico">Técnico</button>
+            <button type="button" class="btn btn-andon btn-andon--jefe" data-andon-call="jefe">Jefe de grupo</button>
           </div>
         </section>
       </aside>
@@ -264,59 +269,56 @@
             </div>
           </div>
           <form class="cycle-params" id="cycleParamsForm" autocomplete="off">
-            <h3 class="cycle-params__title">Tiempos fijos (ms)</h3>
+            <h3 class="cycle-params__title">Tiempos de espera (ms)</h3>
             <div class="cycle-params__grid">
-              <label class="motion-field">Holder / encoder
+              <label class="motion-field">Tiempo de espera despues de cerrar holder & encoder.
                 <input type="number" min="0" step="1" data-cycle-param="ms_holder_enc_stable">
               </label>
-              <label class="motion-field">LM en corte
+              <label class="motion-field">Tiempo de espera despues del corte.
                 <input type="number" min="0" step="1" data-cycle-param="ms_lm_at_cut">
               </label>
-              <label class="motion-field">LM en descarga
+              <label class="motion-field">Tiempo de espera en descarga.
                 <input type="number" min="0" step="1" data-cycle-param="ms_lm_at_discharge">
               </label>
-              <label class="motion-field">Cortadores ON
+              <label class="motion-field">Duracion de cortadores activados.
                 <input type="number" min="0" step="1" data-cycle-param="ms_cutter_on">
               </label>
-              <label class="motion-field">Tras cortadores
+              <label class="motion-field">Tiempo de espera despues de cortar.
                 <input type="number" min="0" step="1" data-cycle-param="ms_after_cutter">
               </label>
-              <label class="motion-field" title="Tras mandar abrir pinzas en depósito: conteo local en paralelo antes del paso 8 (home). Si se atora, súbelo.">Tras abrir pinzas
+              <label class="motion-field" title="Tras mandar abrir pinzas en depósito: conteo local en paralelo antes del paso 8 (home). Si se atora, súbelo.">Tiempo de espera despues de abrir pinzas.
                 <input type="number" min="0" step="1" data-cycle-param="ms_after_grip_release">
               </label>
-              <label class="motion-field" title="Tras holder/encoder listos en el solape: espera antes de arrancar V1 de la siguiente pieza.">Antes de alimentar (solape)
+              <label class="motion-field" title="Tras holder/encoder listos en el solape: espera antes de arrancar V1 de la siguiente pieza.">Tiempo de espera antes de alimentar (paralelo).
                 <input type="number" min="0" step="1" data-cycle-param="ms_before_overlap_feed">
               </label>
-              <label class="motion-field">Retardo blower
-                <input type="number" min="0" step="1" data-cycle-param="ms_blower_delay">
-              </label>
-              <label class="motion-field">Fin en home
+              <label class="motion-field">Tiempo de espera al llegar a home.
                 <input type="number" min="0" step="1" data-cycle-param="ms_at_home_end">
               </label>
             </div>
-            <h3 class="cycle-params__title">Depósito por montón</h3>
+            <h3 class="cycle-params__title">Parametros de deposito de piezas.</h3>
             <div class="cycle-params__grid">
-              <label class="motion-field">Lados que alimentan
+              <label class="motion-field">Lados que trabajan.
                 <select data-cycle-param="feed_sides">
                   <option value="R">Derecho</option>
                   <option value="L">Izquierdo</option>
                   <option value="LR">Ambos</option>
                 </select>
               </label>
-              <label class="motion-field">Cortes por montón
+              <label class="motion-field">Cantidad de piezas por batch.
                 <input type="number" min="1" step="1" data-cycle-param="deposit_batch_size">
               </label>
-              <label class="motion-field">Separación (mm)
+              <label class="motion-field">Separacion entre batches.
                 <input type="number" step="0.01" data-cycle-param="deposit_stack_gap_mm">
               </label>
-              <label class="motion-field">Despeje de pinzas (mm)
+              <label class="motion-field">Despeje de grippers despues de abrir (mm).
                 <input type="number" min="0" step="0.01" data-cycle-param="gripper_clearance_mm">
               </label>
-              <label class="motion-field">Blower ms / mm pieza
-                <input type="number" min="0" step="0.1" data-cycle-param="blower_ms_per_mm">
+              <label class="motion-field" title="Se suma al nominal del LM Guide (|largo| − 55) antes de las compensaciones R/L. Paso 0.10 mm (igual a la resolución/tol. de llegada).">Compensación dual (mm)
+                <input type="number" step="0.1" data-cycle-param="cut_comp_dual_mm">
               </label>
             </div>
-            <button type="submit" class="btn btn-config">Guardar parámetros de ciclo</button>
+            <button type="submit" class="btn btn-config">Guardar Parámetros</button>
           </form>
         </section>
         <section class="tab-panel" role="tabpanel" id="tabPanelMotion" aria-labelledby="tabBtnMotion" data-tab-panel="motion" hidden>
@@ -348,11 +350,6 @@
             <div class="motion-params__grid">
               <fieldset class="motion-fieldset motion-fieldset--wide motion-fieldset--validate">
                 <legend>MEDICIÓN</legend>
-                <label class="settings-toggle settings-toggle--in-field">
-                  <input type="checkbox" id="motionValidateEncoder" data-motion-path="feed_stage.validate_encoder">
-                  <span class="settings-toggle__switch" aria-hidden="true"></span>
-                  <span class="settings-toggle__text">Validar longitud con encoder</span>
-                </label>
                 <div class="motion-validate">
                   <div class="motion-validate__row">
                     <div class="motion-validate__id">
@@ -374,11 +371,6 @@
                       <span class="motion-laser__name">Material</span>
                       <span class="motion-laser__state">Ausente</span>
                     </p>
-                    <div class="motion-validate__enc">
-                      <span class="motion-validate__label">Encoder</span>
-                      <span class="motion-validate__value" id="encReadR">—</span>
-                    </div>
-                    <button type="button" class="btn btn-manual" data-motion-op="encoder_reset" data-motion-side="R">Reset contador</button>
                   </div>
                   <div class="motion-validate__row">
                     <div class="motion-validate__id">
@@ -400,11 +392,6 @@
                       <span class="motion-laser__name">Material</span>
                       <span class="motion-laser__state">Ausente</span>
                     </p>
-                    <div class="motion-validate__enc">
-                      <span class="motion-validate__label">Encoder</span>
-                      <span class="motion-validate__value" id="encReadL">—</span>
-                    </div>
-                    <button type="button" class="btn btn-manual" data-motion-op="encoder_reset" data-motion-side="L">Reset contador</button>
                   </div>
                 </div>
               </fieldset>
@@ -415,11 +402,6 @@
                   <div class="motion-fieldset__actions">
                     <button type="button" class="btn btn-power btn--compact" id="feederServoToggle" data-motion-op="feeder_servo" aria-pressed="false">Disable</button>
                   </div>
-                  <label class="settings-toggle settings-toggle--in-field feeder-dual-enable">
-                    <input type="checkbox" id="feedDualSpeedEnable" data-motion-path="feed_stage.dual_speed_enable">
-                    <span class="settings-toggle__switch" aria-hidden="true"></span>
-                    <span class="settings-toggle__text">Doble velocidad (PV)</span>
-                  </label>
                   <div class="feeder-cut-layout">
                     <p class="motion-side__title feeder-cut-layout__title-r">Lado R</p>
                     <label class="motion-field motion-field--compact feeder-cut-layout__vel-r">Primaria RPM
@@ -428,7 +410,7 @@
                     <label class="motion-field motion-field--compact feeder-cut-layout__vel2-r">Secundaria RPM
                       <input type="number" step="1" min="0" max="3000" data-motion-path="feeder.R.secondary_velocity_pps" data-motion-unit="feed_rpm">
                     </label>
-                    <label class="motion-field motion-field--compact feeder-cut-layout__switch-r">Cambio R (ms)
+                    <label class="motion-field motion-field--compact feeder-cut-layout__switch-r">Cambio de velocidad (ms)
                       <input type="number" step="1" min="0" max="15000" data-motion-path="feeder.R.speed_switch_ms">
                     </label>
                     <button type="button" class="btn btn-manual btn--compact feeder-cut-layout__test-r" data-motion-op="feeder_test" data-motion-side="R">Probar R</button>
@@ -465,7 +447,7 @@
                       </label>
                       <span class="lm-guide__puu" id="lmMovePuu" aria-hidden="true">0</span>
                     </div>
-                    <p class="lm-guide__segment-label">Corte / jalar</p>
+                    <p class="lm-guide__segment-label">Perfil de movimiento para cortar & traccionar</p>
                     <div class="lm-guide__row lm-guide__row--profile" role="group" aria-label="Perfil corte / jalar LM Guide">
                       <label class="motion-field">RPM
                         <input type="number" step="0.1" min="400" max="5000" data-motion-path="lmguide.pr_speed_rpm" title="Corte / jalar">
@@ -479,7 +461,7 @@
                       <button type="button" class="btn btn-manual" data-motion-op="lmguide_move" data-for-cut="1">Mover</button>
                       <button type="button" class="btn btn-manual" data-motion-op="lmguide_move_home" data-for-cut="1">Ir a cero</button>
                     </div>
-                    <p class="lm-guide__segment-label">Movimientos comunes</p>
+                    <p class="lm-guide__segment-label">Perfil de movimiento para movimientos comunes</p>
                     <div class="lm-guide__row lm-guide__row--profile" role="group" aria-label="Perfil movimientos comunes LM Guide">
                       <label class="motion-field">RPM
                         <input type="number" step="0.1" min="400" max="5000" data-motion-path="lmguide.travel_pr_speed_rpm" title="Movimientos comunes (home, descarga, jog, etc.)">
@@ -726,27 +708,12 @@
   </div>
 
   <div class="modal-overlay" id="mantModal" hidden role="dialog" aria-modal="true" aria-labelledby="mantModalTitle">
-    <div class="modal">
+    <div class="modal modal--wide">
       <header class="modal__header">
         <h2 id="mantModalTitle">Mantenimiento</h2>
         <button type="button" class="modal__close" id="mantModalClose" aria-label="Cerrar">×</button>
       </header>
-      <div class="modal__body">
-        <p class="mant-counter-value" id="mantCounterValue">0</p>
-        <p class="modal__hint" id="mantCounter">Ciclos desde el último reset</p>
-        <p class="modal__hint">A los 10 000 ciclos la revisión de arranque no deja continuar hasta resetear este contador.</p>
-        <button type="button" class="btn btn-config" id="mantReset">Resetear contador</button>
-        <div class="mant-reset-form" id="mantResetForm" hidden>
-          <label class="modal-field" for="mantEmpleado">Empleado (5 dígitos)
-            <input id="mantEmpleado" inputmode="numeric" maxlength="5" autocomplete="off">
-          </label>
-          <p class="modal__hint">Confirma el reset con tu número de empleado. Cancelar o cerrar conserva el contador.</p>
-          <div class="checklist-actions">
-            <button type="button" class="btn btn-start" id="mantConfirm">Confirmar reset</button>
-            <button type="button" class="btn btn-secondary" id="mantCancel">Cancelar</button>
-          </div>
-        </div>
-      </div>
+      <div class="modal__body" id="mantBody"></div>
     </div>
   </div>
 

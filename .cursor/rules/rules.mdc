@@ -6,7 +6,7 @@ alwaysApply: true
 # rules.md
 # Cortadora de tubo — Firmware y lógica de control
 
-**Estado del documento:** Borrador — v0.8  
+**Estado del documento:** Borrador — v0.9  
 **Proyecto:** Cortadora de tubo dual / espejo  
 **Requisito principal:** Tolerancia de corte de ±2 mm por lado  
 **Alcance:** Firmware, responsabilidades de los MCU, secuencias de control, comunicación y reglas de desarrollo de software.
@@ -214,8 +214,8 @@ Secuencia interna del bloque (`op: release_part`):
 1. Mover a despeje de pinzas si aplica (`clear_puu`).
 2. Iniciar el regreso del LM Guide a home (`X_HOME` / PUU 0).
 3. Tras el retardo de 200 ms desde el inicio del regreso, activar Blower Dual.
-4. La duración del blower corresponde a la longitud programada de la pieza.
-5. Al confirmar home, desactivar el blower si sigue activo.
+4. Mantener el blower activo hasta confirmar home.
+5. Al confirmar home, desactivar el blower.
 6. Esperar 50 ms en home.
 7. Responder `release_part` con `ok` y `lm_homed`.
 
@@ -301,12 +301,12 @@ El maestro envía una sola orden `release_part` a MCU Motion. Motion ejecuta int
 2. Ordenar al LM Guide regresar a home / posición cero.
 3. Iniciar el conteo de 200 ms cuando comience el movimiento de regreso.
 4. Después de 200 ms, activar Blower Dual (GPIO Motion).
-5. La duración de activación del blower corresponde a la longitud programada de la pieza.
-6. Al confirmar home, cortar el blower si sigue activo.
+5. Mantener el blower activo hasta confirmar home (sin duración por longitud de pieza).
+6. Al confirmar home, cortar el blower.
 7. Esperar 50 ms.
 8. Responder al maestro con `release_part` ok / `lm_homed`.
 
-El retardo de activación de 200 ms y la duración dependiente de la longitud de la pieza son requisitos definidos y no deben modificarse silenciosamente.
+El retardo de activación de 200 ms es un requisito definido y no debe modificarse silenciosamente.
 
 Si el LM Guide ya está en home antes del retardo de 200 ms, el blower se omite.
 
@@ -567,7 +567,6 @@ Queda pendiente definir el protocolo e intercambio de estados con el MCU que coo
 
 - Definir qué salidas se conservan y cuáles se desactivan durante cada tipo de pausa.
 - Definir las condiciones exactas de restablecimiento y el tiempo de espera aplicable antes de aceptar que el error desapareció.
-- Definir la condición de finalización del ciclo cuando el blower y el regreso a home concluyen en momentos distintos.
 - La siguiente alimentación en paralelo arranca al apagar los cortadores, si hay otra pieza.
 
 # 11. Principio de desarrollo del proyecto

@@ -33,6 +33,7 @@
     modelComboList: document.getElementById("modelComboList"),
     metricModeloDesc: document.getElementById("metricModeloDesc"),
     metricLongitud: document.getElementById("metricLongitud"),
+    metricTolerancia: document.getElementById("metricTolerancia"),
     metricCantidad: document.getElementById("metricCantidad"),
     metricCutCompR: document.getElementById("metricCutCompR"),
     metricCutCompL: document.getElementById("metricCutCompL"),
@@ -100,13 +101,7 @@
     checklistBody: document.getElementById("checklistBody"),
     mantModal: document.getElementById("mantModal"),
     mantModalClose: document.getElementById("mantModalClose"),
-    mantCounter: document.getElementById("mantCounter"),
-    mantCounterValue: document.getElementById("mantCounterValue"),
-    mantEmpleado: document.getElementById("mantEmpleado"),
-    mantReset: document.getElementById("mantReset"),
-    mantResetForm: document.getElementById("mantResetForm"),
-    mantConfirm: document.getElementById("mantConfirm"),
-    mantCancel: document.getElementById("mantCancel"),
+    mantBody: document.getElementById("mantBody"),
     empleadoModal: document.getElementById("empleadoModal"),
     empleadoModalClose: document.getElementById("empleadoModalClose"),
     empleadoInput: document.getElementById("empleadoInput"),
@@ -156,6 +151,8 @@
   let lastPlcOutputs = null;
   let pfPollTimer = null;
   let checklistViewKey = "";
+  let mantViewKey = "";
+  let mantResetSide = "";
   let empleadoWait = null;
   let recoveryPollTimer = null;
   let recoveryPollBusy = false;
@@ -261,11 +258,17 @@
     }
   }
 
+  function formatCycleMm(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return "";
+    return n.toFixed(2);
+  }
+
   function setCutCompInput(el, mm) {
     if (!el) return;
     if (document.activeElement === el) return;
     const n = Number(mm);
-    el.value = Number.isFinite(n) ? String(n) : "0";
+    el.value = Number.isFinite(n) ? n.toFixed(2) : "0.00";
   }
 
   async function saveCutCompSide(side, mm) {
@@ -486,6 +489,10 @@
     syncModelSelect(state.numero_modelo || "");
     syncModeloDesc(state);
     els.metricLongitud.textContent = formatMm(state.longitud_modelo_mm);
+    // Tolerancia de referencia visual ±3 mm (no es parámetro de ciclo).
+    if (els.metricTolerancia) {
+      els.metricTolerancia.textContent = "±3";
+    }
     setCantidadInput(
       state.cantidad,
       !!state.ciclo_en_curso || !!state.charola_llena || !!state.lote_activo
@@ -655,6 +662,10 @@
         input.value = "";
         return;
       }
+      if (key.indexOf("_mm") >= 0 || key.indexOf("per_mm") >= 0) {
+        input.value = formatCycleMm(val);
+        return;
+      }
       input.value = String(val);
     });
   }
@@ -716,7 +727,15 @@
             input.checked = !!val && val !== 0 && val !== "0" && val !== "false";
             return;
           }
-          input.value = val == null || val === "" ? "" : String(val);
+          if (val == null || val === "") {
+            input.value = "";
+            return;
+          }
+          if (key.indexOf("_mm") >= 0 || key.indexOf("per_mm") >= 0) {
+            input.value = formatCycleMm(val);
+            return;
+          }
+          input.value = String(val);
         });
       }
       if (data.state) applyState(data.state);
@@ -1276,8 +1295,6 @@
     }
 
     const viewStep = step || (enError ? "error" : "");
-    // Solo auto-abrir al surgir un error/paso nuevo. Si el operador cierra (X),
-    // no volver a forzar el popup en cada poll: puede usar «Abrir».
     const autoKey =
       (active ? "a" : "e") +
       "|" +
@@ -1348,7 +1365,6 @@
     const jointOrigin = String(rec.origin || "");
     const errorFixed = String(rec.mensaje || "").trim();
     const stepGuide = String(rec.guide || "").trim();
-    // Caja = solo error. Guía = apartado INSTRUCCIONES. Sin "Paso X de Y".
     if (els.recoveryStepLabel) {
       els.recoveryStepLabel.hidden = true;
       els.recoveryStepLabel.textContent = "";
@@ -1360,7 +1376,6 @@
       els.recoveryLead.classList.toggle("is-hands-warn", showHandsWarn);
     }
     if (els.recoveryText) {
-      // Apartado de instrucciones: solo recovery.guide (nunca mezclado con el error).
       if (!stepGuide || (!jointKind && viewStep === "purga")) {
         els.recoveryText.hidden = true;
         els.recoveryText.textContent = "";
@@ -1380,8 +1395,7 @@
       if (panel) panel.classList.toggle("is-hands-warn", viewStep === "purga");
     }
 
-    // Caja de error: siempre el fallo original fijo (no las instrucciones del paso).
-    const showErrorBox =
+   const showErrorBox =
       (!!active && !!code) ||
       jointKind ||
       viewStep === "error" ||
@@ -1424,7 +1438,7 @@
           viewStep === "manguera")) ||
       (!jointKind && (viewStep === "manguera" || viewStep === "purga_error"));
     if (els.recoveryJointLegend) {
-      // Las descripciones breves van en «Funciones Extras» de las acciones.
+      // Las descripciones brves van en «Funciones Extras» de las acciones.
       els.recoveryJointLegend.hidden = true;
     }
     if (els.recoveryModal) {
@@ -2224,12 +2238,6 @@
         else motionRefreshPuuReadout();
       }
     }
-    if (op === "encoder_reset") {
-      extra.side = btn.getAttribute("data-motion-side") || "R";
-      const data = await sendMotionOp(op, extra);
-      if (data) pollEncoder();
-      return;
-    }
     if (op === "feeder_test") {
       extra.side = btn.getAttribute("data-motion-side") || "R";
       const data = await sendMotionOp(op, extra);
@@ -2258,25 +2266,16 @@
   }
 
   function motionShowEncoder(encoder) {
+    // Poll de sensores Motion (láser/joint/material). Sin lectura de encoder OM.
     ["R", "L"].forEach(function (side) {
-      const el = document.getElementById(side === "R" ? "encReadR" : "encReadL");
       const laserLed = document.getElementById(side === "R" ? "laserLedR" : "laserLedL");
       const jointLed = document.getElementById(side === "R" ? "jointLedR" : "jointLedL");
       const materialLed = document.getElementById(
         side === "R" ? "materialLedR" : "materialLedL"
       );
       const sideData = encoder && encoder[side];
-      if (el) {
-        const counts = sideData && sideData.counts;
-        // Solo counts enteros del MCU. No mostrar mm: decimales = ruta con fórmula.
-        el.textContent =
-          counts != null && Number.isFinite(Number(counts))
-            ? String(Math.round(Number(counts)))
-            : "—";
-      }
       motionShowSensorLed(laserLed, side, "Láser", !!(sideData && sideData.laser === true));
       motionShowSensorLed(jointLed, side, "Joint", !!(sideData && sideData.joint === true));
-      // Material: ON = presente. Etiqueta distinta a Joint/Láser.
       if (materialLed) {
         const matOn = !!(sideData && sideData.material === true);
         const stateEl = materialLed.querySelector(".motion-laser__state");
@@ -3321,49 +3320,72 @@
       if (e.target === els.mantModal) closeMantenimiento();
     });
   }
-  function showMantResetForm(show) {
-    if (els.mantResetForm) els.mantResetForm.hidden = !show;
-    if (els.mantReset) els.mantReset.hidden = !!show;
-    if (!show && els.mantEmpleado) els.mantEmpleado.value = "";
-    if (show && els.mantEmpleado) {
-      requestAnimationFrame(function () {
-        if (els.mantEmpleado) els.mantEmpleado.focus();
-      });
-    }
-  }
-
-  if (els.mantReset) {
-    els.mantReset.addEventListener("click", function () {
-      showMantResetForm(true);
-    });
-  }
-  if (els.mantCancel) {
-    els.mantCancel.addEventListener("click", function () {
-      showMantResetForm(false);
-    });
-  }
-  if (els.mantConfirm) {
-    els.mantConfirm.addEventListener("click", async function () {
-      const empleado = els.mantEmpleado ? els.mantEmpleado.value.trim() : "";
-      if (!/^\d{5}$/.test(empleado)) {
-        pushLocalEvent("El número de empleado son cinco dígitos.", "error");
+  if (els.mantBody) {
+    els.mantBody.addEventListener("click", function (e) {
+      const btn = e.target.closest("[data-mant]");
+      if (!btn || btn.disabled) return;
+      const op = btn.getAttribute("data-mant");
+      if (op === "reset_side") {
+        const side = String(btn.getAttribute("data-side") || "").toUpperCase();
+        if (side !== "R" && side !== "L") return;
+        mantResetSide = side;
+        mantViewKey = "";
+        fetchState();
         return;
       }
-      await sendAction("mantenimiento", "mantenimiento_reset", {
-        empleado: empleado,
-      });
-      // Solo cierra el formulario si el contador quedó en cero (reset ok).
-      if (els.mantCounterValue && els.mantCounterValue.textContent === "0") {
-        showMantResetForm(false);
+      if (op === "cancel_reset") {
+        mantResetSide = "";
+        mantViewKey = "";
+        fetchState();
+        return;
+      }
+      if (op === "confirm_reset") {
+        const input = document.getElementById("mantEmpleado");
+        const empleado = input ? input.value.trim() : "";
+        if (!/^\d{5}$/.test(empleado)) {
+          pushLocalEvent("El número de empleado son cinco dígitos.", "error");
+          return;
+        }
+        if (mantResetSide !== "R" && mantResetSide !== "L") {
+          pushLocalEvent("Indica el lado a resetear (R o L).", "error");
+          return;
+        }
+        const side = mantResetSide;
+        (async function () {
+          try {
+            const res = await fetch("/api/action", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                block: "mantenimiento",
+                action: "mantenimiento_reset",
+                empleado: empleado,
+                side: side,
+              }),
+            });
+            const data = await res.json();
+            if (!data.ok) {
+              pushLocalEvent(data.error || "No se pudo resetear el contador.", "error");
+              if (data.state) applyState(data.state);
+              return;
+            }
+            mantResetSide = "";
+            mantViewKey = "";
+            pushLocalEvent("[mantenimiento] Contador " + side + " en cero.");
+            if (data.state) applyState(data.state);
+            else fetchState();
+          } catch (err) {
+            pushLocalEvent("Sin conexión con el servidor.", "error");
+          }
+        })();
       }
     });
-  }
-  if (els.mantEmpleado) {
-    els.mantEmpleado.addEventListener("keydown", function (e) {
-      if (e.key === "Enter") {
-        e.preventDefault();
-        if (els.mantConfirm) els.mantConfirm.click();
-      }
+    els.mantBody.addEventListener("keydown", function (e) {
+      if (e.key !== "Enter") return;
+      if (!e.target || e.target.id !== "mantEmpleado") return;
+      e.preventDefault();
+      const confirmBtn = els.mantBody.querySelector('[data-mant="confirm_reset"]');
+      if (confirmBtn) confirmBtn.click();
     });
   }
   if (els.empleadoModalClose) els.empleadoModalClose.addEventListener("click", closeEmpleado);
@@ -3409,14 +3431,6 @@
     // checkbox dispara change; number/text también input
     els.motionTuneForm.addEventListener("input", markMotionTuneDirty);
     els.motionTuneForm.addEventListener("change", markMotionTuneDirty);
-    const validateEnc = document.getElementById("motionValidateEncoder");
-    if (validateEnc) {
-      // Toggle aplica al instante: guardar + enviar al MCU (no hace falta «Guardar»).
-      validateEnc.addEventListener("change", function () {
-        motionTuneDirty = true;
-        saveMotionTune();
-      });
-    }
   }
   if (els.motionTuneReload) {
     els.motionTuneReload.addEventListener("click", function () {
@@ -4040,7 +4054,10 @@
         pushLocalEvent("La compensación de corte tiene que ser un número.", "error");
         return;
       }
-      saveCutCompSide(side, mm);
+      // Paso útil 0.10 mm (igual a resolución/tol. LM Guide); 0.05 no aplica.
+      const snapped = motionSnapMm(mm);
+      el.value = String(snapped);
+      saveCutCompSide(side, snapped);
     });
   }
   onCutCompChange("R", els.metricCutCompR);
@@ -4089,6 +4106,27 @@
       home.disabled = !!state.rutina_manos || cicloCorriendo || (!!rutina && rutina !== "purga");
       setButtonOn(home, rutina === "posicion_inicial");
     }
+    const canHoldBusy =
+      cicloCorriendo ||
+      enError ||
+      (!!rutina && !(purga && fase === "espera"));
+    document.querySelectorAll("[data-can-hold]").forEach(function (btn) {
+      const wasActive = btn.classList.contains("is-active");
+      btn.disabled = canHoldBusy;
+      if (canHoldBusy && wasActive) {
+        const side = btn.getAttribute("data-can-hold");
+        setButtonOn(btn, false);
+        if (side === "L" || side === "R") {
+          fetch("/api/motion/cmd", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ op: "feeder_hold", side: side, on: false }),
+          }).catch(function () {});
+        }
+      } else if (canHoldBusy) {
+        setButtonOn(btn, false);
+      }
+    });
     const pfIniciar = document.querySelector('[data-block="prealimentador"] [data-action="iniciar"]');
     if (pfIniciar) {
       const pf = state.prefeeder || {};
@@ -4130,12 +4168,7 @@
       }
     }
     renderChecklist(state);
-    if (els.mantCounterValue) {
-      els.mantCounterValue.textContent = String(state.ciclos_mant || 0);
-    }
-    if (els.mantCounter) {
-      els.mantCounter.textContent = "Ciclos desde el último reset";
-    }
+    renderMantenimiento(state);
   }
 
   function checkButton(label, op, disabled) {
@@ -4233,7 +4266,6 @@
       ch.alimentador_ok,
       ch.purga_ok,
       ch.piezas_cortadas,
-      state.ciclos_mant,
       state.ciclos_mant_r,
       state.ciclos_mant_l,
       logLen,
@@ -4274,11 +4306,15 @@
 
     const paso = ch.paso || 1;
     if (paso === 1) {
-      const ciclos = state.ciclos_mant || 0;
+      const ciclosR = Number(state.ciclos_mant_r) || 0;
+      const ciclosL = Number(state.ciclos_mant_l) || 0;
+      const blocked = ciclosR >= 10000 || ciclosL >= 10000;
       hint.textContent =
-        "Paso 1 de 6. Ciclos desde mantenimiento: " +
-        ciclos +
-        ". El tope es 10 000.";
+        "Paso 1 de 6. Ciclos desde mantenimiento — R: " +
+        ciclosR +
+        ", L: " +
+        ciclosL +
+        ". El tope es 10 000 por lado.";
       const field = document.createElement("label");
       field.className = "modal-field";
       field.textContent = "Empleado (5 dígitos)";
@@ -4289,7 +4325,7 @@
       input.autocomplete = "off";
       field.appendChild(input);
       actions.appendChild(
-        checkButton("Continuar", "checklist_empezar", ciclos >= 10000)
+        checkButton("Continuar", "checklist_empezar", blocked)
       );
       revision.appendChild(hint);
       revision.appendChild(field);
@@ -4311,12 +4347,12 @@
       actions.appendChild(checkButton("Regresó bien", "checklist_eje_listo", !ch.eje_ok || !ch.recorrido_ok));
     } else if (paso === 5) {
       hint.textContent =
-        "Paso 5 de 6. Prepara los alimentadores CAN y, si hay COM del PreAlimentador, estabilízalo. Luego la purga. Alimentar, Expulsar, Continuar y Terminar quedan en el banner superior.";
+        "Paso 5 de 6. Prepara los alimentadores CAN y, si hay COM del PreAlimentador, estabilízalo. Luego la purga. Alimentar, Continuar y Terminar quedan en el banner; Alimentar L/R en Helpers.";
       actions.appendChild(checkButton("Preparar alimentador", "checklist_preparar", !!state.rutina));
       actions.appendChild(checkButton("Hacer purga", "checklist_purga", !ch.alimentador_ok || !!state.rutina));
       actions.appendChild(checkButton("Purga lista", "checklist_purga_hecha", !ch.purga_ok));
     } else {
-      hint.textContent = "Paso 6 de 6. Corta dos piezas del modelo cargado. Cada lado debe medir la longitud del modelo, dentro de la tolerancia del ciclo. La LM Guide recorre esa longitud menos 55 mm.";
+      hint.textContent = "Paso 6 de 6. Corta dos piezas del modelo cargado. Cada lado debe medir la longitud del modelo (±3 mm de referencia visual). La LM Guide recorre esa longitud menos 55 mm.";
       if (!ch.piezas_cortadas) {
         actions.appendChild(checkButton("Cortar 2 piezas", "checklist_piezas", !!state.rutina));
       } else {
@@ -4361,15 +4397,171 @@
     checklistViewKey = "";
   }
 
+  function mantLastResetBySide(state) {
+    const last = { R: null, L: null };
+    const rows = Array.isArray(state.mantenimiento_log) ? state.mantenimiento_log : [];
+    rows.forEach(function (row) {
+      const side = row && row.side ? String(row.side).toUpperCase() : "";
+      if (side !== "R" && side !== "L") return;
+      last[side] = row;
+    });
+    return last;
+  }
+
+  function renderMantLog(state) {
+    const section = checklistSection("Registro de resets");
+    const rows = Array.isArray(state.mantenimiento_log) ? state.mantenimiento_log.slice() : [];
+    rows.reverse();
+    if (!rows.length) {
+      const empty = document.createElement("p");
+      empty.className = "checklist-log-empty";
+      empty.textContent = "Sin resets registrados todavía.";
+      section.appendChild(empty);
+      return section;
+    }
+    const list = document.createElement("ul");
+    list.className = "checklist-log-list mant-log-list";
+    rows.forEach(function (row) {
+      const item = document.createElement("li");
+      item.className = "checklist-log-item mant-log-item";
+      const fecha = document.createElement("span");
+      fecha.textContent = row && row.fecha ? String(row.fecha) : "—";
+      const side = document.createElement("span");
+      side.textContent = row && row.side ? String(row.side) : "—";
+      const emp = document.createElement("span");
+      emp.textContent = row && row.empleado ? String(row.empleado) : "—";
+      const ciclos = document.createElement("span");
+      const n = Number(row && row.ciclos);
+      ciclos.textContent = Number.isFinite(n) ? String(Math.max(0, Math.round(n))) : "—";
+      item.appendChild(fecha);
+      item.appendChild(side);
+      item.appendChild(emp);
+      item.appendChild(ciclos);
+      list.appendChild(item);
+    });
+    section.appendChild(list);
+    return section;
+  }
+
+  function renderMantSideCounts(state) {
+    const section = checklistSection("Contadores por lado");
+    const grid = document.createElement("div");
+    grid.className = "checklist-side-counts";
+    const last = mantLastResetBySide(state);
+    [
+      { side: "R", label: "Derecho (R)", value: state.ciclos_mant_r },
+      { side: "L", label: "Izquierdo (L)", value: state.ciclos_mant_l },
+    ].forEach(function (item) {
+      const card = document.createElement("div");
+      card.className = "checklist-side-count mant-side-count";
+      const sideEl = document.createElement("span");
+      sideEl.className = "checklist-side-count__side";
+      sideEl.textContent = item.label;
+      const valueEl = document.createElement("span");
+      valueEl.className = "checklist-side-count__value";
+      const n = Number(item.value);
+      valueEl.textContent = Number.isFinite(n) ? String(Math.max(0, Math.round(n))) : "0";
+      const lastEl = document.createElement("span");
+      lastEl.className = "mant-side-count__last";
+      const lastRow = last[item.side];
+      lastEl.textContent = lastRow && lastRow.fecha
+        ? "Último reset: " + String(lastRow.fecha)
+        : "Sin reset registrado";
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "btn btn-config";
+      btn.textContent = "Resetear " + item.side;
+      btn.setAttribute("data-mant", "reset_side");
+      btn.setAttribute("data-side", item.side);
+      btn.disabled = mantResetSide === "R" || mantResetSide === "L";
+      card.appendChild(sideEl);
+      card.appendChild(valueEl);
+      card.appendChild(lastEl);
+      card.appendChild(btn);
+      grid.appendChild(card);
+    });
+    section.appendChild(grid);
+    const note = document.createElement("p");
+    note.className = "modal__hint";
+    note.textContent =
+      "Piezas buenas por lado desde el último reset. A los 10 000 ciclos por lado hay que resetear y reemplazar la navaja de ese lado.";
+    section.appendChild(note);
+    return section;
+  }
+
+  function renderMantResetForm(side) {
+    const section = checklistSection("Confirmar reset " + side);
+    const field = document.createElement("label");
+    field.className = "modal-field";
+    field.setAttribute("for", "mantEmpleado");
+    field.textContent = "Empleado (5 dígitos)";
+    const input = document.createElement("input");
+    input.id = "mantEmpleado";
+    input.inputMode = "numeric";
+    input.maxLength = 5;
+    input.autocomplete = "off";
+    field.appendChild(input);
+    const hint = document.createElement("p");
+    hint.className = "modal__hint";
+    hint.textContent =
+      "Confirma el reset del lado " +
+      side +
+      " con tu número de empleado. Cancelar o cerrar conserva el contador.";
+    const actions = document.createElement("div");
+    actions.className = "checklist-actions";
+    const confirm = document.createElement("button");
+    confirm.type = "button";
+    confirm.className = "btn btn-start";
+    confirm.textContent = "Confirmar reset " + side;
+    confirm.setAttribute("data-mant", "confirm_reset");
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "btn btn-secondary";
+    cancel.textContent = "Cancelar";
+    cancel.setAttribute("data-mant", "cancel_reset");
+    actions.appendChild(confirm);
+    actions.appendChild(cancel);
+    section.appendChild(field);
+    section.appendChild(hint);
+    section.appendChild(actions);
+    return section;
+  }
+
+  function renderMantenimiento(state) {
+    if (!els.mantModal || els.mantModal.hidden || !els.mantBody) return;
+    const logLen = Array.isArray(state.mantenimiento_log) ? state.mantenimiento_log.length : 0;
+    const key = [
+      state.ciclos_mant_r,
+      state.ciclos_mant_l,
+      logLen,
+      mantResetSide,
+    ].join("|");
+    if (key === mantViewKey) return;
+    mantViewKey = key;
+    const body = els.mantBody;
+    body.innerHTML = "";
+    body.appendChild(renderMantLog(state));
+    body.appendChild(renderMantSideCounts(state));
+    if (mantResetSide === "R" || mantResetSide === "L") {
+      body.appendChild(renderMantResetForm(mantResetSide));
+      requestAnimationFrame(function () {
+        const input = document.getElementById("mantEmpleado");
+        if (input) input.focus();
+      });
+    }
+  }
+
   function openMantenimiento() {
+    mantViewKey = "";
+    mantResetSide = "";
     if (els.mantModal) els.mantModal.hidden = false;
-    showMantResetForm(false);
     fetchState();
   }
 
   function closeMantenimiento() {
     // Cerrar/cancelar no ejecuta reset ni modifica el contador.
-    showMantResetForm(false);
+    mantResetSide = "";
+    mantViewKey = "";
     if (els.mantModal) els.mantModal.hidden = true;
   }
 
@@ -4463,13 +4655,74 @@
     btn.addEventListener("lostpointercapture", release);
   });
 
+  document.querySelectorAll("[data-can-hold]").forEach(function (btn) {
+    const side = btn.getAttribute("data-can-hold");
+    if (side !== "L" && side !== "R") return;
+    let held = false;
+    let seq = 0;
+    async function setHold(on) {
+      if (held === on) return;
+      held = on;
+      const my = ++seq;
+      setButtonOn(btn, on);
+      try {
+        const res = await fetch("/api/motion/cmd", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ op: "feeder_hold", side: side, on: on }),
+        });
+        const data = await res.json().catch(function () {
+          return null;
+        });
+        if (my !== seq) {
+          // Se soltó mientras arrancaba: forzar paro.
+          if (on) {
+            fetch("/api/motion/cmd", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ op: "feeder_hold", side: side, on: false }),
+            }).catch(function () {});
+          }
+          return;
+        }
+        if (on && (!res.ok || !data || !data.ok)) {
+          held = false;
+          setButtonOn(btn, false);
+          if (data && data.error) pushLocalEvent(data.error, "error");
+        }
+      } catch (err) {
+        if (my !== seq) return;
+        if (on) {
+          held = false;
+          setButtonOn(btn, false);
+        }
+      }
+    }
+    btn.addEventListener("pointerdown", function (ev) {
+      if (btn.disabled) return;
+      ev.preventDefault();
+      try {
+        btn.setPointerCapture(ev.pointerId);
+      } catch (e) {
+        /* ignore */
+      }
+      setHold(true);
+    });
+    function release() {
+      setHold(false);
+    }
+    btn.addEventListener("pointerup", release);
+    btn.addEventListener("pointercancel", release);
+    btn.addEventListener("lostpointercapture", release);
+  });
+
   document.querySelectorAll("[data-block]").forEach(function (container) {
     const block = container.dataset.block;
     container.querySelectorAll("[data-action]").forEach(function (btn) {
       // Evita doble handler si hay data-block anidados (p. ej. purga dentro de proceso).
       if (btn.closest("[data-block]") !== container) return;
       btn.addEventListener("click", function () {
-        if (btn.hasAttribute("data-pf-hold")) return;
+        if (btn.hasAttribute("data-pf-hold") || btn.hasAttribute("data-can-hold")) return;
         const action = btn.dataset.action;
         flashButton(btn);
 

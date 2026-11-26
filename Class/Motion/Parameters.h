@@ -9,13 +9,14 @@
  *
  * Claves JSON (data/Motion.json) ↔ tune:
  *   feeder.R/L.profile_velocity_pps, secondary_velocity_pps, target_position_counts
- *   feed_stage.validate_encoder, dual_speed_enable
+ *   feed_stage.dual_speed_enable
  *   feeder.R/L.speed_switch_ms (cambio V1→V2 independiente por lado)
  *   lmguide.pr_speed_rpm, accel_ms, decel_ms (corte / PR1)
  *   lmguide.travel_pr_speed_rpm, travel_accel_ms, travel_decel_ms (viaje / PR2)
  *   lmguide.pos_puu
  *   set_tune serial: lm_pr_* (cut) + lm_travel_* (travel)
- *   set_data: target_length_mm, tolerance_mm, modelo_id, measure_comp_mm
+ *   set_data: target_length_mm, modelo_id, measure_comp_mm
+ *   (tolerance_mm legado/opcional: solo referencia visual HMI ±3 mm; no gobierna FeedStage)
  *
  * FeedStage (PV): velocidad primaria por lado; opcional secundaria tras
  * speed_switch_ms de ese lado si dual_speed_enable. Paro en su láser.
@@ -36,10 +37,11 @@ static const uint32_t PARAM_MS_LM_AT_DISCHARGE    = 100;
 static const uint32_t PARAM_MS_CUTTER_ON          = 50;
 static const uint32_t PARAM_MS_AFTER_CUTTER       = 100;
 static const uint32_t PARAM_MS_AFTER_GRIP_RELEASE = 100;
-static const uint32_t PARAM_MS_BLOWER_DELAY       = 200;
+static const uint32_t PARAM_MS_BLOWER_DELAY       = 0;  // ON al arrancar home
 static const uint32_t PARAM_MS_AT_HOME_END        = 50;
 
-static const float PARAM_DATA_TOLERANCE_MM_DEFAULT = 2.0f;
+/* Legado NVS/set_data. No es parámetro de ciclo; HMI muestra ±3 mm solo visual. */
+static const float PARAM_DATA_TOLERANCE_MM_DEFAULT = 3.0f;
 
 // ── [A] Blower Dual (GPIO en Motion; pin provisional, cableable) ───────────
 static const int      PARAM_PIN_BLOWER       = 33;
@@ -81,7 +83,6 @@ static const int   PARAM_PIN_SAFETY         = 26;
 
 /* Alimentación real ~1.5–2 s a Vel típica; 4 s detecta falta de láser sin falso positivo. */
 static const uint32_t PARAM_FEED_STAGE_LASER_TIMEOUT_MS = 4000u;
-static const bool     PARAM_FEED_VALIDATE_ENCODER       = false;
 static const bool     PARAM_FEED_DUAL_SPEED_ENABLE       = true;
 static const uint32_t PARAM_FEED_SPEED_SWITCH_MS_DEFAULT = 800u;
 static const uint32_t PARAM_FEED_SPEED_SWITCH_MS_MAX     = 15000u;
@@ -130,6 +131,9 @@ static const uint32_t PARAM_FEED_REVERSE_MS_DEFAULT  = 200u;
 static const uint32_t PARAM_FEED_REVERSE_MS_MIN      = 50u;
 static const uint32_t PARAM_FEED_REVERSE_MS_MAX      = 30000u;
 
+/* PV hold manual (Helpers Alimentar L/R): velocidad constante mientras se pulsa. */
+static const float    PARAM_FEED_HOLD_RPM_DEFAULT = 60.0f;
+
 // ── [A] LM Guide Modbus (ASDA-B3) ─────────────────────────────────────────
 
 static const uint8_t  PARAM_MODBUS_SLAVE_ID       = 0x01;
@@ -147,8 +151,9 @@ static const uint16_t PARAM_LM_RAMP_MS_MAX        = 65500;
 static const int32_t  PARAM_LM_JOG_DELTA_PUU      = 2000;
 static const uint32_t PARAM_LM_SERVO_ON_SETTLE_MS = 2000;
 
-// Validación LM Guide (ASDA PUU vs objetivo; fábrica ServoLMGuide.h [7])
-static const float    PARAM_LM_MOVE_TOLERANCE_MM  = 0.5f;
+// Validación LM Guide (ASDA PUU vs objetivo; fábrica ServoLMGuide.h [7]).
+// Misma magnitud que LMGUIDE_MM_RES en app.py (snap de consignas = tol. llegada).
+static const float    PARAM_LM_MOVE_TOLERANCE_MM  = 0.10f;
 static const float    PARAM_LM_HOME_TOLERANCE_MM  = 1.0f;
 static const float    PARAM_LM_HOME_MAX_TRAVEL_MM = 120.0f;
 static const uint32_t PARAM_LM_MOVE_DONE_TIMEOUT_MS = 2000;
@@ -190,7 +195,6 @@ enum LmMoveProfile : uint8_t { LM_PROFILE_CUT = 0, LM_PROFILE_TRAVEL = 1 };
 struct MotionTune {
   MotionFeederSideTune feeder[MOTION_SIDE_COUNT];
   MotionLMGuideTune lmguide;
-  bool validateEncoder;
   bool dualSpeedEnable;
 };
 
@@ -219,7 +223,6 @@ static inline void motionTuneSetDefaults(MotionTune* tune) {
   tune->lmguide.travelAccelMs = PARAM_LM_ACCEL_MS;
   tune->lmguide.travelDecelMs = PARAM_LM_DECEL_MS;
   tune->lmguide.posPuu = 0;
-  tune->validateEncoder = PARAM_FEED_VALIDATE_ENCODER;
   tune->dualSpeedEnable = PARAM_FEED_DUAL_SPEED_ENABLE;
 }
 

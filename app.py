@@ -61,7 +61,8 @@ LMGUIDE_TRAVEL_WARN_MARGIN_MM = 30.0
 CHECKLIST_MAX_CYCLES = 10000
 LMGUIDE_STEPS_PER_MM = (770.0 / 45.0) * (550.0 / 548.0) # ServoLMGuide.h: fábrica 770 PUU / 45 mm; campo 550 mm pedido → 548 mm reales.
 LMGUIDE_PUU_SIGN = -1 # El sentido de trabajo es PUU negativo.
-LMGUIDE_MM_RES = 0.01
+# Igual a PARAM_LM_MOVE_TOLERANCE_MM (0.10): snap de consignas = tolerancia de llegada.
+LMGUIDE_MM_RES = 0.10
 LMGUIDE_PR_RPM_MIN = 400.0
 LMGUIDE_PR_RPM_MAX = 5000.0
 LMGUIDE_TRAVEL_RPM = 3000.0
@@ -164,19 +165,19 @@ _PLC_MIRROR_LOCK = threading.Lock()
 _MOTION_BLOWER_ON = False
 _CYCLE_SET_DATA_ON_HOME = False
 _GRIPPER_HOLDING = False
-# Latch operativo Warning unificado Joint/Material (recovery.kind joint|material).
+# Latch legado Joint/Material (ya no abre Warning; eventos van a error común).
 _JOINT = {
-    "skip_cut": "",  # "", "R", "L", "RL"
-    "finish_piece": False,  # terminar pieza del lado sano antes de segregación
+    "skip_cut": "",
+    "finish_piece": False,
     "piece_counted": False,
     "holder_released": False,
-    "reason": "",  # "joint" | "material" — primer motivo (no se cambia)
-    "cut_confirmed": False,  # True si el evento llegó tras corte confirmado
-    "hold_grippers": False,  # retener pinzas y LM tras corte sano
+    "reason": "",
+    "cut_confirmed": False,
+    "hold_grippers": False,
     "classify_pending": False,
     "classify_done": False,
-    "healthy_side": "",  # "R" | "L" | ""
-    "segregate_only": False,  # sin pieza sana que clasificar
+    "healthy_side": "",
+    "segregate_only": False,
 }
 # Disponibilidad operativa persistente (no se limpia al cerrar el Warning).
 _SIDE_READY = {
@@ -188,6 +189,7 @@ _SIDE_READY = {
     "purge_ok_L": False,
     "both_empty_lock": False,
 }
+_SIDE_REENABLE_AT = 0.0
 _LOT = {
     "active": False,
     "tray_wait": False,
@@ -206,6 +208,7 @@ _LOT = {
     "cut_mm": 0.0,
     "cut_offset_mm": 0.0,
     "cut_comp_mode": True,
+    "cut_comp_dual_mm": 0.0,
     "cut_comp_r_mm": 0.0,
     "cut_comp_l_mm": 0.0,
     "length_mm": 0.0,
@@ -223,7 +226,6 @@ _PIECE_TICK0: float | None = None
 _LOT_T0: float | None = None
 _PIECE_BLOWER_MM = None
 _PIECE_FEED = {"R": None, "L": None}
-_PIECE_ENC_AT_LM = {"R": None, "L": None}
 
 _OVERLAP = {
     "gen": 0,
@@ -255,14 +257,14 @@ _FEED_PRIME = {
 }
 # Pasos ejecutables en orden (1 = arranque / set_data al Motion).
 CYCLE_STEPS = (
-    {"id": "1", "label": "Start — inicio de secuencia", "actor": "coordinator"},
-    {"id": "2", "label": "Holder dual + encoder dual", "actor": "plc"},
-    {"id": "3", "label": "Alimentación y medición L/R", "actor": "motion"},
-    {"id": "4", "label": "Pinzas + antes de jalar", "actor": "plc"},
-    {"id": "5", "label": "LM Guide — posición de corte", "actor": "motion"},
-    {"id": "6", "label": "Corte R/L", "actor": "plc"},
-    {"id": "7", "label": "Descarga de pieza", "actor": "motion+plc"},
-    {"id": "8", "label": "ReleasePart — despeje, home y blower", "actor": "motion"},
+    {"id": "1", "label": "Start — inicio del ciclo", "actor": "Maestro"},
+    {"id": "2", "label": "Cierra holder & encoder / Envia datos de movimiento.", "actor": "plc"},
+    {"id": "3", "label": "Inicia alimentacion a los alimentadores configurados.", "actor": "motion"},
+    {"id": "4", "label": "Cierra grippers antes de traccionar.", "actor": "plc"},
+    {"id": "5", "label": "LM Guide va a posicon de corte.", "actor": "motion"},
+    {"id": "6", "label": "Se realiza corte y aplica la compensacion necesaria por lado.", "actor": "plc"},
+    {"id": "7", "label": "Se descarga la pieza y se abre los grippers.", "actor": "motion+plc"},
+    {"id": "8", "label": "Se despeja el gripper y se va a home.", "actor": "motion"},
 )
 # ── Registro de producción (una línea por operación; no sustituye [Motion]/[PLC]) ──
 _LOT_SEQ = 0
@@ -554,27 +556,6 @@ def _prod_write(line: str) -> None:
     _push_event(stamped, "prod")
 
 
-def _prod_enc_counts_side(feed: dict | None, side: str) -> str:
-    """Solo counts enteros del MCU. Sin inventar counts desde mm."""
-    block = (feed or {}).get(side)
-    if not isinstance(block, dict):
-        return "-"
-    if block.get("counts") is None:
-        return "-"
-    try:
-        return str(int(block["counts"]))
-    except (TypeError, ValueError):
-        return "-"
-
-
-def _prod_enc_tag(feed: dict | None = None) -> str:
-    src = feed if feed is not None else _PIECE_FEED
-    return (
-        f"ENC R={_prod_enc_counts_side(src, 'R')} "
-        f"L={_prod_enc_counts_side(src, 'L')}"
-    )
-
-
 def _prod_log_op(
     step_id: str,
     duration_s: float,
@@ -598,11 +579,6 @@ def _prod_log_op(
     )
     if detail and flag in ("ERROR", "WARNING"):
         line += f" | {detail}"
-    # Dos lecturas por pieza: láser-stop (STEP 03) y LM reached (STEP 05).
-    if step_id == "3" and flag in ("OK", "PARALLEL"):
-        line += f" | {_prod_enc_tag(feed)}"
-    elif step_id == "5" and flag in ("OK", "PARALLEL"):
-        line += f" | {_prod_enc_tag(feed if feed is not None else _PIECE_ENC_AT_LM)}"
     _prod_write(line)
 
 
@@ -610,7 +586,7 @@ def _prod_log_complete(duration_s: float, kind: str) -> None:
     """kind: FIRST | NORMAL | INTERRUPTED (cadencia en Gripper OFF)."""
     line = (
         f"{_prod_qty_tag()} | {_prod_rl_tag(preview=False)} | COMPLETE | "
-        f"{duration_s:.3f} s | {kind} | {_prod_enc_tag()}"
+        f"{duration_s:.3f} s | {kind}"
     )
     _prod_write(line)
 
@@ -734,11 +710,11 @@ _DEFAULT_CYCLE_PARAMS = {
     "ms_after_grip_release": 50,
     # Tras holder listo en solape: espera antes de mandar feed_stage / V1.
     "ms_before_overlap_feed": 50,
-    "ms_blower_delay": 200,
     "ms_at_home_end": 50,
-    "tolerance_mm": 2.0,
+    # Tolerancia de corte: solo referencia visual ±3 mm (no es parámetro de ciclo).
     "cut_offset_mm": 0.0,  # legado; ya no interviene en el plan de corte
-    "cut_comp_mode": True,  # dual permanente: compensaciones R/L independientes
+    "cut_comp_mode": True,  # R/L independientes sobre (base + dual)
+    "cut_comp_dual_mm": 0.0,  # suma al nominal LM Guide antes de R/L
     "cut_comp_r_mm": 0.0,
     "cut_comp_l_mm": 0.0,
     "deposit_batch_size": 50,
@@ -746,8 +722,6 @@ _DEFAULT_CYCLE_PARAMS = {
     "deposit_max_travel_mm": LMGUIDE_MAX_TRAVEL_MM,
     "gripper_clearance_mm": 20.0,
     "feed_sides": "R",
-    "blower_ms_per_mm": 8.0,
-    "blower_ms_min": 200,
 }
 
 # Persistidos en cycle.json junto al ciclo (no son tiempos del orquestador).
@@ -977,7 +951,6 @@ def _canonical_motion_tune(src):
             ),
         },
         "feed_stage": {
-            "validate_encoder": _as_bool(src, ("feed_stage", "validate_encoder"), False),
             "dual_speed_enable": _as_bool(src, ("feed_stage", "dual_speed_enable"), True),
         },
     }
@@ -1063,9 +1036,9 @@ def _prefeeder_cfg_signature(side_cfg: dict) -> tuple:
 
 
 # Datos de ciclo en ESP32 (NVS); la app los empuja con set_data / modelo.
+# Tolerancia ±3 mm: solo referencia visual HMI; no viaja en set_data.
 _MOTION_DATA = {
     "target_length_mm": None,
-    "tolerance_mm": 2.0,
     "modelo_id": "",
     "measure_comp_mm": 0.0,
 }
@@ -1084,7 +1057,6 @@ def _motion_data_fingerprint(data: dict | None = None) -> str:
     return (
         f"{d.get('modelo_id') or ''}|"
         f"{float(d.get('target_length_mm') or 0):.4f}|"
-        f"{float(d.get('tolerance_mm') or 2):.4f}|"
         f"{float(d.get('measure_comp_mm') or 0):.4f}"
     )
 
@@ -1142,7 +1114,6 @@ def _motion_tune_flat(tune: dict) -> dict:
         "feed_l_vel2_pps": feed["L"]["secondary_velocity_pps"],
         "feed_l_target_counts": feed["L"]["target_position_counts"],
         "lm_pos_puu": lm["pos_puu"],
-        "feed_validate_encoder": fs["validate_encoder"],
         "feed_dual_speed_enable": fs["dual_speed_enable"],
         "feed_r_speed_switch_ms": feed["R"]["speed_switch_ms"],
         "feed_l_speed_switch_ms": feed["L"]["speed_switch_ms"],
@@ -1190,18 +1161,19 @@ def _lm_steps_per_mm(tune=None) -> float:
 
 
 def _snap_lm_mm(mm) -> float:
-    """Redondea mm a la resolución del LM Guide (0.01 mm)."""
+    """Redondea mm a la resolución del LM Guide (0.10 mm = tol. de llegada)."""
     try:
         x = float(mm)
     except (TypeError, ValueError):
         return 0.0
     if not math.isfinite(x):
         return 0.0
-    return round(x / LMGUIDE_MM_RES) * LMGUIDE_MM_RES
+    # round(..., 1) evita ruido binario (1.2000000000000002) en JSON/UI.
+    return round(round(x / LMGUIDE_MM_RES) * LMGUIDE_MM_RES, 1)
 
 
 def _puu_to_mm(puu, tune=None) -> float:
-    """PUU → mm absolutos a 0.01 mm (misma escala que la HMI)."""
+    """PUU → mm absolutos a 0.10 mm (misma escala que la HMI / tol. llegada)."""
     try:
         counts = abs(int(puu))
     except (TypeError, ValueError):
@@ -1269,27 +1241,15 @@ def _active_feed_sides(sides: str | None = None) -> tuple[str, ...]:
     return ("R",)
 
 
-def _feed_validate_encoder_enabled(tune: dict | None = None) -> bool:
-    """True solo si el operador dejó activo «Validar longitud con encoder»."""
-    src = tune if isinstance(tune, dict) else _load_motion_tune()
-    return bool(_canonical_motion_tune(src)["feed_stage"]["validate_encoder"])
-
-
 def _feed_stage_empty_error(feed: dict | None, sides: str | None = None) -> str:
     """Rechaza alimentación inválida del FeedStage.
 
-    Láser ya ON al arrancar (counts 0, sin avance) es material listo: Motion no
-    alimenta ese lado y responde ok. El host no lo convierte en E035/E036.
-
-    Tolerancia: solo si validate_encoder está ON y Motion marcó enc_ok=false.
-    No inventa umbrales mm; eso no está definido en HMI.
+    Láser ya ON al arrancar es material listo: Motion no alimenta ese lado y
+    responde ok. El host no lo convierte en E035/E036.
     """
-    check_tol = _feed_validate_encoder_enabled()
     for side in _active_feed_sides(sides):
         block = (feed or {}).get(side)
         if not isinstance(block, dict):
-            return f"encoder_tolerance_{side.lower()}"
-        if check_tol and block.get("enc_ok") is False:
             return f"encoder_tolerance_{side.lower()}"
     return ""
 
@@ -1322,23 +1282,30 @@ def _cut_comp_side_mm(params: dict, side: str) -> float:
 
 
 def _cut_comp_params_of(params: dict | None = None) -> dict:
-    """Compensaciones de corte: modo dual permanente (R/L independientes)."""
+    """Compensaciones de corte: dual sobre nominal, luego R/L independientes.
+
+    Cada compensación se redondea a LMGUIDE_MM_RES (0.10 mm); valores como
+    0.05 no aplican.
+    """
     src = params if isinstance(params, dict) else _load_cycle_params()
     return {
         "cut_comp_mode": True,
-        "cut_comp_r_mm": _num(src.get("cut_comp_r_mm"), 0.0),
-        "cut_comp_l_mm": _num(src.get("cut_comp_l_mm"), 0.0),
+        "cut_comp_dual_mm": _snap_lm_mm(src.get("cut_comp_dual_mm")),
+        "cut_comp_r_mm": _snap_lm_mm(src.get("cut_comp_r_mm")),
+        "cut_comp_l_mm": _snap_lm_mm(src.get("cut_comp_l_mm")),
         "cut_offset_mm": 0.0,
     }
 
 
 def _build_cut_plan(length: float, params: dict | None, sides: str) -> dict:
     """
-    Plan de corte LM Guide (compensación dual permanente).
-    - Un lado: base + compensación de ese lado.
-    - LR: siempre un corte por lado en su compensación (nunca omitir ni
-      colapsar a un solo pulso dual). Orden: offset menor primero, mayor al
-      final (despeje/depósito sobre last_mm).
+    Plan de corte LM Guide.
+    - base = |largo| − 55
+    - efectivo = base + cut_comp_dual_mm
+    - Un lado: efectivo + compensación de ese lado.
+    - LR: siempre un corte por lado (nunca omitir ni colapsar a un solo
+      pulso). Orden: offset menor primero, mayor al final (despeje/depósito
+      sobre last_mm).
     """
     base = _cut_base_mm(length)
     sides = str(sides or "R").strip().upper()
@@ -1346,7 +1313,8 @@ def _build_cut_plan(length: float, params: dict | None, sides: str) -> dict:
         sides = "R"
     comps = _cut_comp_params_of(params)
     mode = True
-    general = 0.0
+    dual = float(comps["cut_comp_dual_mm"])
+    efectivo = base + dual
     comp_r = float(comps["cut_comp_r_mm"])
     comp_l = float(comps["cut_comp_l_mm"])
 
@@ -1361,7 +1329,7 @@ def _build_cut_plan(length: float, params: dict | None, sides: str) -> dict:
             "mode": mode,
             "sequential": False,
             "base_mm": base,
-            "general_mm": general,
+            "general_mm": dual,
             "last_mm": mm,
             "first_side": side,
             "first_mm": mm,
@@ -1371,26 +1339,27 @@ def _build_cut_plan(length: float, params: dict | None, sides: str) -> dict:
             "second_mm": mm,
             "second_valve": "",
             "second_label": "",
+            "comp_dual_mm": dual,
             "comp_r_mm": comp_r,
             "comp_l_mm": comp_l,
         }
 
     if sides == "R":
-        return single("R", base + comp_r)
+        return single("R", efectivo + comp_r)
     if sides == "L":
-        return single("L", base + comp_l)
+        return single("L", efectivo + comp_l)
 
     # Ambos lados: compensación de cada lado siempre, aunque sean iguales.
     first_side, second_side = ("R", "L") if comp_r <= comp_l else ("L", "R")
     first_comp = comp_r if first_side == "R" else comp_l
     second_comp = comp_r if second_side == "R" else comp_l
-    first_mm = base + first_comp
-    second_mm = base + second_comp
+    first_mm = efectivo + first_comp
+    second_mm = efectivo + second_comp
     return {
         "mode": mode,
         "sequential": True,
         "base_mm": base,
-        "general_mm": 0.0,
+        "general_mm": dual,
         "last_mm": second_mm,
         "first_side": first_side,
         "first_mm": first_mm,
@@ -1400,6 +1369,7 @@ def _build_cut_plan(length: float, params: dict | None, sides: str) -> dict:
         "second_mm": second_mm,
         "second_valve": valve_of(second_side),
         "second_label": side_name(second_side),
+        "comp_dual_mm": dual,
         "comp_r_mm": comp_r,
         "comp_l_mm": comp_l,
     }
@@ -1419,6 +1389,7 @@ def _active_cut_plan() -> dict | None:
         if length <= 0:
             return None
         params = {
+            "cut_comp_dual_mm": _LOT.get("cut_comp_dual_mm"),
             "cut_comp_r_mm": _LOT.get("cut_comp_r_mm"),
             "cut_comp_l_mm": _LOT.get("cut_comp_l_mm"),
         }
@@ -1431,16 +1402,23 @@ def _active_cut_plan() -> dict | None:
 
 
 def _sync_active_lot_cut_comp(params: dict | None = None) -> bool:
-    """Aplica compensaciones R/L al lote en curso (corte/depósito siguientes)."""
+    """Aplica dual + R/L al lote en curso (corte/depósito siguientes)."""
     if not _LOT.get("active"):
         return False
     comps = _cut_comp_params_of(params)
+    dual = float(comps["cut_comp_dual_mm"])
     comp_r = float(comps["cut_comp_r_mm"])
     comp_l = float(comps["cut_comp_l_mm"])
+    prev_dual = float(_LOT.get("cut_comp_dual_mm") or 0.0)
     prev_r = float(_LOT.get("cut_comp_r_mm") or 0.0)
     prev_l = float(_LOT.get("cut_comp_l_mm") or 0.0)
-    changed = abs(prev_r - comp_r) >= LMGUIDE_MM_RES or abs(prev_l - comp_l) >= LMGUIDE_MM_RES
+    changed = (
+        abs(prev_dual - dual) >= LMGUIDE_MM_RES
+        or abs(prev_r - comp_r) >= LMGUIDE_MM_RES
+        or abs(prev_l - comp_l) >= LMGUIDE_MM_RES
+    )
     _LOT["cut_comp_mode"] = True
+    _LOT["cut_comp_dual_mm"] = dual
     _LOT["cut_comp_r_mm"] = comp_r
     _LOT["cut_comp_l_mm"] = comp_l
     plan = _active_cut_plan()
@@ -1688,11 +1666,6 @@ def _build_motion_lines(op: str, tune: dict, body: dict):
 
     if op == "set_tune":
         return tune, [tune_line]
-    if op == "encoder_reset":
-        side = str(body.get("side") or "").strip().upper()
-        if side in ("R", "L"):
-            return tune, [_compact({"op": "encoder_reset", "side": side})]
-        return tune, [_compact({"op": "encoder_reset"})]
     if op == "feeder_init":
         return tune, [tune_line, '{"op":"feeder_init","side":"both"}']
     if op == "motion_hw_init":
@@ -2397,6 +2370,8 @@ _RECOVERY_LINK_SOFT_RESET = frozenset({
 })
 _PF_MANUAL_HOLD = {"L": False, "R": False}
 _PF_MANUAL_HOLD_LOCK = threading.Lock()
+_FEEDER_MANUAL_HOLD = {"L": False, "R": False}
+_FEEDER_MANUAL_HOLD_LOCK = threading.Lock()
 _PF_UI_REFRESH_AT = 0.0
 _PLC_VALVES = ("holder", "encoder", "cutter_r", "cutter_l", "gripper")
 _load_serial_cfg()
@@ -2836,6 +2811,127 @@ def _prefeeder_clear_fault() -> bool:
     )
 
 
+def _feeder_manual_hold_close_holder() -> tuple[bool, str]:
+    """Cierra holder/encoder para el hold de Helpers."""
+    linked, code = _check_module_link("plc")
+    if not linked:
+        return False, error_codes.format_message(code)
+    params = _load_cycle_params()
+    ok_hw, code = _plc_accept_valve(
+        _cycle_plc_send(
+            {
+                "op": "valve",
+                "name": "holder_encoder",
+                "on": True,
+                "settle_ms": int(params["ms_holder_enc_stable"]),
+            }
+        ),
+        {"holder": True, "encoder": True},
+    )
+    if not ok_hw:
+        return False, error_codes.format_message(code or "E011")
+    return True, ""
+
+
+def _feeder_manual_hold_open_holder() -> None:
+    """Al soltar Helpers: abre holder+encoder (no es Liberar de purga)."""
+    if not _serial_port("plc"):
+        return
+    _cycle_plc_send({"op": "valve", "name": "holder_encoder", "on": False})
+
+
+# Helpers Alimentar L/R: PV constante (no perfil V1/V2 del ciclo).
+FEED_HOLD_RPM = 60
+
+
+def _feeder_hold_line(side: str, on: bool) -> str:
+    payload = {"op": "feeder_run", "side": side, "on": bool(on)}
+    if on:
+        payload["rpm"] = FEED_HOLD_RPM
+    return _compact(payload)
+
+
+def _feeder_manual_hold_release(side: str) -> None:
+    """Para el servo y abre holder+encoder."""
+    _send_motion_urgent([_feeder_hold_line(side, False)])
+    _feeder_manual_hold_open_holder()
+
+
+def _feeder_manual_hold_set(side: str, on: bool) -> tuple[bool, str]:
+    """Hold de Helpers: cierra holder, PV constante al pulsar; al soltar para y abre."""
+    side = str(side or "").strip().upper()
+    if side not in ("L", "R"):
+        return False, "Lado no reconocido."
+    linked, code = _check_module_link("motion")
+    if not linked:
+        return False, error_codes.format_message(code)
+    with _STATE_LOCK:
+        estado = _MACHINE_STATE.get("estado")
+        rutina = str(_MACHINE_STATE.get("rutina") or "")
+        fase = str(_MACHINE_STATE.get("rutina_fase") or "")
+    if on:
+        busy = _motion_owner_busy()
+        if busy:
+            return False, busy
+        if estado == "running":
+            return False, "Detén el ciclo antes de alimentar."
+        if rutina and not (rutina == "purga" and fase == "espera"):
+            return False, "Hay una rutina en curso."
+
+    with _FEEDER_MANUAL_HOLD_LOCK:
+        was = bool(_FEEDER_MANUAL_HOLD[side])
+        if bool(on) == was:
+            return True, ""
+        other = "R" if side == "L" else "L"
+        other_on = bool(_FEEDER_MANUAL_HOLD[other])
+        if on:
+            _FEEDER_MANUAL_HOLD[side] = True
+            if other_on:
+                _FEEDER_MANUAL_HOLD[other] = False
+        else:
+            _FEEDER_MANUAL_HOLD[side] = False
+
+    if not on:
+        _feeder_manual_hold_release(side)
+        return True, ""
+
+    if other_on:
+        _send_motion_urgent([_feeder_hold_line(other, False)])
+    ok_h, err_h = _feeder_manual_hold_close_holder()
+    if not ok_h:
+        with _FEEDER_MANUAL_HOLD_LOCK:
+            _FEEDER_MANUAL_HOLD[side] = False
+        return False, err_h
+    # Click corto: el soltar puede llegar durante el cierre de holder.
+    with _FEEDER_MANUAL_HOLD_LOCK:
+        if not _FEEDER_MANUAL_HOLD[side]:
+            _feeder_manual_hold_open_holder()
+            return True, ""
+    _joint_enable_affected_feeder_for_purga(side)
+    with _FEEDER_MANUAL_HOLD_LOCK:
+        if not _FEEDER_MANUAL_HOLD[side]:
+            _feeder_manual_hold_release(side)
+            return True, ""
+    sent = _send_motion_serial(
+        [_feeder_hold_line(side, True)],
+        line_timeout_s=3.0,
+        reply_until_op="feeder_run",
+    )
+    with _FEEDER_MANUAL_HOLD_LOCK:
+        still = bool(_FEEDER_MANUAL_HOLD[side])
+    if not still:
+        _feeder_manual_hold_release(side)
+        return True, ""
+    if not sent.get("sent") or not _motion_cmd_ok(sent, "feeder_run"):
+        with _FEEDER_MANUAL_HOLD_LOCK:
+            _FEEDER_MANUAL_HOLD[side] = False
+        _feeder_manual_hold_release(side)
+        return False, error_codes.format_message(
+            sent.get("code") or ("E043" if _serial_port("motion") else "E041")
+        )
+    return True, ""
+
+
 def _prefeeder_set_force(side: str, on: bool) -> bool:
     side = str(side or "").upper()
     if side not in ("L", "R"):
@@ -3163,9 +3259,69 @@ def _side_try_reenable(side: str, mst: dict | None) -> bool:
     _SIDE_READY[s] = True
     _SIDE_READY["need_purge_" + s] = False
     _SIDE_READY["purge_ok_" + s] = False
-    if _SIDE_READY.get("R") and _SIDE_READY.get("L"):
+    # Con al menos un lado operativo ya no aplica el candado de ambos vacíos.
+    if _SIDE_READY.get("R") or _SIDE_READY.get("L"):
         _SIDE_READY["both_empty_lock"] = False
     return True
+
+
+def _sides_refresh_ready(*, mark_purge_ok: bool = False) -> str:
+    """Reevalúa lados con need_purge contra sensores Motion. Devuelve máscara lista."""
+    pending = bool(_SIDE_READY.get("need_purge_R") or _SIDE_READY.get("need_purge_L"))
+    if not pending:
+        if _SIDE_READY.get("both_empty_lock") and (
+            _SIDE_READY.get("R") or _SIDE_READY.get("L")
+        ):
+            _SIDE_READY["both_empty_lock"] = False
+        return _sides_ready_mask()
+    mst = _motion_status_get()
+    for s in ("R", "L"):
+        if not _SIDE_READY.get("need_purge_" + s):
+            continue
+        if mark_purge_ok:
+            _side_mark_purge_ok(s)
+        _side_try_reenable(s, mst)
+    return _sides_ready_mask()
+
+
+def _sides_maybe_refresh_ready() -> None:
+    """En pausa: si ya hay Purga_OK y material ON, reincorpora el lado sin esperar Start."""
+    global _SIDE_REENABLE_AT
+    if not (
+        _SIDE_READY.get("need_purge_R")
+        or _SIDE_READY.get("need_purge_L")
+        or _SIDE_READY.get("both_empty_lock")
+    ):
+        return
+    if _cycle_thread_alive():
+        return
+    estado = str(_MACHINE_STATE.get("estado") or "")
+    if estado == "running":
+        return
+    rec = _recovery_get()
+    if rec.get("active") and str(rec.get("step") or "") not in ("listo", ""):
+        return
+    now = time.time()
+    if now - _SIDE_REENABLE_AT < 1.0:
+        return
+    _SIDE_REENABLE_AT = now
+    prev = _sides_ready_mask()
+    ready = _sides_refresh_ready(mark_purge_ok=False)
+    if ready == prev or not ready:
+        return
+    if not (_LOT.get("active") or _MACHINE_STATE.get("ciclo_en_curso")):
+        return
+    if str(_MACHINE_STATE.get("estado") or "") != "paused":
+        return
+    low = ready in ("R", "L")
+    _set_machine_ui(
+        estado_label="Poco material" if low else "Listo",
+        mensaje=(
+            "Material recuperado. Reanuda para continuar con el lado disponible."
+            if low
+            else "Ambos lados listos. Reanuda para continuar."
+        ),
+    )
 
 
 def _side_reenable_after_purga(affected: str) -> None:
@@ -3274,69 +3430,12 @@ def _joint_set_guide(msg: str, *, lead: str | None = None) -> None:
     )
 
 
-def _joint_begin_common(
-    side: str, *, origin: str, step: str, reason: str = "joint", cut_confirmed: bool = False
-) -> None:
-    side = _joint_merge_side(side, side) or "R"
-    # Primer motivo se conserva si ya hay intervención activa.
-    if _joint_active() and _JOINT.get("reason"):
-        reason = str(_JOINT.get("reason") or reason)
-    else:
-        _JOINT["reason"] = reason if reason in ("joint", "material") else "joint"
-    reason = str(_JOINT.get("reason") or "joint")
-    code = _joint_code_for_side(side, reason)
-    msg = _warn_banner_text(side, reason)
-    # Tras corte confirmado: no omitir crédito de lo ya cortado.
-    _JOINT["skip_cut"] = "" if cut_confirmed else side
-    _JOINT["holder_released"] = False
-    _JOINT["cut_confirmed"] = bool(cut_confirmed)
-    healthy = ""
-    if side == "R":
-        healthy = "L" if _side_ready("L") else ""
-    elif side == "L":
-        healthy = "R" if _side_ready("R") else ""
-    _JOINT["healthy_side"] = healthy if side != "RL" else ""
-    _JOINT["segregate_only"] = side == "RL" or not healthy
-    _side_disable(side, reason)
-    # Lado omitido → Disable; el sano sigue. Enable del afectado va en Reset (antes de purga).
-    _joint_disable_alarmed_feeder(side)
-    if origin in ("feed", "fabricate") and side != "RL" and healthy and not cut_confirmed:
-        _JOINT["finish_piece"] = True
-        _JOINT["hold_grippers"] = True
-        _JOINT["piece_counted"] = False
-        _JOINT["classify_pending"] = False
-        _JOINT["classify_done"] = False
-    elif cut_confirmed and side != "RL":
-        # Tras corte: conservar piezas y abrir purga al terminar descarga/home.
-        _JOINT["finish_piece"] = False
-        _JOINT["hold_grippers"] = False
-        _JOINT["piece_counted"] = False
-    else:
-        _JOINT["finish_piece"] = False
-        _JOINT["hold_grippers"] = bool(side == "RL")
-        _JOINT["piece_counted"] = False
-        _JOINT["segregate_only"] = True
-    _cadence_mark_interrupted()
-    _push_event(f"WARNING {msg} ({origin}).", "warn")
-    try:
-        _prod_log_joint(side, origin=origin, code=code, mensaje=msg)
-    except Exception:
-        pass
-    kind = "material" if reason == "material" else "joint"
-    _recovery_set(
-        active=True,
-        kind=kind,
-        step=step,
-        side=side,
-        origin=origin,
-        code=code,
-        mensaje=msg,
-        guide="",
-        busy=False,
-        segregate_only=bool(_JOINT.get("segregate_only")),
-        healthy_side=str(_JOINT.get("healthy_side") or ""),
-    )
-    _joint_ui_warning(side, msg)
+def _warn_as_common_error(side: str, reason: str = "joint") -> None:
+    """Joint/Material: mismo camino que un error de ciclo (sin Warning especial)."""
+    if _cycle_error_active():
+        return
+    side = _joint_merge_side(side, side) or (side if side in ("R", "L", "RL") else "R")
+    reason = "material" if str(reason or "").strip().lower() == "material" else "joint"
     clear = {"op": "sensor_events_clear"}
     if side in ("R", "L"):
         clear["side"] = side
@@ -3344,6 +3443,17 @@ def _joint_begin_common(
         _send_motion_urgent([json.dumps(clear, separators=(",", ":"))])
     except Exception:
         pass
+    _joint_latch_clear()
+    code = _joint_code_for_side(side, reason)
+    _cycle_fail(code)
+
+
+def _joint_begin_common(
+    side: str, *, origin: str, step: str, reason: str = "joint", cut_confirmed: bool = False
+) -> None:
+    """Compat: Joint/Material ya no abre Warning; entra como error común."""
+    _ = (origin, step, cut_confirmed)
+    _warn_as_common_error(side, reason)
 
 
 def _warn_apply_event(
@@ -3353,105 +3463,44 @@ def _warn_apply_event(
     origin: str,
     cut_confirmed: bool = False,
 ) -> None:
-    """Inicia o amplía la intervención unificada sin reiniciar el motivo original."""
-    side = _joint_merge_side(side, side) or side
-    reason = "material" if reason == "material" else "joint"
-    if _joint_active():
-        prev = str(_recovery_get().get("side") or "")
-        merged = _joint_merge_side(prev, side)
-        first_reason = str(_JOINT.get("reason") or reason)
-        _JOINT["reason"] = first_reason
-        if merged != prev:
-            _JOINT["skip_cut"] = merged
-            _side_disable(side, reason)
-            _joint_disable_alarmed_feeder(side)
-            code = _joint_code_for_side(merged, first_reason)
-            msg = _warn_banner_text(merged, first_reason)
-            _recovery_set(side=merged, code=code, mensaje=msg)
-            if merged == "RL":
-                _JOINT["finish_piece"] = False
-                _JOINT["healthy_side"] = ""
-                _JOINT["segregate_only"] = True
-                _JOINT["hold_grippers"] = True
-                _recovery_set(step="await_reset", busy=False)
-                _joint_set_guide(
-                    "Ambos lados afectados. Proceso en pausa. "
-                    "Pulsa Reset para seguir la recuperación."
-                )
-        return
-    step = "await_piece"
-    if cut_confirmed:
-        step = "post_cut"
-    elif side == "RL":
-        step = "await_reset"
-    _joint_begin_common(
-        side, origin=origin, step=step, reason=reason, cut_confirmed=cut_confirmed
-    )
-    if cut_confirmed:
-        _joint_set_guide(
-            "Evento tras el corte. Se conservan las piezas válidas; "
-            "al terminar descarga/home se abrirá la Purga."
-        )
-    elif side == "RL":
-        if _serial_port("motion"):
-            _send_motion_urgent(['{"op":"feeder_stop"}', '{"op":"lmguide_stop"}'])
-        _JOINT["hold_grippers"] = True
-        _recovery_set(step="await_reset", busy=False)
-        _joint_set_guide(
-            "Ambos lados afectados. Proceso en pausa. "
-            "Pulsa Reset para seguir la recuperación."
-        )
-    else:
-        _joint_set_guide(
-            f"{_warn_banner_text(side, reason)}. "
-            "Se omite el lado afectado y se termina la pieza del lado sano. "
-            "Al terminar quedará en pausa con pinzas cerradas hasta Reset."
-        )
+    """Compat: Joint/Material → error común."""
+    _ = (origin, cut_confirmed)
+    _warn_as_common_error(side, reason)
 
 
 def _joint_begin_from_feed(side: str, reason: str = "joint") -> None:
-    """Warning durante/tras FeedStage (lado afectado + continuar sano si aplica)."""
+    """Joint/Material en FeedStage → error común."""
     mst = _motion_status_get()
     for s, why in _warn_poll_events_from_status(mst):
         side = _joint_merge_side(side, s)
-        if not _JOINT.get("reason") and why:
+        if why:
             reason = why
-    if side == "RL":
-        if _serial_port("motion"):
-            _send_motion_urgent(['{"op":"feeder_stop"}'])
-        _warn_apply_event(side, reason, origin="feed", cut_confirmed=False)
-        return
-    # Un solo lado: no Park; el ciclo continúa fabricando el sano.
-    _warn_apply_event(side, reason, origin="feed", cut_confirmed=False)
+    _warn_as_common_error(side, reason)
 
 
 def _joint_begin_immediate(side: str, *, origin: str, reason: str = "joint") -> None:
-    """Ambos lados afectados: retener y pedir segregación (sin fabricar)."""
-    if _serial_port("motion"):
-        _send_motion_urgent(['{"op":"feeder_stop"}', '{"op":"lmguide_stop"}'])
-    _warn_apply_event(side, reason, origin=origin, cut_confirmed=False)
+    """Joint/Material inmediato → error común."""
+    _ = origin
+    _warn_as_common_error(side, reason)
 
 
 def _joint_latch_fabricate(side: str, reason: str = "joint", *, cut_confirmed: bool = False) -> None:
-    """Warning en fabricación: omitir corte afectado o abrir purga si ya cortó."""
+    """Joint/Material en fabricación → error común (no continúa el lado sano)."""
+    _ = cut_confirmed
     if _cycle_error_active():
         return
-    _warn_apply_event(side, reason, origin="fabricate", cut_confirmed=cut_confirmed)
+    _warn_as_common_error(side, reason)
 
 
 def _joint_check_during_cycle(step_id: str) -> bool:
     """
     True = continuar el ciclo.
-    False = detener el worker (ambos lados / segregación pendiente).
+    False = detener el worker (error latched o Joint/Material).
     """
+    _ = step_id
     if _cycle_error_active():
         return True
     if _joint_active():
-        step = str(_recovery_get().get("step") or "")
-        if _JOINT.get("finish_piece") and step in ("await_piece", "await_home"):
-            return True
-        if _JOINT.get("cut_confirmed") and step == "post_cut":
-            return True
         return False
     mst = _motion_status_get()
     events = _warn_poll_events_from_status(mst)
@@ -3461,20 +3510,12 @@ def _joint_check_during_cycle(step_id: str) -> bool:
     reason = "joint"
     for s, why in events:
         side = _joint_merge_side(side, s)
-        if not _JOINT.get("reason"):
+        if why:
             reason = why
     if not side:
         return True
-    # Tras corte confirmado (paso 7/8): no invalidar piezas ya cortadas.
-    cut_done = step_id in ("7", "8")
-    if side == "RL":
-        _joint_begin_immediate("RL", origin="fabricate", reason=reason)
-        return False
-    _joint_latch_fabricate(side, reason, cut_confirmed=cut_done)
-    if cut_done:
-        return True
-    # Antes del corte: seguir fabricando el lado sano.
-    return bool(_JOINT.get("finish_piece"))
+    _warn_as_common_error(side, reason)
+    return False
 
 
 def _joint_enter_await_reset(*, grippers_closed: bool = True) -> None:
@@ -4735,7 +4776,6 @@ def _motion_data_flat(data: dict) -> dict:
     return {
         "op": "set_data",
         "target_length_mm": data.get("target_length_mm"),
-        "tolerance_mm": data.get("tolerance_mm", 2.0),
         "modelo_id": data.get("modelo_id") or "",
         "measure_comp_mm": data.get("measure_comp_mm", 0.0),
     }
@@ -4869,6 +4909,12 @@ def _load_cycle_params():
                 params[key] = raw[key]
     # Carrera del LM Guide: fuente única (no se edita por HMI ni por cycle.json viejo).
     params["deposit_max_travel_mm"] = float(LMGUIDE_MAX_TRAVEL_MM)
+    # Legado: duración de blower por longitud / retardo HMI (ya no se usan).
+    # Tolerancia ±3 mm: solo referencia visual; no es parámetro de ciclo.
+    params.pop("blower_ms_per_mm", None)
+    params.pop("blower_ms_min", None)
+    params.pop("ms_blower_delay", None)
+    params.pop("tolerance_mm", None)
     return params
 
 
@@ -4878,6 +4924,7 @@ def _save_hmi_cycle_extras() -> None:
         params = _load_cycle_params()
         comps = _cut_comp_params_of(params)
         params["cut_comp_mode"] = True
+        params["cut_comp_dual_mm"] = comps["cut_comp_dual_mm"]
         params["cut_comp_r_mm"] = comps["cut_comp_r_mm"]
         params["cut_comp_l_mm"] = comps["cut_comp_l_mm"]
         params["cut_offset_mm"] = 0.0
@@ -4911,12 +4958,12 @@ def _hydrate_hmi_from_cycle() -> None:
     _MACHINE_STATE["cantidad"] = max(1, qty)
     comps = _cut_comp_params_of(params)
     params["cut_comp_mode"] = True
+    params["cut_comp_dual_mm"] = comps["cut_comp_dual_mm"]
     params["cut_comp_r_mm"] = comps["cut_comp_r_mm"]
     params["cut_comp_l_mm"] = comps["cut_comp_l_mm"]
     params["cut_offset_mm"] = 0.0
     _MACHINE_STATE["compensacion_medicion_mm"] = 0.0
     _MOTION_DATA["measure_comp_mm"] = 0.0
-    _MOTION_DATA["tolerance_mm"] = _num(params.get("tolerance_mm"), 2.0)
     modelo_id = str(params.get("numero_modelo") or "").strip()
     saved_len = params.get("longitud_modelo_mm")
     saved_desc = str(params.get("modelo_desc") or "").strip()
@@ -5004,10 +5051,8 @@ def _clear_event_log() -> int:
         return _EVENTS_REV
 
 
-# Atención amarilla: joint / láser / material agotado (no torre de error).
-_ANDON_YELLOW_CODES = frozenset(
-    {"E033", "E034", "E050", "E051", "E052", "E053", "E054", "E055"}
-)
+# Atención amarilla: timeout de láser (Joint/Material ya son error común).
+_ANDON_YELLOW_CODES = frozenset({"E033", "E034"})
 _ANDON_CALLS = frozenset({"materialista", "jefe", "tecnico"})
 
 
@@ -5155,14 +5200,16 @@ def _public_machine_state() -> dict:
         comps = _cut_comp_params_of(params)
         state["feed_sides"] = _feed_sides_of(params)
         state["cut_comp_mode"] = True
+        state["cut_comp_dual_mm"] = comps["cut_comp_dual_mm"]
         state["cut_comp_r_mm"] = comps["cut_comp_r_mm"]
         state["cut_comp_l_mm"] = comps["cut_comp_l_mm"]
         length = _num(state.get("longitud_modelo_mm"), 0.0)
         if length > 0:
             plan = _build_cut_plan(length, params, state["feed_sides"])
+            dual = float(comps["cut_comp_dual_mm"])
             state["cut_base_mm"] = plan["base_mm"]
-            state["cut_mm_r"] = plan["base_mm"] + comps["cut_comp_r_mm"]
-            state["cut_mm_l"] = plan["base_mm"] + comps["cut_comp_l_mm"]
+            state["cut_mm_r"] = plan["base_mm"] + dual + comps["cut_comp_r_mm"]
+            state["cut_mm_l"] = plan["base_mm"] + dual + comps["cut_comp_l_mm"]
             state["cut_mm_last"] = plan["last_mm"]
             state["cut_comp_sequential"] = bool(plan["sequential"])
         else:
@@ -5179,6 +5226,7 @@ def _public_machine_state() -> dict:
             "stage": str(act.get("stage") or ""),
         }
     state["checklist_log"] = _checklist_log_read()
+    state["mantenimiento_log"] = _mant_log_read()
     state["prefeeder"] = _prefeeder_public_summary()
     state["plc_outputs"] = _plc_mirror_public()
     return state
@@ -5575,28 +5623,11 @@ def _sent_ok(sent: dict, fallback: str) -> bool:
     return False
 
 
-def _cycle_blower_length_mm() -> float:
-    # Reglas §4.8: duración del blower = longitud programada de la pieza.
-    # El encoder OM solo reporta counts; no se deriva mm para el soplo.
-    prog = _num(_MOTION_DATA.get("target_length_mm"), 0.0)
-    if prog > 0:
-        return prog
-    return _num(_PIECE_BLOWER_MM, 0.0)
-
-
-def _cycle_blower_duration_ms(params: dict) -> int:
-    length_f = _cycle_blower_length_mm()
-    per_mm = float(params.get("blower_ms_per_mm") or 8.0)
-    minimum = int(params.get("blower_ms_min") or 200)
-    ms = int(round(length_f * per_mm))
-    return max(minimum, min(ms, 300000))
-
-
 def _cycle_enter_step(step_id: str, step_index: int) -> None:
     labels = {
         "1": ("running", "Ciclo en marcha", "Secuencia automática iniciada."),
         "2": ("running", "Ciclo en marcha", "Activando holder y encoder."),
-        "3": ("running", "Ciclo en marcha", "Alimentación L/R — láser y encoder."),
+        "3": ("running", "Ciclo en marcha", "Alimentación L/R — láser."),
         "4": ("running", "Ciclo en marcha", "Pinzas y antes de jalar."),
         "5": ("running", "Ciclo en marcha", "LM Guide hacia corte."),
         "6": ("running", "Ciclo en marcha", "Corte neumático R/L."),
@@ -5811,21 +5842,15 @@ def _read_feed_stage(sent: dict):
         for side in ("R", "L"):
             block = msg.get(side)
             if isinstance(block, dict):
-                entry = {
+                feed[side] = {
                     "laser": block.get("laser"),
-                    "enc_ok": block.get("enc_ok"),
                     "warn": str(block.get("warn") or ""),
                 }
-                if block.get("counts") is not None:
-                    try:
-                        entry["counts"] = int(block["counts"])
-                    except (TypeError, ValueError):
-                        pass
-                feed[side] = entry
     return found, ok, error_name, feed, warn_name
 
 
 def _fail_feed_stage(error_name: str, *, warn: str = "", feed: dict | None = None) -> None:
+    _ = feed
     if _OVERLAP.get("feed_done"):
         return
     if _cycle_should_stop():
@@ -5836,12 +5861,8 @@ def _fail_feed_stage(error_name: str, *, warn: str = "", feed: dict | None = Non
     warn_key = (warn or err).strip().lower()
     joint_side = _joint_side_from_feed_error(warn_key) or _joint_side_from_feed_error(err)
     reason = _warn_reason_from_feed_error(warn_key) or _warn_reason_from_feed_error(err)
-    if joint_side and reason:
-        # Si el feed trae un lado sano validado, no es fallo duro: el caller ya filtró.
-        _joint_begin_from_feed(joint_side, reason)
-        return
     if joint_side:
-        _joint_begin_from_feed(joint_side, reason or "joint")
+        _warn_as_common_error(joint_side, reason or "joint")
         return
     code = error_codes.feed_stage_code(err)
     if code == "E038":
@@ -5883,31 +5904,6 @@ def _motion_reply_op(sent: dict, op: str) -> dict | None:
         if msg.get("op") == op:
             return msg if isinstance(msg, dict) else None
     return None
-
-
-def _encoder_counts_from_msg(msg: dict | None) -> dict:
-    """Extrae counts R/L de un ack Motion (lmguide_move / status)."""
-    out = {"R": None, "L": None}
-    if not isinstance(msg, dict):
-        return out
-    for side in ("R", "L"):
-        block = msg.get("enc_" + side)
-        if not isinstance(block, dict):
-            continue
-        entry = {}
-        if block.get("counts") is not None:
-            try:
-                entry["counts"] = int(block["counts"])
-            except (TypeError, ValueError):
-                pass
-        elif block.get("counts_live") is not None:
-            try:
-                entry["counts"] = abs(int(block["counts_live"]))
-            except (TypeError, ValueError):
-                pass
-        if entry:
-            out[side] = entry
-    return out
 
 
 def _cycle_sync_motion_config(*, reason: str = "sync") -> bool:
@@ -5994,7 +5990,6 @@ def _cycle_lm_home_absolute(*, with_set_data: bool = False) -> bool:
     if with_set_data:
         flat = _motion_data_flat(_MOTION_DATA)
         payload["target_length_mm"] = flat.get("target_length_mm")
-        payload["tolerance_mm"] = flat.get("tolerance_mm", 2.0)
         payload["modelo_id"] = flat.get("modelo_id") or ""
         payload["measure_comp_mm"] = flat.get("measure_comp_mm", 0.0)
     sent = _cycle_motion_send(payload, timeout_s=_MOTION_LM_MOVE_TIMEOUT_S)
@@ -6009,26 +6004,6 @@ def _cycle_lm_home_absolute(*, with_set_data: bool = False) -> bool:
             # Firmware antiguo sin set_data embebido: el paso 1 lo reenvía.
             _CYCLE_SET_DATA_ON_HOME = False
     return True
-
-
-def _cycle_encoder_reset() -> bool:
-    """Reset hardware PCNT (solo recuperación / uso manual)."""
-    return _motion_cmd_serial_ok(
-        _cycle_motion_send({"op": "encoder_reset"}, timeout_s=2.0),
-        "E043",
-    )
-
-
-def _cycle_encoder_set0() -> bool:
-    """Marca referencia relativa R+L; PCNT sigue contando.
-
-    En ciclo normal no hace falta antes de feed_stage: FeedStage ya hace set0
-    al iniciar. Se conserva para UI / recuperación / pruebas.
-    """
-    return _motion_cmd_serial_ok(
-        _cycle_motion_send({"op": "encoder_set0", "side": "both"}, timeout_s=2.0),
-        "E043",
-    )
 
 
 def _feeder_servo_target_side(side: str | None = None) -> str:
@@ -6201,15 +6176,6 @@ def _cycle_apply_before_cut(params: dict) -> bool:
     return True
 
 
-def _cycle_capture_encoder_counts(sent: dict | None = None) -> dict:
-    """Lee counts R/L: primero del ack lmguide_move; si no, status."""
-    if sent is not None:
-        from_move = _encoder_counts_from_msg(_motion_reply_op(sent, "lmguide_move"))
-        if from_move.get("R") is not None or from_move.get("L") is not None:
-            return from_move
-    return _encoder_counts_from_msg(_motion_status_get())
-
-
 def _cycle_run_step(step_id: str, params: dict) -> bool:
     # Step 1. Start — set_data (omitido si ya viajó en el home de arranque fresco).
     if step_id == "1":
@@ -6220,7 +6186,6 @@ def _cycle_run_step(step_id: str, params: dict) -> bool:
         return _cycle_push_set_data_if_needed(force=True)
 
     # Step 2. Cerrar holder+encoder para alimentar (siempre ambos ON).
-    # FeedStage (paso 3) marca set0 al iniciar: no hace falta encoder_set0 aquí.
     if step_id == "2":
         return _cycle_close_holder_encoder_for_feed(params, mark_latch=True)
 
@@ -6256,22 +6221,16 @@ def _cycle_run_step(step_id: str, params: dict) -> bool:
                 warn=warn_name,
                 feed=feed,
             )
-            if _joint_active() and _JOINT.get("finish_piece"):
-                _set_machine_ui(feed=feed)
-                return True
             return False
         if warn_side:
-            _joint_begin_from_feed(warn_side, warn_reason or "joint")
-            if warn_side == "RL" or not _JOINT.get("finish_piece"):
-                return False
+            _warn_as_common_error(warn_side, warn_reason or "joint")
+            return False
         empty = _feed_stage_empty_error(feed, sides)
-        if sides == "LR" and not (_JOINT.get("active") and _JOINT.get("finish_piece")):
-            skip = str(_JOINT.get("skip_cut") or "").upper()
+        if sides == "LR":
             missing = [
                 s
                 for s in ("R", "L")
-                if skip not in (s, "RL")
-                and (
+                if (
                     not isinstance((feed or {}).get(s), dict)
                     or (feed or {}).get(s, {}).get("laser") is not True
                 )
@@ -6283,25 +6242,9 @@ def _cycle_run_step(step_id: str, params: dict) -> bool:
                 )
                 _cycle_fail("E038", detail="laser_both_sides")
                 return False
-        for side_key in _active_feed_sides(sides):
-            block = (feed or {}).get(side_key)
-            if (
-                isinstance(block, dict)
-                and block.get("laser") is True
-                and int(block.get("counts") or 0) == 0
-            ):
-                _push_event(
-                    f"Lado {side_key}: material ya en posición (láser ON), sin alimentar."
-                )
         if empty:
-            skip = str(_JOINT.get("skip_cut") or "")
-            if skip == "R" and empty == "laser_timeout_r":
-                empty = ""
-            elif skip == "L" and empty == "laser_timeout_l":
-                empty = ""
-            if empty:
-                _fail_feed_stage(empty, warn=warn_name, feed=feed)
-                return False
+            _fail_feed_stage(empty, warn=warn_name, feed=feed)
+            return False
         _set_machine_ui(feed=feed)
         global _PIECE_BLOWER_MM, _PIECE_FEED
         prog = _target_length_mm()
@@ -6345,9 +6288,6 @@ def _cycle_run_step(step_id: str, params: dict) -> bool:
             )
         if not _cycle_sleep_ms(int(params["ms_lm_at_cut"])):
             return False
-        global _PIECE_ENC_AT_LM
-        # CAPTURA B desde el ack del move (misma base que FeedStage; sin status).
-        _PIECE_ENC_AT_LM = _cycle_capture_encoder_counts(move_sent)
         return True
 
     # Step 6. Antes de cortar: holder ON (encoder OFF) → corte.
@@ -6431,7 +6371,7 @@ def _cycle_run_step(step_id: str, params: dict) -> bool:
         second_valve = _joint_valve_allowed(str(plan["second_valve"]))
         second_mm = float(plan["second_mm"])
         first_mm = float(plan["first_mm"])
-        # Misma resolución que la compensación HMI (0.01 mm).
+        # Misma resolución / tol. de llegada LM Guide (0.10 mm).
         need_move = abs(second_mm - first_mm) >= LMGUIDE_MM_RES
         if need_move:
             _push_event(
@@ -6566,11 +6506,11 @@ def _cycle_run_step(step_id: str, params: dict) -> bool:
             if not _overlap_arm(params):
                 return False
 
-        blower_ms = _cycle_blower_duration_ms(params)
+        # blower_ms > 0 = habilitar soplo; delay 0 = ON al arrancar home.
         payload = {
             "op": "release_part",
-            "blower_delay_ms": int(params["ms_blower_delay"]),
-            "blower_ms": blower_ms,
+            "blower_delay_ms": 0,
+            "blower_ms": 1,
             "home_settle_ms": int(params["ms_at_home_end"]),
             "profile": "travel",
         }
@@ -6581,13 +6521,10 @@ def _cycle_run_step(step_id: str, params: dict) -> bool:
             payload["clear_puu"] = _mm_to_puu(clear_at)
             _push_event(
                 f"ReleasePart: despeje {clear_at:.2f} mm → home + blower "
-                f"{blower_ms} ms (L {_cycle_blower_length_mm():.1f} mm)."
+                f"(hasta home)."
             )
         else:
-            _push_event(
-                f"ReleasePart: home + blower {blower_ms} ms "
-                f"(L {_cycle_blower_length_mm():.1f} mm)."
-            )
+            _push_event("ReleasePart: home + blower (hasta home).")
 
         # ServoCAN ON pertenece al bloque de alimentación, no a ReleasePart.
         _overlap_try_start_feed()
@@ -6723,7 +6660,7 @@ def _feed_prime_run(params: dict) -> bool:
     _push_event(f"Priming alimentación ({sides}) — fuera de tiempo de ciclo.")
     if not _cycle_close_holder_encoder_for_feed(params, cycle_fail=False):
         return False
-    # FeedStage + set0 interno; tune solo si config no aplicada.
+    # FeedStage; tune solo si config no aplicada.
     payload = _feed_stage_payload(
         sides if sides in ("R", "L") else None,
         with_tune=not bool(_MOTION_CFG.get("ok")),
@@ -6764,7 +6701,7 @@ def _feed_prime_prepare_after_segment() -> None:
 
 def _feed_prime_consume() -> bool:
     """Si hay prime válido: publica modelo actual, carga feed y arranca en paso 4."""
-    global _PIECE_BLOWER_MM, _PIECE_FEED, _PIECE_ENC_AT_LM, _STEP4_CLOSES
+    global _PIECE_BLOWER_MM, _PIECE_FEED, _STEP4_CLOSES
     if not _feed_prime_ready():
         return False
     sides = str(_FEED_PRIME.get("sides") or "").strip().upper()
@@ -6786,7 +6723,6 @@ def _feed_prime_consume() -> bool:
     mm = _FEED_PRIME.get("blower_mm")
     _feed_prime_clear()
     _STEP4_CLOSES = True
-    _PIECE_ENC_AT_LM = {"R": None, "L": None}
     _PIECE_FEED = {"R": feed.get("R"), "L": feed.get("L")}
     if mm is not None:
         _PIECE_BLOWER_MM = mm
@@ -6841,7 +6777,6 @@ def _overlap_start_holder(params: dict) -> None:
             return
         if _OVERLAP["gen"] != gen:
             return
-        # FeedStage del solape hace set0 al arrancar; no hace falta encoder_set0 aquí.
         delay_ms = max(0, int(params.get("ms_before_overlap_feed") or 0))
         _OVERLAP["feed_after_t"] = time.perf_counter() + (delay_ms / 1000.0)
         _OVERLAP["holder_ready"].set()
@@ -7360,7 +7295,7 @@ def _overlap_handoff() -> tuple[int, float | None]:
     """Paso 8 ya acabó (home, pinzas abiertas) y los pasos 1 a 3 también."""
     if not _OVERLAP["feed_done"]:
         return 0, None
-    global _PIECE_BLOWER_MM, _PIECE_FEED, _PIECE_ENC_AT_LM, _STEP4_CLOSES
+    global _PIECE_BLOWER_MM, _PIECE_FEED, _STEP4_CLOSES
     mm = _OVERLAP["blower_mm"]
     t0 = _OVERLAP["t0"]
     feed = _OVERLAP["feed"]
@@ -7369,7 +7304,6 @@ def _overlap_handoff() -> tuple[int, float | None]:
     if _LOT.get("active") and next_sides:
         _LOT["cycle_sides"] = next_sides
     _STEP4_CLOSES = True
-    _PIECE_ENC_AT_LM = {"R": None, "L": None}
     if mm is not None:
         _PIECE_BLOWER_MM = mm
     if feed is not None:
@@ -7483,7 +7417,7 @@ def _piece_log_name() -> str:
 
 def _run_one_piece(start_index: int, started_at: float | None = None) -> bool:
     global _PROD_CTX, _PIECE_TICK0, _CADENCE_RECORDED
-    global _PIECE_FEED, _PIECE_ENC_AT_LM, _CYCLE_SET_DATA_ON_HOME
+    global _PIECE_FEED, _CYCLE_SET_DATA_ON_HOME
     params = _load_cycle_params()
     _CYCLE_SET_DATA_ON_HOME = False
     # Régimen = handoff con solape; la cadencia ya ancla en Gripper OFF (perf_counter).
@@ -7501,7 +7435,6 @@ def _run_one_piece(start_index: int, started_at: float | None = None) -> bool:
     name = _piece_log_name()
     if fresh:
         _PIECE_FEED = {"R": None, "L": None}
-        _PIECE_ENC_AT_LM = {"R": None, "L": None}
         _push_event(f"{name} inicia.")
         # Arranque fresco: primero PUU 0 absoluto. Si el eje quedó a media
         # carrera tras un abort, no se debe tratar el corte como offset relativo.
@@ -7658,7 +7591,10 @@ def _cycle_worker(start_index: int = 0, gen: int = 0) -> None:
             # Catch-up: si un lado quedó atrás, el siguiente ciclo solo ese lado.
             nxt = _lot_next_cycle_sides()
             if not nxt:
-                _SIDE_READY["both_empty_lock"] = True
+                # Candado total solo si ambos lados están inhabilitados.
+                # Si queda un lado sano esperando al pendiente, no bloquearlo.
+                if (not _SIDE_READY.get("R")) and (not _SIDE_READY.get("L")):
+                    _SIDE_READY["both_empty_lock"] = True
                 _set_machine_ui(
                     estado="paused",
                     estado_label="Sin material",
@@ -7869,11 +7805,7 @@ def _cycle_start(*, step_mode: bool = False) -> tuple[bool, str]:
         pass
     # Material ON + Joint OFF: reabrir lados bloqueados por un Warning fantasma.
     if not _joint_active():
-        mst0 = _motion_status_get()
-        for s in ("R", "L"):
-            if _SIDE_READY.get("need_purge_" + s):
-                _side_mark_purge_ok(s)
-                _side_try_reenable(s, mst0)
+        _sides_refresh_ready(mark_purge_ok=True)
     # Aviso de alcance (y “casi al borde”) antes de arrancar el lote.
     if not step_mode:
         _announce_trays(cycles, plan)
@@ -7903,6 +7835,7 @@ def _cycle_start(*, step_mode: bool = False) -> tuple[bool, str]:
         cut_comps = _cut_comp_params_of(params)
         _LOT["cut_offset_mm"] = 0.0
         _LOT["cut_comp_mode"] = True
+        _LOT["cut_comp_dual_mm"] = cut_comps["cut_comp_dual_mm"]
         _LOT["cut_comp_r_mm"] = cut_comps["cut_comp_r_mm"]
         _LOT["cut_comp_l_mm"] = cut_comps["cut_comp_l_mm"]
         _LOT["length_mm"] = plan["length_mm"]
@@ -7991,17 +7924,30 @@ def _cycle_resume() -> tuple[bool, str]:
         return False, "Tras un error debes completar la purga antes de Reanudar."
     if _MACHINE_STATE.get("rutina") == "purga":
         return False, "Hay una purga en curso."
-    if not _sides_ready_mask() and _LOT.get("active"):
-        return False, "Se requiere material en ambos lados (o al menos el lado pendiente)."
-    busy = _motion_owner_busy()
-    if busy:
-        return False, busy
-    # Warning listo / latch huérfano: no reanudar con skip_cut activo.
+    # Warning listo / latch huérfano: limpiar antes de reevaluar lados.
     rec_r = _recovery_get()
     if rec_r.get("kind") in ("joint", "material") and str(rec_r.get("step") or "") == "listo":
         _recovery_clear()
     elif not _joint_active():
         _joint_latch_clear()
+    # Si ya hubo purga y el material volvió, reincorporar el lado aquí.
+    if not _joint_active():
+        _sides_refresh_ready(mark_purge_ok=False)
+    if _LOT.get("active"):
+        nxt = _lot_next_cycle_sides()
+        if nxt:
+            _LOT["cycle_sides"] = nxt
+        elif not _sides_ready_mask():
+            return False, "Se requiere material en ambos lados (o al menos el lado pendiente)."
+        else:
+            return (
+                False,
+                "Esperando material del lado pendiente. "
+                "Completa Purga con material ON y pulsa Reanudar.",
+            )
+    busy = _motion_owner_busy()
+    if busy:
+        return False, busy
     idx = int(_MACHINE_STATE.get("ciclo_paso_indice") or 0)
     # Tras error/purga active puede haberse perdido con el pedido intacto.
     # Reactivar sin _lot_init (no borrar pieces_r/l). Nunca lanzar worker sin lote.
@@ -8246,13 +8192,8 @@ def _wait_error_physical_clear_stable() -> bool:
 
 
 def _warning_reset_to_recovery() -> tuple[bool, str]:
-    """Warning Joint/Material: Reset suelta pinzas y entra al flujo de recuperación."""
-    if _JOINT.get("finish_piece"):
-        return False, "Espera a que termine la pieza del lado sano."
+    """Warning Joint/Material legado: Reset entra a recuperación común (sin wizard)."""
     rec = _recovery_get()
-    step = str(rec.get("step") or "")
-    if step not in ("await_reset", "segregate", "operator", "post_cut"):
-        return False, "Reset del Warning no aplica en este paso."
     keep = bool(
         _MACHINE_STATE.get("ciclo_en_curso")
         or _LOT.get("active")
@@ -8262,8 +8203,13 @@ def _warning_reset_to_recovery() -> tuple[bool, str]:
     if kind not in ("joint", "material"):
         kind = "joint"
     side = str(rec.get("side") or "")
-    code = str(rec.get("code") or "").strip()
-    msg = str(rec.get("mensaje") or "").strip() or _warn_banner_text(side, kind)
+    code = str(rec.get("code") or "").strip() or _joint_code_for_side(side or "R", kind)
+    msg = str(rec.get("mensaje") or "").strip()
+    if not msg:
+        try:
+            msg = error_codes.format_message(code)
+        except Exception:
+            msg = _warn_banner_text(side or "R", kind)
     if _serial_port("plc"):
         sent = _cycle_plc_send({"op": "reset"})
         if not sent.get("sent"):
@@ -8273,25 +8219,24 @@ def _warning_reset_to_recovery() -> tuple[bool, str]:
         else:
             _plc_wait_ready(1.5)
     _gripper_holding_set(False)
-    _JOINT["hold_grippers"] = False
     _feed_prime_clear()
-    # Enable del lado afectado ANTES de la purga (Alimentar/Expulsar lo necesitan).
-    _joint_enable_affected_feeder_for_purga(side)
+    _joint_latch_clear()
     with _STATE_LOCK:
         _MACHINE_STATE["post_error_purga"] = True
+    # kind="" → misma UI de error común (piezas → manguera → purga).
     _recovery_set(
         active=True,
-        kind=kind,
-        side=side,
+        kind="",
+        side="",
         step="piezas",
-        origin=str(rec.get("origin") or ""),
+        origin="",
         code=code,
         mensaje=msg,
         guide="Confirma que las piezas están bien.",
         busy=False,
         lm_at_park=False,
-        segregate_only=bool(_JOINT.get("segregate_only")),
-        healthy_side=str(_JOINT.get("healthy_side") or ""),
+        segregate_only=False,
+        healthy_side="",
     )
     _set_machine_ui(
         estado="paused" if keep else "idle",
@@ -8300,10 +8245,7 @@ def _warning_reset_to_recovery() -> tuple[bool, str]:
         mensaje=msg,
         en_curso=keep,
     )
-    _push_event(
-        "Reset Warning — pinzas liberadas; ServoCAN del lado afectado en Enable; "
-        "sigue la recuperación."
-    )
+    _push_event("Reset — Joint/Material tratado como error común; sigue la recuperación.")
     return True, ""
 
 
@@ -8313,14 +8255,9 @@ def _cycle_reset_error() -> tuple[bool, str]:
         code = str(_MACHINE_STATE.get("ciclo_error") or "").strip()
         in_err = _MACHINE_STATE.get("estado") == "error" or bool(code)
         msg_now = str(_MACHINE_STATE.get("mensaje") or "")
-    # Warning: pausa con pinzas cerradas → Reset abre recuperación.
+    # Warning legado (sin ciclo_error): Reset → recuperación común.
     if _joint_active() and not in_err:
-        step = str(_recovery_get().get("step") or "")
-        if step in ("await_reset", "segregate", "operator", "post_cut"):
-            return _warning_reset_to_recovery()
-        if step == "await_piece" and _JOINT.get("finish_piece"):
-            return False, "Espera a que termine la pieza del lado sano."
-        return True, ""
+        return _warning_reset_to_recovery()
     if not in_err:
         return True, ""
     def _keep_lot() -> bool:
@@ -8493,17 +8430,47 @@ def _target_length_mm() -> float:
         return 0.0
 
 
+_MANT_RESET_LOG: list = []
+
+
+def _mant_log_normalize(rows) -> list:
+    out = []
+    if not isinstance(rows, list):
+        return out
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        side = str(row.get("side") or "").strip().upper()
+        if side not in ("R", "L"):
+            continue
+        try:
+            ciclos = max(0, int(row.get("ciclos") or 0))
+        except (TypeError, ValueError):
+            ciclos = 0
+        out.append(
+            {
+                "side": side,
+                "empleado": str(row.get("empleado") or "").strip(),
+                "fecha": str(row.get("fecha") or "").strip(),
+                "ciclos": ciclos,
+            }
+        )
+    return out[-50:]
+
+
 def _mant_snapshot() -> dict:
     with _STATE_LOCK:
         return {
             "ciclos": int(_MACHINE_STATE.get("ciclos_mant") or 0),
             "ciclos_r": int(_MACHINE_STATE.get("ciclos_mant_r") or 0),
             "ciclos_l": int(_MACHINE_STATE.get("ciclos_mant_l") or 0),
+            "log": list(_MANT_RESET_LOG),
         }
 
 
 def _mant_write_file(data: dict | None = None) -> None:
     snap = dict(data) if data is not None else _mant_snapshot()
+    rows = _mant_log_normalize(snap.get("log"))
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     MANT_PATH.write_text(
         json.dumps(
@@ -8511,6 +8478,7 @@ def _mant_write_file(data: dict | None = None) -> None:
                 "ciclos": int(snap.get("ciclos") or 0),
                 "ciclos_r": int(snap.get("ciclos_r") or 0),
                 "ciclos_l": int(snap.get("ciclos_l") or 0),
+                "log": rows,
             }
         )
         + "\n",
@@ -8519,9 +8487,11 @@ def _mant_write_file(data: dict | None = None) -> None:
 
 
 def _mant_load() -> None:
+    global _MANT_RESET_LOG
     n = 0
     n_r = 0
     n_l = 0
+    rows: list = []
     if MANT_PATH.exists():
         try:
             data = json.loads(MANT_PATH.read_text(encoding="utf-8"))
@@ -8531,14 +8501,17 @@ def _mant_load() -> None:
                 n_r = max(0, int(data.get("ciclos_r") or 0))
             if "ciclos_l" in data:
                 n_l = max(0, int(data.get("ciclos_l") or 0))
+            rows = _mant_log_normalize(data.get("log"))
         except (OSError, json.JSONDecodeError, TypeError, ValueError):
             n = 0
             n_r = 0
             n_l = 0
+            rows = []
     with _STATE_LOCK:
         _MACHINE_STATE["ciclos_mant"] = n
         _MACHINE_STATE["ciclos_mant_r"] = n_r
         _MACHINE_STATE["ciclos_mant_l"] = n_l
+        _MANT_RESET_LOG = rows
 
 
 def _mant_add_cycle() -> None:
@@ -8550,6 +8523,7 @@ def _mant_add_cycle() -> None:
             "ciclos": n,
             "ciclos_r": int(_MACHINE_STATE.get("ciclos_mant_r") or 0),
             "ciclos_l": int(_MACHINE_STATE.get("ciclos_mant_l") or 0),
+            "log": list(_MANT_RESET_LOG),
         }
     try:
         _mant_write_file(snap)
@@ -8569,6 +8543,7 @@ def _mant_add_side_piece(side: str) -> None:
             "ciclos": int(_MACHINE_STATE.get("ciclos_mant") or 0),
             "ciclos_r": int(_MACHINE_STATE.get("ciclos_mant_r") or 0),
             "ciclos_l": int(_MACHINE_STATE.get("ciclos_mant_l") or 0),
+            "log": list(_MANT_RESET_LOG),
         }
     try:
         _mant_write_file(snap)
@@ -8577,19 +8552,45 @@ def _mant_add_side_piece(side: str) -> None:
 
 
 def _mant_reset(data) -> tuple[bool, str]:
+    """Pone en cero el contador de un lado (R o L) y registra fecha/empleado."""
+    global _MANT_RESET_LOG
     empleado = _empleado(data.get("empleado"))
     if not empleado:
         return False, "Hace falta el número de empleado, cinco dígitos."
+    side = str((data or {}).get("side") or "").strip().upper()
+    if side not in ("R", "L"):
+        return False, "Indica el lado a resetear (R o L)."
+    key = "ciclos_mant_r" if side == "R" else "ciclos_mant_l"
     with _STATE_LOCK:
-        _MACHINE_STATE["ciclos_mant"] = 0
-        _MACHINE_STATE["ciclos_mant_r"] = 0
-        _MACHINE_STATE["ciclos_mant_l"] = 0
+        prev = int(_MACHINE_STATE.get(key) or 0)
+        _MACHINE_STATE[key] = 0
+        entry = {
+            "side": side,
+            "empleado": empleado,
+            "fecha": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "ciclos": prev,
+        }
+        rows = list(_MANT_RESET_LOG)
+        rows.append(entry)
+        del rows[:-50]
+        _MANT_RESET_LOG = rows
+        snap = {
+            "ciclos": int(_MACHINE_STATE.get("ciclos_mant") or 0),
+            "ciclos_r": int(_MACHINE_STATE.get("ciclos_mant_r") or 0),
+            "ciclos_l": int(_MACHINE_STATE.get("ciclos_mant_l") or 0),
+            "log": rows,
+        }
     try:
-        _mant_write_file({"ciclos": 0, "ciclos_r": 0, "ciclos_l": 0})
+        _mant_write_file(snap)
     except OSError:
         return False, "No se pudo guardar el contador."
-    _push_event(f"Contador de mantenimiento en cero. Empleado {empleado}.")
-    return True, "Contador en cero."
+    _push_event(f"Contador {side} en cero. Empleado {empleado}.")
+    return True, f"Contador {side} en cero."
+
+
+def _mant_log_read() -> list:
+    with _STATE_LOCK:
+        return list(_MANT_RESET_LOG)
 
 
 def _checklist_log_read() -> list:
@@ -8620,11 +8621,10 @@ def _checklist_log(empleado: str) -> None:
 
 def _rearm_piece(mensaje: str) -> None:
     """Vuelve la pieza al paso 1. No toca cycles_done ni pieces_r/l."""
-    global _PIECE_FEED, _PIECE_ENC_AT_LM, _PIECE_BLOWER_MM, _PIECE_TICK0
+    global _PIECE_FEED, _PIECE_BLOWER_MM, _PIECE_TICK0
     _overlap_reset()
     _cycle_latch_reset()
     _PIECE_FEED = {"R": None, "L": None}
-    _PIECE_ENC_AT_LM = {"R": None, "L": None}
     _PIECE_BLOWER_MM = None
     _PIECE_TICK0 = None
     # Mantener el lote vivo tras error/purga para que Reanudar no arranque en R000.
@@ -8772,10 +8772,7 @@ def _feed_stage_payload(side: str | None = None, *, with_tune: bool = False, edg
             payload["feed_r_speed_switch_ms"] = 0
             payload["feed_l_speed_switch_ms"] = 0
     else:
-        payload = {
-            "op": "feed_stage",
-            "feed_validate_encoder": bool(tune["feed_stage"]["validate_encoder"]),
-        }
+        payload = {"op": "feed_stage"}
     if side in ("R", "L"):
         payload["side"] = side
     if edge:
@@ -8843,35 +8840,21 @@ def _feeder_test(side: str, tune: dict) -> dict:
             "error": error_codes.format_message(code) if code else "Detenido.",
         }
 
-    reset_sent = _cycle_motion_send(
-        {"op": "encoder_reset", "side": side}, timeout_s=2.0
-    )
-    if not _motion_cmd_ok(reset_sent, "encoder_reset"):
-        return {
-            "ok": False,
-            "error": reset_sent.get("reason")
-            or error_codes.format_message(reset_sent.get("code") or "E043"),
-        }
-
     feed_payload = _motion_tune_flat(tune)
     feed_payload["op"] = "feed_stage"
     feed_payload["side"] = side
-    # Probar: siempre hasta el láser (sin Joint/Material/encoder).
+    # Probar: siempre hasta el láser (sin Joint/Material).
     feed_payload["mode"] = "laser"
     feed_payload["timeout_ms"] = 60000  # Probar individual: no usa el tope de ciclo (4 s)
-    feed_payload["feed_validate_encoder"] = False
     feed_sent = _cycle_motion_send(feed_payload, timeout_s=65.0)
     found, feed_ok, error_name, feed, _warn = _read_feed_stage(feed_sent)
     _set_machine_ui(feed=feed)
-    replies = (reset_sent.get("replies") or []) + (feed_sent.get("replies") or [])
+    replies = feed_sent.get("replies") or []
     if not feed_sent.get("sent"):
         return {
             "ok": False,
             "error": feed_sent.get("reason") or error_codes.format_message("E043"),
-            "lines": [
-                _compact({"op": "encoder_reset", "side": side}),
-                _compact(feed_payload),
-            ],
+            "lines": [_compact(feed_payload)],
             "replies": replies,
         }
     return {
@@ -8879,10 +8862,7 @@ def _feeder_test(side: str, tune: dict) -> dict:
         "sent": True,
         "command_ok": bool(found and feed_ok),
         "error": "" if found and feed_ok else error_codes.feed_stage_message(error_name or "unknown"),
-        "lines": [
-            _compact({"op": "encoder_reset", "side": side}),
-            _compact(feed_payload),
-        ],
+        "lines": [_compact(feed_payload)],
         "replies": replies,
         "feed": feed,
     }
@@ -8953,6 +8933,8 @@ def _purga_error_action_guide(code: str = "", *, fallback: str = "") -> str:
 
 def _feed_laser():
     """Purga: lados activos (feed_sides) hasta su láser. Sin encoder ni compensación."""
+    # Por si quedó un hold/async clean ignorando láser.
+    _send_motion_urgent(['{"op":"feeder_stop"}'])
     side = _purge_feed_side()
     payload = _feed_stage_payload(side, with_tune=not bool(_MOTION_CFG.get("ok")))
     payload["mode"] = "laser"
@@ -9009,6 +8991,11 @@ def _purga_finish(cancelled: bool) -> None:
     with _STATE_LOCK:
         if _MACHINE_STATE.get("rutina") != "purga":
             return
+    # Corta cualquier feed async/hold que siga corriendo al salir de purga.
+    with _FEEDER_MANUAL_HOLD_LOCK:
+        _FEEDER_MANUAL_HOLD["L"] = False
+        _FEEDER_MANUAL_HOLD["R"] = False
+    _send_motion_urgent(['{"op":"feeder_stop"}'])
     _feed_prime_clear()
     if cancelled:
         _cycle_plc_send({"op": "all_off"})
@@ -9101,7 +9088,7 @@ def _purga_finish(cancelled: bool) -> None:
                         _cycle_latch_reset()
                         _recovery_clear()
                         _set_machine_ui(
-                            estado="running" if not low else "paused",
+                            estado="running",
                             estado_label="Ciclo en marcha" if not low else "Poco material",
                             mensaje=(
                                 "Continuando con el lado disponible…"
@@ -9116,8 +9103,7 @@ def _purga_finish(cancelled: bool) -> None:
                             feed={"R": None, "L": None},
                             tiempo_corriendo_s=0,
                         )
-                        if not low or ready:
-                            _cycle_spawn_worker(0)
+                        _cycle_spawn_worker(0)
                     else:
                         _set_machine_ui(
                             estado="paused" if keep else "idle",
@@ -9398,11 +9384,10 @@ def _purge_cut() -> bool:
         return False
 
     _set_routine_ui(estado_label=label, mensaje=aviso)
-    blower_ms = _cycle_blower_duration_ms(params)
     payload = {
         "op": "release_part",
-        "blower_delay_ms": int(params["ms_blower_delay"]),
-        "blower_ms": blower_ms,
+        "blower_delay_ms": 0,
+        "blower_ms": 1,
         "home_settle_ms": int(params["ms_at_home_end"]),
     }
     payload.update(_lm_cmd_fields(_load_motion_tune(), for_cut=False))
@@ -9523,7 +9508,7 @@ def _purga_terminar_action(_data=None) -> tuple[bool, str]:
 
 def _posicion_inicial_run() -> None:
     in_purge = _MACHINE_STATE.get("rutina") == "purga"
-    # Home + set0 invalidan material adelantado: el siguiente Start debe alimentar.
+    # Home invalida material adelantado: el siguiente Start debe alimentar.
     _feed_prime_clear()
     if not in_purge:
         _set_routine_ui(rutina="posicion_inicial", rutina_fase="", rutina_manos=False, mensaje="Posición inicial.")
@@ -9547,18 +9532,15 @@ def _posicion_inicial_run() -> None:
         else:
             _set_routine_ui(rutina="", mensaje="No se llegó a cero.")
         return
-    enc = _cycle_motion_send({"op": "encoder_set0", "side": "both"}, timeout_s=2.0)
     _cycle_plc_send({"op": "all_off"})
     _gripper_holding_set(False)
-    if not _motion_cmd_ok(enc, "encoder_set0"):
-        _push_event("El eje llegó a cero. Los encoders no confirmaron el cero.", "warn")
     if in_purge:
         if _ROUTINE["stop"].is_set():
             _purga_finish(True)
         else:
             _set_routine_ui(
                 rutina_fase="espera",
-                mensaje="Purga en espera. Eje en cero, encoders en cero y aire apagado.",
+                mensaje="Purga en espera. Eje en cero y aire apagado.",
             )
         return
     if _MACHINE_STATE.get("ciclo_en_curso"):
@@ -9567,7 +9549,7 @@ def _posicion_inicial_run() -> None:
         _set_machine_ui(
             estado="idle",
             estado_label="En espera",
-            mensaje="Posición inicial lista. Eje en cero, encoders en cero y aire apagado.",
+            mensaje="Posición inicial lista. Eje en cero y aire apagado.",
             en_curso=False,
         )
     _set_routine_ui(rutina="", rutina_fase="", rutina_manos=False)
@@ -9692,8 +9674,19 @@ def _checklist_empezar(data) -> tuple[bool, str]:
     empleado = _empleado(data.get("empleado"))
     if not empleado:
         return False, "Hace falta el número de empleado, cinco dígitos."
-    if int(_MACHINE_STATE.get("ciclos_mant") or 0) >= CHECKLIST_MAX_CYCLES:
-        return False, "El contador llegó a 10000 ciclos. Resetealo en Mantenimiento."
+    ciclos_r = int(_MACHINE_STATE.get("ciclos_mant_r") or 0)
+    ciclos_l = int(_MACHINE_STATE.get("ciclos_mant_l") or 0)
+    if ciclos_r >= CHECKLIST_MAX_CYCLES or ciclos_l >= CHECKLIST_MAX_CYCLES:
+        lados = []
+        if ciclos_r >= CHECKLIST_MAX_CYCLES:
+            lados.append("R")
+        if ciclos_l >= CHECKLIST_MAX_CYCLES:
+            lados.append("L")
+        return False, (
+            "El contador llegó a 10000 ciclos en "
+            + "/".join(lados)
+            + ". Resetealo en Mantenimiento."
+        )
     _checklist_update(empleado=empleado, paso=2)
     _push_event(f"Revisión de arranque. Empleado {empleado}.")
     return True, "Revisión iniciada."
@@ -9922,9 +9915,10 @@ def _checklist_medicion(data) -> tuple[bool, str]:
     except (TypeError, ValueError):
         return False, "Anota las dos longitudes en milímetros."
     expected = _target_length_mm()
-    tol = float(_load_cycle_params().get("tolerance_mm") or 2.0)
+    # Referencia visual HMI ±3 mm (no es parámetro de ciclo).
+    tol = 3.0
     if abs(mm_l - expected) > tol or abs(mm_r - expected) > tol:
-        return False, f"Fuera de tolerancia. Se espera {expected:.1f} mm ±{tol:.0f}."
+        return False, f"Fuera de tolerancia. Se espera {expected:.1f} mm ±3."
     try:
         _checklist_log(ch.get("empleado") or "")
     except OSError:
@@ -10439,6 +10433,7 @@ def set_cantidad():
 @app.route("/api/state", methods=["GET"])
 def get_state():
     _prefeeder_maybe_refresh_ui()
+    _sides_maybe_refresh_ready()
     return jsonify({"ok": True, **_public_machine_state()})
 
 
@@ -10459,6 +10454,7 @@ def cycle_config():
         params = _load_cycle_params()
         comps = _cut_comp_params_of(params)
         params["cut_comp_mode"] = True
+        params["cut_comp_dual_mm"] = comps["cut_comp_dual_mm"]
         params["cut_comp_r_mm"] = comps["cut_comp_r_mm"]
         params["cut_comp_l_mm"] = comps["cut_comp_l_mm"]
         params["cut_offset_mm"] = 0.0
@@ -10484,26 +10480,33 @@ def cycle_config():
         ):
             params[key] = patch[key]
     params["feed_sides"] = _feed_sides_of(params)
-    for key in ("cut_comp_r_mm", "cut_comp_l_mm"):
+    for key in ("cut_comp_dual_mm", "cut_comp_r_mm", "cut_comp_l_mm"):
         if key in patch and patch[key] is not None:
             params[key] = _num(patch.get(key), 0.0)
     comps = _cut_comp_params_of(params)
     params["cut_comp_mode"] = True
+    params["cut_comp_dual_mm"] = comps["cut_comp_dual_mm"]
     params["cut_comp_r_mm"] = comps["cut_comp_r_mm"]
     params["cut_comp_l_mm"] = comps["cut_comp_l_mm"]
     params["cut_offset_mm"] = 0.0
     for key in (
         "deposit_stack_gap_mm",
         "gripper_clearance_mm",
-        "tolerance_mm",
-        "blower_ms_per_mm",
+        "cut_comp_dual_mm",
         "cut_comp_r_mm",
         "cut_comp_l_mm",
     ):
         params[key] = _num(params.get(key), _DEFAULT_CYCLE_PARAMS[key])
+    # Legado: duración por longitud / retardo HMI ya no aplican (ON al arrancar home).
+    # Tolerancia ±3 mm es solo referencia visual; no se configura en ciclo.
+    params.pop("blower_ms_per_mm", None)
+    params.pop("blower_ms_min", None)
+    params.pop("ms_blower_delay", None)
+    params.pop("tolerance_mm", None)
     params["deposit_max_travel_mm"] = float(LMGUIDE_MAX_TRAVEL_MM)
     params["deposit_batch_size"] = int(_num(params.get("deposit_batch_size"), 50))
-    _MOTION_DATA["tolerance_mm"] = _num(params.get("tolerance_mm"), 2.0)
+    if _MOTION_CFG.get("data_fp") != _motion_data_fingerprint():
+        _MOTION_CFG["data_fp"] = ""
     try:
         params["cantidad"] = max(1, int(_MACHINE_STATE.get("cantidad") or 1))
     except (TypeError, ValueError):
@@ -10534,11 +10537,16 @@ def cycle_config():
     except OSError:
         return jsonify({"ok": False, "error": "No se pudo guardar cycle.json"}), 500
     lot_comp_changed = False
-    if ("cut_comp_r_mm" in patch or "cut_comp_l_mm" in patch) and _LOT.get("active"):
+    if (
+        "cut_comp_dual_mm" in patch
+        or "cut_comp_r_mm" in patch
+        or "cut_comp_l_mm" in patch
+    ) and _LOT.get("active"):
         lot_comp_changed = _sync_active_lot_cut_comp(params)
         if lot_comp_changed:
             _push_event(
                 f"Compensación aplicada al lote: "
+                f"dual {float(params['cut_comp_dual_mm']):+.2f} / "
                 f"R {float(params['cut_comp_r_mm']):+.2f} / "
                 f"L {float(params['cut_comp_l_mm']):+.2f} mm "
                 f"(siguiente corte)."
@@ -10609,6 +10617,7 @@ def motion_tune():
 
 
 def _encoder_from_status(replies):
+    """Sensores por lado desde status Motion (clave legada enc_*). Sin counts OM."""
     reading = {"R": None, "L": None}
     for raw in replies or []:
         try:
@@ -10622,16 +10631,6 @@ def _encoder_from_status(replies):
             if not isinstance(block, dict):
                 continue
             item = {}
-            if block.get("counts") is not None:
-                try:
-                    item["counts"] = int(block["counts"])
-                except (TypeError, ValueError):
-                    pass
-            elif block.get("counts_live") is not None:
-                try:
-                    item["counts"] = abs(int(block["counts_live"]))
-                except (TypeError, ValueError):
-                    pass
             if "laser" in block:
                 item["laser"] = bool(block.get("laser"))
             if "joint" in block:
@@ -10693,6 +10692,13 @@ def motion_status():
 def motion_cmd():
     body = request.get_json(silent=True) or {}
     op = (body.get("op") or "").strip()
+    if op == "feeder_hold":
+        side = str(body.get("side") or "").strip().upper()
+        on = bool(body.get("on"))
+        ok, err = _feeder_manual_hold_set(side, on)
+        if not ok:
+            return jsonify({"ok": False, "error": err, "op": op, "side": side, "on": on}), 400
+        return jsonify({"ok": True, "op": op, "side": side, "on": on})
     try:
         tune = _load_motion_tune()
     except (OSError, json.JSONDecodeError):
@@ -10812,7 +10818,7 @@ def motion_data():
     patch = data.get("data") or data
     if not isinstance(patch, dict):
         return jsonify({"ok": False, "error": "JSON inválido"}), 400
-    for key in ("target_length_mm", "tolerance_mm", "modelo_id", "measure_comp_mm"):
+    for key in ("target_length_mm", "modelo_id", "measure_comp_mm"):
         if key in patch:
             _MOTION_DATA[key] = patch[key]
     if "measure_comp_mm" in patch:
