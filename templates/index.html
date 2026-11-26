@@ -284,6 +284,9 @@
               <label class="motion-field" title="Tras mandar abrir pinzas en depósito: conteo local en paralelo antes del paso 8 (home). Si se atora, súbelo.">Tras abrir pinzas
                 <input type="number" min="0" step="1" data-cycle-param="ms_after_grip_release">
               </label>
+              <label class="motion-field" title="Tras holder/encoder listos en el solape: espera antes de arrancar V1 de la siguiente pieza.">Antes de alimentar (solape)
+                <input type="number" min="0" step="1" data-cycle-param="ms_before_overlap_feed">
+              </label>
               <label class="motion-field">Retardo blower
                 <input type="number" min="0" step="1" data-cycle-param="ms_blower_delay">
               </label>
@@ -465,7 +468,7 @@
                     <p class="lm-guide__segment-label">Corte / jalar</p>
                     <div class="lm-guide__row lm-guide__row--profile" role="group" aria-label="Perfil corte / jalar LM Guide">
                       <label class="motion-field">RPM
-                        <input type="number" step="0.1" min="0" data-motion-path="lmguide.pr_speed_rpm" title="Corte / jalar">
+                        <input type="number" step="0.1" min="400" max="5000" data-motion-path="lmguide.pr_speed_rpm" title="Corte / jalar">
                       </label>
                       <label class="motion-field">Accel (ms)
                         <input type="number" step="1" min="1" max="65500" data-motion-path="lmguide.accel_ms" title="Corte / jalar: tiempo 0→3000 rpm (ASDA P5.020)">
@@ -479,7 +482,7 @@
                     <p class="lm-guide__segment-label">Movimientos comunes</p>
                     <div class="lm-guide__row lm-guide__row--profile" role="group" aria-label="Perfil movimientos comunes LM Guide">
                       <label class="motion-field">RPM
-                        <input type="number" step="0.1" min="0" data-motion-path="lmguide.travel_pr_speed_rpm" title="Movimientos comunes (home, descarga, jog, etc.)">
+                        <input type="number" step="0.1" min="400" max="5000" data-motion-path="lmguide.travel_pr_speed_rpm" title="Movimientos comunes (home, descarga, jog, etc.)">
                       </label>
                       <label class="motion-field">Accel (ms)
                         <input type="number" step="1" min="1" max="65500" data-motion-path="lmguide.travel_accel_ms" title="Movimientos comunes: tiempo 0→3000 rpm (ASDA P5.020)">

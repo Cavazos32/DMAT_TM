@@ -122,6 +122,16 @@ static bool jsonReadBool(const char* json, const char* key, bool defVal) {
   return defVal;
 }
 
+/* "cut" → PR1; cualquier otro / ausente → travel (PR2). */
+static LmMoveProfile jsonReadLmProfile(const char* json, LmMoveProfile defVal) {
+  const char* p = nullptr;
+  if (!jsonFindKey(json, "profile", &p)) return defVal;
+  while (*p == ' ' || *p == '"') p++;
+  if (strncmp(p, "cut", 3) == 0) return LM_PROFILE_CUT;
+  if (strncmp(p, "travel", 6) == 0) return LM_PROFILE_TRAVEL;
+  return defVal;
+}
+
 static void runtimeInit(MotionRuntime* rt) {
   memset(rt, 0, sizeof(MotionRuntime));
 }
@@ -431,13 +441,16 @@ static bool gFeedSideValidated[MOTION_SIDE_COUNT];
 static bool gFeedRunR = false;
 static bool gFeedRunL = false;
 /* Alimentación normal: ON al arrancar = ya en posición (no mueve ese lado).
- * waitNewEdge (solape tras corte): ese ON no cuenta; hay que ver OFF y el ON nuevo. */
+ * waitNewEdge (solape): ON heredado no cuenta; V1 arranca igual; stop solo tras OFF→ON.
+ * rawCount: referencia de movimiento V1→V2 (no afectada por setZero de medición). */
 static bool gFeedLaserEdgeArmed[MOTION_SIDE_COUNT] = {true, true};
 static FeedStageError gFeedFail = FEED_STAGE_OK;
 static uint32_t gFeedT0 = 0;  // primer TX V1 (timeout láser / skew)
 static uint32_t gFeedSideTxMs[MOTION_SIDE_COUNT] = {0, 0};  // TX V1 por lado
 static uint32_t gFeedSideT0[MOTION_SIDE_COUNT] = {0, 0};  // inicio de movimiento real (V1→V2)
 static bool gFeedSideStarted[MOTION_SIDE_COUNT] = {false, false};
+static bool gFeedV1Confirmed[MOTION_SIDE_COUNT] = {false, false};
+static int64_t gFeedMotionRefRaw[MOTION_SIDE_COUNT] = {0, 0};
 static bool gFeedStartLPending = false;  // L espera skew tras V1 de R
 static uint32_t gFeedStartLAt = 0;
 static FeedStageSideWarn gFeedSideWarn[MOTION_SIDE_COUNT] = {
@@ -448,6 +461,23 @@ static uint32_t gFeedSpeedSwitchMs[MOTION_SIDE_COUNT] = {0, 0};  // independient
 static uint32_t gFeedVel1Pps[MOTION_SIDE_COUNT] = {0, 0};
 static uint32_t gFeedVel2Pps[MOTION_SIDE_COUNT] = {0, 0};
 static bool gFeedSpeed2Sent[MOTION_SIDE_COUNT] = {false, false};
+/* Diagnóstico compacto por lado (una línea al cerrar). */
+struct FeedSideDiag {
+  uint32_t tRecv;
+  uint32_t tPrepDone;
+  bool servoWasOn;
+  bool didEnable;
+  uint32_t tV1Tx;
+  uint32_t tV1Ack;
+  int64_t encRef;
+  uint32_t tMotion;
+  uint32_t tV2Tx;
+  uint32_t tLaserOff;
+  uint32_t tLaserOn;
+  uint32_t tickGapMax;
+};
+static FeedSideDiag gFeedDiag[MOTION_SIDE_COUNT] = {};
+static uint32_t gFeedLastTickMs = 0;
 /* Confirmaciones SDO de 0x60FF en curso (no bloquean arranque L ni V2). */
 static CanSdoPending gFeedVelSdo[MOTION_SIDE_COUNT] = {};
 static uint32_t gFeedVelSdoDeadline[MOTION_SIDE_COUNT] = {0, 0};
@@ -481,6 +511,42 @@ static void feedVelSdoClear(MotionSide side) {
   gFeedVelSdoPhase[i] = 0;
   gFeedVelSdoCmd[i] = 0;
   gFeedVelSdoTTx[i] = 0;
+}
+
+static int64_t feedEncoderRaw(MotionSide side) {
+  return encoderReading(side).rawCount;
+}
+
+static void feedDiagPrintSide(MotionSide side) {
+  int i = (int)side;
+  const FeedSideDiag& d = gFeedDiag[i];
+  Serial.print(F("{\"op\":\"feed_diag\",\"side\":\""));
+  Serial.print(side == MOTION_SIDE_R ? 'R' : 'L');
+  Serial.print(F("\",\"servo_was_on\":"));
+  Serial.print(d.servoWasOn ? "true" : "false");
+  Serial.print(F(",\"did_enable\":"));
+  Serial.print(d.didEnable ? "true" : "false");
+  Serial.print(F(",\"prep_ms\":"));
+  Serial.print(d.tPrepDone && d.tRecv ? (d.tPrepDone - d.tRecv) : 0u);
+  Serial.print(F(",\"v1_tx\":"));
+  Serial.print(d.tV1Tx);
+  Serial.print(F(",\"v1_ack\":"));
+  Serial.print(d.tV1Ack);
+  Serial.print(F(",\"enc_ref\":"));
+  Serial.print((long)d.encRef);
+  Serial.print(F(",\"t_motion\":"));
+  Serial.print(d.tMotion);
+  Serial.print(F(",\"v1_hold_ms\":"));
+  Serial.print(d.tMotion && d.tV2Tx ? (d.tV2Tx - d.tMotion) : 0u);
+  Serial.print(F(",\"v2_tx\":"));
+  Serial.print(d.tV2Tx);
+  Serial.print(F(",\"laser_off\":"));
+  Serial.print(d.tLaserOff);
+  Serial.print(F(",\"laser_on\":"));
+  Serial.print(d.tLaserOn);
+  Serial.print(F(",\"tick_gap_max\":"));
+  Serial.print(d.tickGapMax);
+  Serial.println(F("}"));
 }
 
 static void feedVelSdoArm(MotionSide side, int32_t cmd, uint8_t phase, uint32_t tTx) {
@@ -518,6 +584,10 @@ static void feedVelSdoService() {
     if (gFeedVelSdo[i].done) {
       bool ok = gFeedVelSdo[i].ok;
       if (ok) {
+        if (gFeedVelSdoPhase[i] == 1) {
+          gFeedV1Confirmed[i] = true;
+          if (!gFeedDiag[i].tV1Ack) gFeedDiag[i].tV1Ack = nowMs;
+        }
         gFeedVelSdo[i].active = false;
         continue;
       }
@@ -629,7 +699,11 @@ static void feedStageFinish() {
   if (gFeedFail != FEED_STAGE_OK) gFeedOut.error = gFeedFail;
   gLastFeedStage = gFeedOut;
   gFeedStageBusy = false;
+  if (gFeedReq.useR) feedDiagPrintSide(MOTION_SIDE_R);
+  if (gFeedReq.useL) feedDiagPrintSide(MOTION_SIDE_L);
 }
+
+static bool feedStageStartSideNow(MotionSide side);
 
 /* true = arrancó (tickable). false = error inmediato en gFeedOut. */
 static bool feedStageBegin(FeedStageRequest req) {
@@ -664,8 +738,16 @@ static bool feedStageBegin(FeedStageRequest req) {
   gFeedSideT0[MOTION_SIDE_L] = 0;
   gFeedSideStarted[MOTION_SIDE_R] = false;
   gFeedSideStarted[MOTION_SIDE_L] = false;
+  gFeedV1Confirmed[MOTION_SIDE_R] = false;
+  gFeedV1Confirmed[MOTION_SIDE_L] = false;
+  gFeedMotionRefRaw[MOTION_SIDE_R] = 0;
+  gFeedMotionRefRaw[MOTION_SIDE_L] = 0;
   gFeedStartLPending = false;
   gFeedStartLAt = 0;
+  gFeedLastTickMs = 0;
+  memset(gFeedDiag, 0, sizeof(gFeedDiag));
+  gFeedDiag[MOTION_SIDE_R].tRecv = gFeedBeginMs;
+  gFeedDiag[MOTION_SIDE_L].tRecv = gFeedBeginMs;
   feedVelSdoClear(MOTION_SIDE_R);
   feedVelSdoClear(MOTION_SIDE_L);
   gFeedDualSpeed = gTune.dualSpeedEnable;
@@ -683,14 +765,13 @@ static bool feedStageBegin(FeedStageRequest req) {
   }
 
   // Alimentación normal: láser ya ON = material en posición. Ese lado no se mueve.
-  // R y L usan la misma regla. El flanco (esperar OFF y un ON nuevo) solo
-  // aplica al solape tras el corte (waitNewEdge), donde el ON es la pieza
-  // que se acaba de cortar.
+  // Solape (waitNewEdge): ON heredado no detiene; V1 arranca igual; stop tras OFF→ON.
   bool positioned[MOTION_SIDE_COUNT] = {false, false};
   if (!req.ignoreLaser && !req.waitNewEdge) {
     if (req.useR) positioned[MOTION_SIDE_R] = laserIsOn(MOTION_SIDE_R);
     if (req.useL) positioned[MOTION_SIDE_L] = laserIsOn(MOTION_SIDE_L);
   }
+  // waitNewEdge + láser ON: no armado (falta OFF). No retrasa V1.
   gFeedLaserEdgeArmed[MOTION_SIDE_R] =
       !req.useR || req.ignoreLaser || !req.waitNewEdge || !laserIsOn(MOTION_SIDE_R);
   gFeedLaserEdgeArmed[MOTION_SIDE_L] =
@@ -729,10 +810,14 @@ static bool feedStageBegin(FeedStageRequest req) {
     gFeedSideValidated[i] = true;
   }
   if (gFeedFail == FEED_STAGE_OK && gFeedRunR) {
-    if (!feederServoOn(MOTION_SIDE_R)) gFeedFail = FEED_STAGE_ERR_FEEDER;
+    gFeedDiag[MOTION_SIDE_R].servoWasOn = feederServoIsOn(MOTION_SIDE_R);
+    gFeedDiag[MOTION_SIDE_R].didEnable = !gFeedDiag[MOTION_SIDE_R].servoWasOn;
+    if (!feederEnsureServoOn(MOTION_SIDE_R)) gFeedFail = FEED_STAGE_ERR_FEEDER;
   }
   if (gFeedFail == FEED_STAGE_OK && gFeedRunL) {
-    if (!feederServoOn(MOTION_SIDE_L)) gFeedFail = FEED_STAGE_ERR_FEEDER;
+    gFeedDiag[MOTION_SIDE_L].servoWasOn = feederServoIsOn(MOTION_SIDE_L);
+    gFeedDiag[MOTION_SIDE_L].didEnable = !gFeedDiag[MOTION_SIDE_L].servoWasOn;
+    if (!feederEnsureServoOn(MOTION_SIDE_L)) gFeedFail = FEED_STAGE_ERR_FEEDER;
   }
   if (gFeedFail == FEED_STAGE_OK && gFeedRunR) {
     if (!feederPreparePv(MOTION_SIDE_R)) gFeedFail = FEED_STAGE_ERR_FEEDER;
@@ -740,7 +825,9 @@ static bool feedStageBegin(FeedStageRequest req) {
   if (gFeedFail == FEED_STAGE_OK && gFeedRunL) {
     if (!feederPreparePv(MOTION_SIDE_L)) gFeedFail = FEED_STAGE_ERR_FEEDER;
   }
-  // Habilitar y después escribir la velocidad. En Halt el servo puede ignorar 60FFh.
+  gFeedDiag[MOTION_SIDE_R].tPrepDone = millis();
+  gFeedDiag[MOTION_SIDE_L].tPrepDone = gFeedDiag[MOTION_SIDE_R].tPrepDone;
+  // Liberar Halt; consigna 0 ya escrita en prepare. Luego V1.
   if (gFeedFail == FEED_STAGE_OK && (gFeedRunR || gFeedRunL)) {
     motionYieldMs(SERVO_CAN_CIA402_SHORT_MS);
     if (gLmAbortRequested || gFeedAbortRequested) {
@@ -751,48 +838,29 @@ static bool feedStageBegin(FeedStageRequest req) {
         gFeedFail = FEED_STAGE_ERR_FEEDER;
     }
   }
-  if (gFeedFail == FEED_STAGE_OK && (gFeedRunR || gFeedRunL)) {
+  // Misma lógica normal/paralelo: V1 al arrancar (no creep/V2).
+  const bool fireR = gFeedRunR && gFeedSideWarn[MOTION_SIDE_R] == FEED_WARN_NONE;
+  const bool fireL = gFeedRunL && gFeedSideWarn[MOTION_SIDE_L] == FEED_WARN_NONE;
+  if (gFeedFail == FEED_STAGE_OK && (fireR || fireL)) {
     if (gLmAbortRequested || gFeedAbortRequested) {
       gFeedFail = FEED_STAGE_ERR_STOP;
-    } else if (gFeedRunR && gFeedRunL) {
-      // Prueba dual: R arranca ya; L a +PARAM_FEED_DUAL_START_SKEW_MS (no bloqueante).
-      int32_t cmdR = feederSignedVelocityPps(MOTION_SIDE_R, gFeedVel1Pps[MOTION_SIDE_R]);
-      uint32_t tTxR = 0;
-      if (!feedVelFire(MOTION_SIDE_R, cmdR, 1, &tTxR)) {
+    } else if (fireR && fireL) {
+      if (!feedStageStartSideNow(MOTION_SIDE_R)) {
         gFeedFail = FEED_STAGE_ERR_FEEDER;
         feederStopAll();
       } else {
-        // T0 V1→V2 se arma al detectar movimiento; aquí solo queda el TX.
-        gFeedSideTxMs[MOTION_SIDE_R] = tTxR;
-        gFeedSideT0[MOTION_SIDE_R] = 0;
-        gFeedSideStarted[MOTION_SIDE_R] = true;
-        gFeedT0 = tTxR;
         gFeedSideStopped[MOTION_SIDE_L] = true;  // L aún no alimenta
         gFeedSideStarted[MOTION_SIDE_L] = false;
         gFeedStartLPending = true;
-        gFeedStartLAt = tTxR + PARAM_FEED_DUAL_START_SKEW_MS;
+        gFeedStartLAt = gFeedSideTxMs[MOTION_SIDE_R] + PARAM_FEED_DUAL_START_SKEW_MS;
       }
-    } else if (gFeedRunR) {
-      int32_t cmdR = feederSignedVelocityPps(MOTION_SIDE_R, gFeedVel1Pps[MOTION_SIDE_R]);
-      bool okR = feederSetPvVelocity(MOTION_SIDE_R, cmdR);
-      uint32_t tTx = millis();
-      gFeedSideTxMs[MOTION_SIDE_R] = tTx;
-      gFeedSideT0[MOTION_SIDE_R] = 0;
-      gFeedSideStarted[MOTION_SIDE_R] = true;
-      gFeedT0 = tTx;
-      if (!okR) {
+    } else if (fireR) {
+      if (!feedStageStartSideNow(MOTION_SIDE_R)) {
         gFeedFail = FEED_STAGE_ERR_FEEDER;
         feederStopAll();
       }
     } else {
-      int32_t cmdL = feederSignedVelocityPps(MOTION_SIDE_L, gFeedVel1Pps[MOTION_SIDE_L]);
-      bool okL = feederSetPvVelocity(MOTION_SIDE_L, cmdL);
-      uint32_t tTx = millis();
-      gFeedSideTxMs[MOTION_SIDE_L] = tTx;
-      gFeedSideT0[MOTION_SIDE_L] = 0;
-      gFeedSideStarted[MOTION_SIDE_L] = true;
-      gFeedT0 = tTx;
-      if (!okL) {
+      if (!feedStageStartSideNow(MOTION_SIDE_L)) {
         gFeedFail = FEED_STAGE_ERR_FEEDER;
         feederStopAll();
       }
@@ -822,31 +890,48 @@ static bool feedStageBegin(FeedStageRequest req) {
   return true;
 }
 
-static bool feedStageStartLNow() {
-  int32_t cmdL = feederSignedVelocityPps(MOTION_SIDE_L, gFeedVel1Pps[MOTION_SIDE_L]);
-  uint32_t tTxL = 0;
-  // Liberar stopped antes del TX: feedVelFire(V1) debe poder arrancar L tras el skew.
-  gFeedSideStopped[MOTION_SIDE_L] = false;
-  if (!feedVelFire(MOTION_SIDE_L, cmdL, 1, &tTxL)) {
-    gFeedSideStopped[MOTION_SIDE_L] = true;
+static bool feedStageStartSideNow(MotionSide side) {
+  int i = (int)side;
+  if (gFeedSideWarn[i] != FEED_WARN_NONE) return true;
+  // Referencia de movimiento justo antes de V1 (rawCount; setZero de medición no la pisa).
+  gEncoders.update();
+  gFeedMotionRefRaw[i] = feedEncoderRaw(side);
+  gFeedDiag[i].encRef = gFeedMotionRefRaw[i];
+  gFeedV1Confirmed[i] = false;
+  gFeedSideT0[i] = 0;
+  gFeedSpeed2Sent[i] = false;
+
+  int32_t cmd = feederSignedVelocityPps(side, gFeedVel1Pps[i]);
+  uint32_t tTx = 0;
+  gFeedSideStopped[i] = false;
+  if (!feedVelFire(side, cmd, 1, &tTx)) {
+    gFeedSideStopped[i] = true;
     return false;
   }
-  gFeedSideStarted[MOTION_SIDE_L] = true;
-  gFeedSideTxMs[MOTION_SIDE_L] = tTxL;
-  gFeedSideT0[MOTION_SIDE_L] = 0;  // V1→V2 al detectar movimiento de L
-  gFeedStartLPending = false;
+  gFeedSideStarted[i] = true;
+  gFeedSideTxMs[i] = tTx;
+  gFeedDiag[i].tV1Tx = tTx;
+  if (!gFeedT0) gFeedT0 = tTx;
+  if (side == MOTION_SIDE_L) gFeedStartLPending = false;
   return true;
 }
 
-/* Arma T0 de V1→V2 por lado al primer movimiento de encoder (independiente). */
+static bool feedStageStartLNow() {
+  return feedStageStartSideNow(MOTION_SIDE_L);
+}
+
+/* T0 V1→V2: tras V1 confirmado, ≥8 counts vs referencia previa al TX. */
 static void feedStageArmMotionT0(uint32_t nowMs) {
   for (int i = 0; i < MOTION_SIDE_COUNT; i++) {
     if (!gFeedSideStarted[i] || gFeedSideStopped[i] || gFeedSideT0[i]) continue;
+    if (!gFeedV1Confirmed[i]) continue;
     MotionSide side = (MotionSide)i;
-    int32_t counts = encoderCountsOfficial(side);
-    int32_t absC = (counts >= 0) ? counts : -counts;
-    if (absC < PARAM_FEED_MOTION_START_COUNTS) continue;
+    int64_t raw = feedEncoderRaw(side);
+    int64_t d = raw - gFeedMotionRefRaw[i];
+    if (d < 0) d = -d;
+    if (d < (int64_t)PARAM_FEED_MOTION_START_COUNTS) continue;
     gFeedSideT0[i] = nowMs;
+    gFeedDiag[i].tMotion = nowMs;
   }
 }
 
@@ -857,6 +942,14 @@ static bool feedStageTick() {
   gInFeedTick = true;
 
   uint32_t nowMs = millis();
+  if (gFeedLastTickMs) {
+    uint32_t gap = nowMs - gFeedLastTickMs;
+    if (gap > gFeedDiag[MOTION_SIDE_R].tickGapMax)
+      gFeedDiag[MOTION_SIDE_R].tickGapMax = gap;
+    if (gap > gFeedDiag[MOTION_SIDE_L].tickGapMax)
+      gFeedDiag[MOTION_SIDE_L].tickGapMax = gap;
+  }
+  gFeedLastTickMs = nowMs;
   motionPollEncoders();
   feedVelSdoService();
 
@@ -896,7 +989,7 @@ static bool feedStageTick() {
       }
     }
 
-    // T0 V1→V2 independiente por lado al detectar movimiento.
+    // T0 V1→V2 independiente por lado (ref raw previa a V1 + confirm SDO).
     feedStageArmMotionT0(nowMs);
 
     // Prioridad: láser/parada → cambio V2 → continuar.
@@ -912,19 +1005,29 @@ static bool feedStageTick() {
         if (gFeedSideValidated[i]) continue;
         MotionSide side = (MotionSide)i;
 
-        if (!gFeedSideStopped[i]) {
-          bool laserOn = laserIsOn(side);
-          // REVERTIR flanco: parar en cualquier laserIsOn, sin esperar OFF
-          // ni volver a poner el encoder en cero.
-          if (!gFeedLaserEdgeArmed[i]) {
-            if (!laserOn) {
-              gEncoders.update();
-              encoderSetZero(side);
-              gFeedLaserEdgeArmed[i] = true;
-            }
-          } else if (laserOn) {
-            if (!feedStageStopForLaser(side)) break;
+        bool laserOn = laserIsOn(side);
+        // Solape: ON heredado no cuenta. OFF arma el flanco y pone set0 de
+        // medición (no toca ref V1→V2). V1 ya corre; no reinicia temporizador.
+        if (gFeedReq.waitNewEdge && !gFeedLaserEdgeArmed[i]) {
+          if (!laserOn) {
+            gEncoders.update();
+            encoderSetZero(side);
+            gFeedLaserEdgeArmed[i] = true;
+            if (!gFeedDiag[i].tLaserOff) gFeedDiag[i].tLaserOff = nowMs;
           }
+          // Timeout también mientras se espera OFF (material atascado).
+          uint32_t sideTx = gFeedSideTxMs[i] ? gFeedSideTxMs[i] : gFeedT0;
+          if (gFeedSideStarted[i] && sideTx &&
+              (nowMs - sideTx >= gFeedReq.laserTimeoutMs)) {
+            gFeedFail =
+                (side == MOTION_SIDE_R) ? FEED_STAGE_ERR_LASER_R : FEED_STAGE_ERR_LASER_L;
+            break;
+          }
+          continue;
+        }
+        if (!gFeedSideStopped[i] && gFeedLaserEdgeArmed[i] && laserOn) {
+          if (!gFeedDiag[i].tLaserOn) gFeedDiag[i].tLaserOn = nowMs;
+          if (!feedStageStopForLaser(side)) break;
         }
 
         if (!gFeedSideStarted[i]) continue;
@@ -938,7 +1041,7 @@ static bool feedStageTick() {
       }
     }
 
-    // V2 por lado: T0 de movimiento + switch_ms de ese lado.
+    // V2 por lado: T0 de movimiento + switch_ms de ese lado (igual normal/paralelo).
     if (gFeedFail == FEED_STAGE_OK && gFeedDualSpeed) {
       for (int i = 0; i < MOTION_SIDE_COUNT; i++) {
         if (gFeedSideStopped[i] || !gFeedSideStarted[i] || gFeedSpeed2Sent[i] || !gFeedSideT0[i])
@@ -953,7 +1056,8 @@ static bool feedStageTick() {
         int32_t cmd = feederSignedVelocityPps(side, gFeedVel2Pps[i]);
         uint32_t tTx = 0;
         bool ok = feedVelFire(side, cmd, 2, &tTx);
-        gFeedSpeed2Sent[i] = ok;  // si falla no marcar; error abajo
+        gFeedSpeed2Sent[i] = ok;
+        if (ok) gFeedDiag[i].tV2Tx = tTx;
         if (!ok) {
           gFeedFail = FEED_STAGE_ERR_FEEDER;
           feederStopAll();
@@ -1069,6 +1173,10 @@ static void printLmguideMoveResult(bool ok, bool setDataApplied) {
   Serial.print(ok ? "true" : "false");
   Serial.print(F(",\"lm_homed\":"));
   Serial.print(gRt.lmguideHomed ? "true" : "false");
+  Serial.print(F(",\"modbus_writes\":"));
+  Serial.print((unsigned)lmguideLastModbusWrites());
+  Serial.print(F(",\"profiles_applied\":"));
+  Serial.print(lmguideProfilesApplied() ? "true" : "false");
   if (setDataApplied) {
     Serial.print(F(",\"set_data\":true"));
   }
@@ -1125,7 +1233,8 @@ static bool releasePartHomeWithBlower(uint32_t blowerDelayMs, uint32_t blowerMs)
     return true;
   }
 
-  if (!lmguideIssueMovePr1(0)) return false;
+  gLmModbusWrites = 0;
+  if (!lmguideIssueMove(0, LM_PROFILE_TRAVEL)) return false;
 
   uint32_t t0 = millis();
   bool blowerStarted = false;
@@ -1302,13 +1411,25 @@ static void applyLmRampFromJson(const char* json) {
       lmClampRampMs(jsonReadLong(json, "lm_accel_ms", (long)gTune.lmguide.accelMs));
   gTune.lmguide.decelMs =
       lmClampRampMs(jsonReadLong(json, "lm_decel_ms", (long)gTune.lmguide.decelMs));
+  gTune.lmguide.travelPrSpeedRpm = lmClampSpeedRpm(
+      jsonReadFloat(json, "lm_travel_pr_speed_rpm", gTune.lmguide.travelPrSpeedRpm));
+  gTune.lmguide.travelAccelMs = lmClampRampMs(
+      jsonReadLong(json, "lm_travel_accel_ms", (long)gTune.lmguide.travelAccelMs));
+  gTune.lmguide.travelDecelMs = lmClampRampMs(
+      jsonReadLong(json, "lm_travel_decel_ms", (long)gTune.lmguide.travelDecelMs));
+  // Compat App antigua: lm_pr_* sin lm_travel_* → copiar a travel.
+  if (!strstr(json, "lm_travel_pr_speed_rpm") && strstr(json, "lm_pr_speed_rpm")) {
+    gTune.lmguide.travelPrSpeedRpm = gTune.lmguide.prSpeedRpm;
+    gTune.lmguide.travelAccelMs = gTune.lmguide.accelMs;
+    gTune.lmguide.travelDecelMs = gTune.lmguide.decelMs;
+  }
 }
 
 static void releasePartRun(const char* line) {
-  // Perfil de la orden (viaje). Se reaplica antes de cada tramo: pollSerial
-  // puede ingerir feed_stage del solape y no debe dejar el home con rampa de corte.
+  // Viaje (PR2). Con perfiles aplicados no reescribe rampas; el feed del solape
+  // ya no pisa P5.020/060 porque cut/travel son paths distintos.
   gReleasePartBusy = true;
-  applyLmRampFromJson(line);
+  if (!lmguideProfilesApplied()) applyLmRampFromJson(line);
 
   uint32_t blowerDelayMs =
       (uint32_t)jsonReadLong(line, "blower_delay_ms", (long)PARAM_MS_BLOWER_DELAY);
@@ -1321,15 +1442,13 @@ static void releasePartRun(const char* line) {
   bool doClear = (clearPuu != LONG_MIN);
 
   if (doClear) {
-    applyLmRampFromJson(line);
-    if (!lmguideMovePr1((int32_t)clearPuu)) {
+    if (!lmguideMove((int32_t)clearPuu, LM_PROFILE_TRAVEL)) {
       gReleasePartBusy = false;
       printReleasePartResult(false);
       return;
     }
   }
 
-  applyLmRampFromJson(line);
   if (!releasePartHomeWithBlower(blowerDelayMs, blowerMs)) {
     gReleasePartBusy = false;
     printReleasePartResult(false);
@@ -1353,22 +1472,22 @@ static void releasePartRun(const char* line) {
 
 // ── LM Guide (ciclo: model/named; HW en ServoLMGuide.h) ───────────────────
 
-static bool lmguideMoveModel() {
+static bool lmguideMoveModel(LmMoveProfile profile) {
   if (!gRt.lmguideHomed) return false;
   if (gData.targetLengthMm <= 0.0f) return false;
   float mm = gData.targetLengthMm + gData.measureCompMm;
   int32_t puu = (int32_t)lroundf(-mm * ASDA_FACTORY_STEPS_PER_MM);
-  return lmguideMovePr1(puu);
+  return lmguideMove(puu, profile);
 }
 
-static bool lmguideMoveNamed(const char* name) {
+static bool lmguideMoveNamed(const char* name, LmMoveProfile profile) {
   if (!name) return false;
-  if (strncmp(name, "model", 5) == 0) return lmguideMoveModel();
+  if (strncmp(name, "model", 5) == 0) return lmguideMoveModel(profile);
   if (strncmp(name, "home", 4) == 0) {
-    return lmguideMovePr1(0);
+    return lmguideMove(0, LM_PROFILE_TRAVEL);
   }
   if (!gRt.lmguideHomed) return false;
-  return lmguideMovePr1(gTune.lmguide.posPuu);
+  return lmguideMove(gTune.lmguide.posPuu, profile);
 }
 static void motionHwInitRun() {
   if (safetyIsActive()) {
@@ -1466,6 +1585,9 @@ static void printStatusJson() {
 }
 
 static void applyTuneFromJson(const char* json) {
+  uint32_t prevVelR = gTune.feeder[MOTION_SIDE_R].profileVelocityPps;
+  uint32_t prevVelL = gTune.feeder[MOTION_SIDE_L].profileVelocityPps;
+
   gTune.feeder[MOTION_SIDE_R].profileVelocityPps =
       (uint32_t)jsonReadLong(json, "feed_r_vel_pps", (long)gTune.feeder[MOTION_SIDE_R].profileVelocityPps);
   gTune.feeder[MOTION_SIDE_R].secondaryVelocityPps =
@@ -1487,7 +1609,18 @@ static void applyTuneFromJson(const char* json) {
   if (gTune.feeder[MOTION_SIDE_L].secondaryVelocityPps > gTune.feeder[MOTION_SIDE_L].profileVelocityPps)
     gTune.feeder[MOTION_SIDE_L].secondaryVelocityPps = gTune.feeder[MOTION_SIDE_L].profileVelocityPps;
 
-  applyLmRampFromJson(json);
+  if (gTune.feeder[MOTION_SIDE_R].profileVelocityPps != prevVelR)
+    feederInvalidatePvConfig(MOTION_SIDE_R);
+  if (gTune.feeder[MOTION_SIDE_L].profileVelocityPps != prevVelL)
+    feederInvalidatePvConfig(MOTION_SIDE_L);
+
+  bool touchLm = strstr(json, "lm_pr_speed_rpm") || strstr(json, "lm_accel_ms") ||
+                 strstr(json, "lm_decel_ms") || strstr(json, "lm_travel_pr_speed_rpm") ||
+                 strstr(json, "lm_travel_accel_ms") || strstr(json, "lm_travel_decel_ms");
+  if (touchLm) {
+    applyLmRampFromJson(json);
+    lmguideInvalidateProfiles();
+  }
   gTune.lmguide.posPuu = (int32_t)jsonReadLong(json, "lm_pos_puu", gTune.lmguide.posPuu);
   gTune.validateEncoder = jsonReadBool(json, "feed_validate_encoder", gTune.validateEncoder);
   gTune.dualSpeedEnable = jsonReadBool(json, "feed_dual_speed_enable", gTune.dualSpeedEnable);
@@ -1556,7 +1689,28 @@ static void handleSerialLine(char* line) {
   }
   if (strstr(line, "\"op\":\"set_tune\"")) {
     applyTuneFromJson(line);
-    Serial.println(F("{\"op\":\"set_tune\",\"ok\":true}"));
+    bool lmOk = lmguideApplyProfiles();
+    bool feedOk = true;
+    if (gRt.feederReady[MOTION_SIDE_R]) {
+      if (!feederApplyPvConfig(MOTION_SIDE_R)) feedOk = false;
+    } else {
+      feederInvalidatePvConfig(MOTION_SIDE_R);
+    }
+    if (gRt.feederReady[MOTION_SIDE_L]) {
+      if (!feederApplyPvConfig(MOTION_SIDE_L)) feedOk = false;
+    } else {
+      feederInvalidatePvConfig(MOTION_SIDE_L);
+    }
+    bool applied = lmOk && feedOk;
+    Serial.print(F("{\"op\":\"set_tune\",\"ok\":"));
+    Serial.print(applied ? "true" : "false");
+    Serial.print(F(",\"applied\":"));
+    Serial.print(applied ? "true" : "false");
+    Serial.print(F(",\"lm_profiles\":"));
+    Serial.print(lmOk ? "true" : "false");
+    Serial.print(F(",\"feeder_pv\":"));
+    Serial.print(feedOk ? "true" : "false");
+    Serial.println(F("}"));
     return;
   }
   if (strstr(line, "\"op\":\"set_data\"")) {
@@ -1770,7 +1924,13 @@ static void handleSerialLine(char* line) {
       applyDataFromJson(line);
       setDataApplied = true;
     }
-    applyLmRampFromJson(line);
+    LmMoveProfile profile = jsonReadLmProfile(line, LM_PROFILE_TRAVEL);
+    // Compat: rampas embebidas sin perfiles aplicados (App antigua).
+    if (!lmguideProfilesApplied() &&
+        (strstr(line, "lm_pr_speed_rpm") || strstr(line, "lm_accel_ms") ||
+         strstr(line, "lm_travel_pr_speed_rpm"))) {
+      applyLmRampFromJson(line);
+    }
     const char* target = "home";
     const char* key = strstr(line, "\"target\"");
     if (key) {
@@ -1784,9 +1944,9 @@ static void handleSerialLine(char* line) {
     long customPuu = jsonReadLong(line, "puu", LONG_MIN);
     bool ok = false;
     if (customPuu != LONG_MIN)
-      ok = lmguideMovePr1((int32_t)customPuu);
+      ok = lmguideMove((int32_t)customPuu, profile);
     else
-      ok = lmguideMoveNamed(target);
+      ok = lmguideMoveNamed(target, profile);
     printLmguideMoveResult(ok, setDataApplied);
     return;
   }
@@ -1836,7 +1996,10 @@ static void handleSerialLine(char* line) {
       Serial.println(F("{\"op\":\"lmguide_jog\",\"ok\":false,\"error\":\"safety\"}"));
       return;
     }
-    applyLmRampFromJson(line);
+    if (!lmguideProfilesApplied() &&
+        (strstr(line, "lm_pr_speed_rpm") || strstr(line, "lm_accel_ms"))) {
+      applyLmRampFromJson(line);
+    }
     bool ok = false;
     if (strstr(line, "\"delta_puu\"")) {
       ok = lmguideJogDelta((int32_t)jsonReadLong(line, "delta_puu", 0));

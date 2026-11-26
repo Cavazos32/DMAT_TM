@@ -96,6 +96,8 @@ static bool* gFeederReady = nullptr;
 static bool* gFeederServoOn = nullptr;
 static MotionYieldFn gFeederYield = nullptr;
 static MotionPollFn gFeederPoll = nullptr;
+/* Perfil PV (modo + 6081/83/84) aplicado al drive; se invalida en OFF/fault/tune. */
+static bool gFeederPvConfigured[MOTION_SIDE_COUNT] = {false, false};
 
 static void feederYield(uint32_t ms) {
   if (gFeederYield) gFeederYield(ms);
@@ -504,10 +506,37 @@ static bool feederWriteProfile(MotionSide side) {
          canSdoDownloadU32(node, SERVO_OD_PROFILE_DECEL, 0, SERVO_CAN_PROFILE_DECEL_PPS2);
 }
 
+static void feederInvalidatePvConfig(MotionSide side) {
+  if (side < MOTION_SIDE_COUNT) gFeederPvConfigured[side] = false;
+}
+
+static void feederInvalidatePvConfigAll() {
+  gFeederPvConfigured[MOTION_SIDE_R] = false;
+  gFeederPvConfigured[MOTION_SIDE_L] = false;
+}
+
+static bool feederPvConfigured(MotionSide side) {
+  return side < MOTION_SIDE_COUNT && gFeederPvConfigured[side];
+}
+
+/* Configuración PV completa: modo + perfil + consigna 0 + Halt. */
+static bool feederApplyPvConfig(MotionSide side) {
+  uint8_t node = feederNode(side);
+  gFeederPvConfigured[side] = false;
+  if (!canSdoDownloadU16(node, SERVO_OD_CONTROL_WORD, 0, 0x010F)) return false;
+  if (!canSdoDownloadU8(node, SERVO_OD_MODE_OF_OPERATION, 0, (uint8_t)SERVO_MODE_PV)) return false;
+  if (!feederWriteProfile(side)) return false;
+  if (!canSdoDownloadU32(node, SERVO_OD_TARGET_VELOCITY, 0, 0)) return false;
+  if (!canSdoDownloadU16(node, SERVO_OD_CONTROL_WORD, 0, 0x010F)) return false;
+  gFeederPvConfigured[side] = true;
+  return true;
+}
+
 static bool feederInitNode(MotionSide side) {
   if (!ensureCanBus() || !gFeederTune || !gFeederReady) return false;
   gFeederReady[side] = false;
   feederMarkServoOn(side, false);
+  feederInvalidatePvConfig(side);
 
   uint8_t node = feederNode(side);
   if (!canSdoDownloadU16(node, SERVO_OD_CONTROL_WORD, 0, 0x0006)) return false;
@@ -659,12 +688,24 @@ static bool feederServoOn(MotionSide side) {
   return true;
 }
 
+/* Si ya está Operation Enabled (flag local), no repetir 6→7→F (~150 ms). */
+static bool feederEnsureServoOn(MotionSide side) {
+  if (!ensureCanBus() || !gFeederReady || !gFeederReady[side]) return false;
+  if (gFeederServoOn && gFeederServoOn[side]) return true;
+  return feederServoOn(side);
+}
+
+static bool feederServoIsOn(MotionSide side) {
+  return gFeederServoOn && side < MOTION_SIDE_COUNT && gFeederServoOn[side];
+}
+
 static bool feederServoOff(MotionSide side) {
   if (!ensureCanBus() || !gFeederReady || !gFeederReady[side]) return false;
   uint8_t node = feederNode(side);
   (void)canSdoDownloadU32(node, SERVO_OD_TARGET_VELOCITY, 0, 0);
   if (!canSdoDownloadU16(node, SERVO_OD_CONTROL_WORD, 0, 0x0006)) return false;
   feederMarkServoOn(side, false);
+  feederInvalidatePvConfig(side);
   return true;
 }
 
@@ -696,13 +737,22 @@ static bool feederJogStep(MotionSide side, int dirSign) {
          canSdoDownloadU16(node, SERVO_OD_CONTROL_WORD, 0, 0x003F);
 }
 
+/* Preparación de ejecución: si el perfil PV sigue válido, solo Halt + 60FF=0. */
 static bool feederPreparePv(MotionSide side) {
   uint8_t node = feederNode(side);
-  if (!canSdoDownloadU16(node, SERVO_OD_CONTROL_WORD, 0, 0x010F)) return false;
-  if (!canSdoDownloadU8(node, SERVO_OD_MODE_OF_OPERATION, 0, (uint8_t)SERVO_MODE_PV)) return false;
-  if (!feederWriteProfile(side)) return false;
-  if (!canSdoDownloadU32(node, SERVO_OD_TARGET_VELOCITY, 0, 0)) return false;
-  return canSdoDownloadU16(node, SERVO_OD_CONTROL_WORD, 0, 0x010F);
+  bool servoOn = gFeederServoOn && gFeederServoOn[side];
+  if (gFeederPvConfigured[side] && servoOn) {
+    if (!canSdoDownloadU16(node, SERVO_OD_CONTROL_WORD, 0, 0x010F)) {
+      feederInvalidatePvConfig(side);
+      return false;
+    }
+    if (!canSdoDownloadU32(node, SERVO_OD_TARGET_VELOCITY, 0, 0)) {
+      feederInvalidatePvConfig(side);
+      return false;
+    }
+    return canSdoDownloadU16(node, SERVO_OD_CONTROL_WORD, 0, 0x010F);
+  }
+  return feederApplyPvConfig(side);
 }
 
 static bool feederSetPvVelocity(MotionSide side, int32_t velocitySigned) {

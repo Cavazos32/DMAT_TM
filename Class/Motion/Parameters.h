@@ -11,11 +11,17 @@
  *   feeder.R/L.profile_velocity_pps, secondary_velocity_pps, target_position_counts
  *   feed_stage.validate_encoder, dual_speed_enable
  *   feeder.R/L.speed_switch_ms (cambio V1→V2 independiente por lado)
- *   lmguide.pr_speed_rpm, accel_ms, decel_ms, pos_puu
+ *   lmguide.pr_speed_rpm, accel_ms, decel_ms (corte / PR1)
+ *   lmguide.travel_pr_speed_rpm, travel_accel_ms, travel_decel_ms (viaje / PR2)
+ *   lmguide.pos_puu
+ *   set_tune serial: lm_pr_* (cut) + lm_travel_* (travel)
  *   set_data: target_length_mm, tolerance_mm, modelo_id, measure_comp_mm
  *
  * FeedStage (PV): velocidad primaria por lado; opcional secundaria tras
  * speed_switch_ms de ese lado si dual_speed_enable. Paro en su láser.
+ *
+ * Config vs ejecución: set_tune aplica perfiles a drives una vez;
+ * lmguide_move / feed_stage en régimen solo ejecutan.
  */
 
 #include <stddef.h>
@@ -133,7 +139,7 @@ static const int      PARAM_PIN_MODBUS_TX         = 17;
 
 static const float    PARAM_LM_PR_SPEED_RPM       = 1200.0f;
 static const float    PARAM_LM_PR_SPEED_RPM_MIN   = 400.0f;
-static const float    PARAM_LM_PR_SPEED_RPM_MAX   = 3000.0f;
+static const float    PARAM_LM_PR_SPEED_RPM_MAX   = 5000.0f;
 static const uint16_t PARAM_LM_ACCEL_MS           = 200;
 static const uint16_t PARAM_LM_DECEL_MS           = 500;
 static const uint16_t PARAM_LM_RAMP_MS_MIN        = 1;
@@ -169,11 +175,17 @@ struct MotionFeederSideTune {
 };
 
 struct MotionLMGuideTune {
-  float prSpeedRpm;
-  uint16_t accelMs;
-  uint16_t decelMs;
+  float prSpeedRpm;       // corte — PR1 / P5.060
+  uint16_t accelMs;       // corte — PR1 / P5.020
+  uint16_t decelMs;       // corte — PR1 / P5.021
+  float travelPrSpeedRpm; // viaje — PR2 / P5.061
+  uint16_t travelAccelMs; // viaje — PR2 / P5.022
+  uint16_t travelDecelMs; // viaje — PR2 / P5.023
   int32_t posPuu;
 };
+
+/* Perfil LM Guide para disparo PR (cut=PR1, travel=PR2). */
+enum LmMoveProfile : uint8_t { LM_PROFILE_CUT = 0, LM_PROFILE_TRAVEL = 1 };
 
 struct MotionTune {
   MotionFeederSideTune feeder[MOTION_SIDE_COUNT];
@@ -203,6 +215,9 @@ static inline void motionTuneSetDefaults(MotionTune* tune) {
   tune->lmguide.prSpeedRpm = PARAM_LM_PR_SPEED_RPM;
   tune->lmguide.accelMs = PARAM_LM_ACCEL_MS;
   tune->lmguide.decelMs = PARAM_LM_DECEL_MS;
+  tune->lmguide.travelPrSpeedRpm = PARAM_LM_PR_SPEED_RPM;
+  tune->lmguide.travelAccelMs = PARAM_LM_ACCEL_MS;
+  tune->lmguide.travelDecelMs = PARAM_LM_DECEL_MS;
   tune->lmguide.posPuu = 0;
   tune->validateEncoder = PARAM_FEED_VALIDATE_ENCODER;
   tune->dualSpeedEnable = PARAM_FEED_DUAL_SPEED_ENABLE;

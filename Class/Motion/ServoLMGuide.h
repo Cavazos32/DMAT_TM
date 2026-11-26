@@ -50,15 +50,23 @@ static const uint16_t ASDA_REG_P5_005 = 0x050A;
 static const uint16_t ASDA_REG_P5_006 = 0x050C;
 static const uint16_t ASDA_REG_P5_007 = 0x050E;
 static const uint16_t ASDA_REG_P5_016 = 0x0520;
-static const uint16_t ASDA_REG_P5_020 = 0x0528;  // Accel/decel time #0
-static const uint16_t ASDA_REG_P5_021 = 0x052A;  // Accel/decel time #1
-static const uint16_t ASDA_REG_P5_060 = 0x0578;
-// PATH1: TYPE=SINGLE(2), ACC=#0 (P5.020), DEC=#1 (P5.021), SPD=#0 (P5.060)
+static const uint16_t ASDA_REG_P5_020 = 0x0528;  // Accel time #0 (cut)
+static const uint16_t ASDA_REG_P5_021 = 0x052A;  // Decel time #1 (cut)
+static const uint16_t ASDA_REG_P5_022 = 0x052C;  // Accel time #2 (travel)
+static const uint16_t ASDA_REG_P5_023 = 0x052E;  // Decel time #3 (travel)
+static const uint16_t ASDA_REG_P5_060 = 0x0578;  // Speed #0 (cut)
+static const uint16_t ASDA_REG_P5_061 = 0x057A;  // Speed #1 (travel)
+// PATH bitfield: AUTO|DLY|SPD|DEC|ACC|OPT|TYPE — TYPE=SINGLE(2)
+// PR1 cut:    ACC=#0 P5.020, DEC=#1 P5.021, SPD=#0 P5.060
 static const uint32_t ASDA_PR1_PATH_DEF = 0x00001002u;
+// PR2 travel: ACC=#2 P5.022, DEC=#3 P5.023, SPD=#1 P5.061
+static const uint32_t ASDA_PR2_PATH_DEF = 0x00013202u;
 static const uint16_t ASDA_REG_P6_000 = 0x0600;
 static const uint16_t ASDA_REG_P6_001 = 0x0602;
-static const uint16_t ASDA_REG_P6_002 = 0x0604;
-static const uint16_t ASDA_REG_P6_003 = 0x0606;
+static const uint16_t ASDA_REG_P6_002 = 0x0604;  // PR1 property
+static const uint16_t ASDA_REG_P6_003 = 0x0606;  // PR1 position
+static const uint16_t ASDA_REG_P6_004 = 0x0608;  // PR2 property
+static const uint16_t ASDA_REG_P6_005 = 0x060A;  // PR2 position
 
 static const uint16_t ASDA_DO_BIT_ZSPD = 0x0004;
 static const uint16_t ASDA_DO_BIT_TPOS = 0x0010;  // P0.046 bit4 — target position reached
@@ -75,6 +83,8 @@ static volatile bool* gLmAbort = nullptr;
 static MotionYieldFn gLmYield = nullptr;
 static MotionPollFn gLmPoll = nullptr;
 static MotionSafetyFn gLmSafety = nullptr;
+static bool gLmProfilesApplied = false;
+static uint16_t gLmModbusWrites = 0;  // contador por movimiento (medición)
 
 static void lmPoll() {
   if (gLmPoll) gLmPoll();
@@ -125,13 +135,17 @@ static bool modbusParseRxOk(const uint8_t* tx, size_t txLen, const uint8_t* rx, 
 
 static bool modbusTxRx(const uint8_t* tx, size_t txLen, uint8_t* rx, size_t* rxLen, size_t rxCap) {
   while (ModbusSerial.available()) ModbusSerial.read();
-  delay(10);
+  // Poll breve: feed async del solape debe tickear entre TX Modbus.
+  lmPoll();
+  delay(5);
+  lmPoll();
   ModbusSerial.write(tx, txLen);
   ModbusSerial.flush();
 
   uint32_t t0 = millis();
   size_t n = 0;
   while (millis() - t0 < 350) {
+    lmPoll();
     while (ModbusSerial.available() && n < rxCap) {
       rx[n++] = (uint8_t)ModbusSerial.read();
     }
@@ -139,7 +153,7 @@ static bool modbusTxRx(const uint8_t* tx, size_t txLen, uint8_t* rx, size_t* rxL
       if (tx[1] == 0x03 && n >= (size_t)(5 + rx[2])) break;
       if ((tx[1] == 0x06 || tx[1] == 0x10) && n >= 8) break;
     }
-    delay(2);
+    delay(1);
   }
   *rxLen = n;
   return modbusParseRxOk(tx, txLen, rx, n);
@@ -158,7 +172,9 @@ static bool modbusWriteReg16(uint16_t addr, uint16_t value) {
   tx[7] = (uint8_t)(crc >> 8);
   uint8_t rx[16];
   size_t rxLen = 0;
-  return modbusTxRx(tx, 8, rx, &rxLen, sizeof(rx));
+  bool ok = modbusTxRx(tx, 8, rx, &rxLen, sizeof(rx));
+  if (ok) gLmModbusWrites++;
+  return ok;
 }
 
 static bool modbusWriteReg32(uint16_t addr, int32_t value) {
@@ -179,7 +195,21 @@ static bool modbusWriteReg32(uint16_t addr, int32_t value) {
   tx[12] = (uint8_t)(crc >> 8);
   uint8_t rx[16];
   size_t rxLen = 0;
-  return modbusTxRx(tx, 13, rx, &rxLen, sizeof(rx));
+  bool ok = modbusTxRx(tx, 13, rx, &rxLen, sizeof(rx));
+  if (ok) gLmModbusWrites++;
+  return ok;
+}
+
+static void lmguideInvalidateProfiles() {
+  gLmProfilesApplied = false;
+}
+
+static bool lmguideProfilesApplied() {
+  return gLmProfilesApplied;
+}
+
+static uint16_t lmguideLastModbusWrites() {
+  return gLmModbusWrites;
 }
 
 static bool modbusReadReg32(uint16_t addr, int32_t* out) {
@@ -246,18 +276,74 @@ static bool lmPositionWithinTol(int32_t posPuu, int32_t targetPuu, float tolMm) 
   return d <= lmTolPuuFromMm(tolMm);
 }
 
-static bool lmguideIssueMovePr1(int32_t targetPuu) {
+/* Escribe perfiles cut (PR1) y travel (PR2) una vez. No escribe posición ni trigger. */
+static bool lmguideApplyProfiles() {
   if (!gLmTune) return false;
-  float rpm = lmClampSpeedRpm(gLmTune->lmguide.prSpeedRpm);
+  float cutRpm = lmClampSpeedRpm(gLmTune->lmguide.prSpeedRpm);
+  float travelRpm = lmClampSpeedRpm(gLmTune->lmguide.travelPrSpeedRpm);
+  uint16_t cutAccel = lmClampRampMs((long)gLmTune->lmguide.accelMs);
+  uint16_t cutDecel = lmClampRampMs((long)gLmTune->lmguide.decelMs);
+  uint16_t travelAccel = lmClampRampMs((long)gLmTune->lmguide.travelAccelMs);
+  uint16_t travelDecel = lmClampRampMs((long)gLmTune->lmguide.travelDecelMs);
+  int32_t cutSpeed01 = (int32_t)(cutRpm * 10.0f);
+  int32_t travelSpeed01 = (int32_t)(travelRpm * 10.0f);
+
+  gLmProfilesApplied = false;
+  if (!modbusWriteReg16(ASDA_REG_P5_020, cutAccel)) return false;
+  if (!modbusWriteReg16(ASDA_REG_P5_021, cutDecel)) return false;
+  if (!modbusWriteReg32(ASDA_REG_P5_060, cutSpeed01)) return false;
+  if (!modbusWriteReg32(ASDA_REG_P6_002, (int32_t)ASDA_PR1_PATH_DEF)) return false;
+
+  if (!modbusWriteReg16(ASDA_REG_P5_022, travelAccel)) return false;
+  if (!modbusWriteReg16(ASDA_REG_P5_023, travelDecel)) return false;
+  if (!modbusWriteReg32(ASDA_REG_P5_061, travelSpeed01)) return false;
+  if (!modbusWriteReg32(ASDA_REG_P6_004, (int32_t)ASDA_PR2_PATH_DEF)) return false;
+
+  gLmProfilesApplied = true;
+  return true;
+}
+
+/* Emite movimiento. Con perfiles aplicados: solo posición + trigger (2 escrituras). */
+static bool lmguideIssueMove(int32_t targetPuu, LmMoveProfile profile) {
+  if (!gLmTune) return false;
+  const bool cut = (profile == LM_PROFILE_CUT);
+
+  if (gLmProfilesApplied) {
+    uint16_t posReg = cut ? ASDA_REG_P6_003 : ASDA_REG_P6_005;
+    uint16_t trigger = cut ? 1u : 2u;
+    if (!modbusWriteReg32(posReg, targetPuu)) {
+      gLmProfilesApplied = false;
+      return false;
+    }
+    if (!modbusWriteReg16(ASDA_REG_P5_007, trigger)) {
+      gLmProfilesApplied = false;
+      return false;
+    }
+    return true;
+  }
+
+  // Fallback legacy: reescribe rampas del path pedido (App antigua / config inválida).
+  float rpm = lmClampSpeedRpm(cut ? gLmTune->lmguide.prSpeedRpm
+                                  : gLmTune->lmguide.travelPrSpeedRpm);
+  uint16_t accelMs = lmClampRampMs(
+      (long)(cut ? gLmTune->lmguide.accelMs : gLmTune->lmguide.travelAccelMs));
+  uint16_t decelMs = lmClampRampMs(
+      (long)(cut ? gLmTune->lmguide.decelMs : gLmTune->lmguide.travelDecelMs));
   int32_t speed01 = (int32_t)(rpm * 10.0f);
-  uint16_t accelMs = lmClampRampMs((long)gLmTune->lmguide.accelMs);
-  uint16_t decelMs = lmClampRampMs((long)gLmTune->lmguide.decelMs);
-  if (!modbusWriteReg16(ASDA_REG_P5_020, accelMs)) return false;
-  if (!modbusWriteReg16(ASDA_REG_P5_021, decelMs)) return false;
-  if (!modbusWriteReg32(ASDA_REG_P5_060, speed01)) return false;
-  if (!modbusWriteReg32(ASDA_REG_P6_002, ASDA_PR1_PATH_DEF)) return false;
-  if (!modbusWriteReg32(ASDA_REG_P6_003, targetPuu)) return false;
-  return modbusWriteReg16(ASDA_REG_P5_007, 1);
+  if (cut) {
+    if (!modbusWriteReg16(ASDA_REG_P5_020, accelMs)) return false;
+    if (!modbusWriteReg16(ASDA_REG_P5_021, decelMs)) return false;
+    if (!modbusWriteReg32(ASDA_REG_P5_060, speed01)) return false;
+    if (!modbusWriteReg32(ASDA_REG_P6_002, (int32_t)ASDA_PR1_PATH_DEF)) return false;
+    if (!modbusWriteReg32(ASDA_REG_P6_003, targetPuu)) return false;
+    return modbusWriteReg16(ASDA_REG_P5_007, 1);
+  }
+  if (!modbusWriteReg16(ASDA_REG_P5_022, accelMs)) return false;
+  if (!modbusWriteReg16(ASDA_REG_P5_023, decelMs)) return false;
+  if (!modbusWriteReg32(ASDA_REG_P5_061, speed01)) return false;
+  if (!modbusWriteReg32(ASDA_REG_P6_004, (int32_t)ASDA_PR2_PATH_DEF)) return false;
+  if (!modbusWriteReg32(ASDA_REG_P6_005, targetPuu)) return false;
+  return modbusWriteReg16(ASDA_REG_P5_007, 2);
 }
 
 // Espera DO.TPOS (P0.046). Más rápido que ZSPD + P5.016 en cada vuelta:
@@ -277,26 +363,38 @@ static bool lmguideWaitForTarget(int32_t targetPuu, float tolMm, uint32_t timeou
     if (!modbusReadReg16(ASDA_REG_P0_046, &dwo)) return false;
     if ((dwo & ASDA_DO_BIT_TPOS) == 0) {
       sawLeave = true;
-      delay(5);
+      // 1 ms + lmPoll: el feed async del solape debe tickear (láser/V2);
+      // delay(5) seguido dejaba el alimentador en V1 y se pasaba el flanco.
+      for (uint8_t s = 0; s < 5; s++) {
+        lmPoll();
+        delay(1);
+      }
       continue;
     }
     int32_t pos = 0;
     if (!modbusReadReg32(ASDA_REG_P5_016, &pos)) return false;
     if (!lmPositionWithinTol(pos, targetPuu, tolMm)) {
-      delay(5);
+      for (uint8_t s = 0; s < 5; s++) {
+        lmPoll();
+        delay(1);
+      }
       continue;
     }
     if (!haveStart || startPuu == targetPuu || sawLeave || pos != startPuu) {
       return true;
     }
-    delay(5);
+    for (uint8_t s = 0; s < 5; s++) {
+      lmPoll();
+      delay(1);
+    }
   }
   return false;
 }
 
-static bool lmguideMovePr1(int32_t targetPuu) {
+static bool lmguideMove(int32_t targetPuu, LmMoveProfile profile) {
   if (!gLmRt || !gLmAbort) return false;
   *gLmAbort = false;
+  gLmModbusWrites = 0;
   if (targetPuu != 0) gLmRt->lmguideHomed = false;
   // No saltar el comando por la tol de llegada (0.5 mm): un 2º corte dual con
   // offset 0.3–0.7 mm debe moverse. Solo omitir si ya está en el PUU pedido.
@@ -308,7 +406,7 @@ static bool lmguideMovePr1(int32_t targetPuu) {
       if (targetPuu == 0) gLmRt->lmguideHomed = true;
       return true;
     }
-    if (!lmguideIssueMovePr1(targetPuu)) return false;
+    if (!lmguideIssueMove(targetPuu, profile)) return false;
     if (lmguideWaitForTarget(targetPuu, PARAM_LM_MOVE_TOLERANCE_MM,
                              PARAM_LM_MOVE_DONE_TIMEOUT_MS, startPuu, haveStart)) {
       gLmRt->lmguideServoOn = true;
@@ -316,6 +414,7 @@ static bool lmguideMovePr1(int32_t targetPuu) {
       return true;
     }
     if (lmAbortRequested()) return false;
+    lmguideInvalidateProfiles();
     (void)modbusWriteReg16(ASDA_REG_P5_007, 1000);
     delay(80);
     uint32_t tw = millis();
@@ -327,6 +426,11 @@ static bool lmguideMovePr1(int32_t targetPuu) {
     }
   }
   return false;
+}
+
+/* Compat: movimiento con perfil de viaje (home / descarga / jog). */
+static bool lmguideMovePr1(int32_t targetPuu) {
+  return lmguideMove(targetPuu, LM_PROFILE_TRAVEL);
 }
 
 static bool lmguideServoOn() {
@@ -344,6 +448,7 @@ static bool lmguideServoOff() {
   if (!modbusWriteReg16(ASDA_REG_P2_030, 0)) return false;
   gLmRt->lmguideServoOn = false;
   gLmRt->lmguideHomed = false;
+  lmguideInvalidateProfiles();
   return true;
 }
 
@@ -357,7 +462,7 @@ static bool lmguideJog(int dir) {
   int32_t pos = 0;
   if (!modbusReadReg32(ASDA_REG_P5_016, &pos)) return false;
   int32_t target = pos + dir * ASDA_JOG_DELTA_PUU;
-  bool ok = lmguideMovePr1(target);
+  bool ok = lmguideMove(target, LM_PROFILE_TRAVEL);
   if (ok) gLmRt->lmguideHomed = false;
   return ok;
 }
@@ -366,7 +471,7 @@ static bool lmguideJogDelta(int32_t deltaPuu) {
   if (!gLmRt || !gLmRt->lmguideHomed) return false;
   int32_t pos = 0;
   if (!modbusReadReg32(ASDA_REG_P5_016, &pos)) return false;
-  bool ok = lmguideMovePr1(pos + deltaPuu);
+  bool ok = lmguideMove(pos + deltaPuu, LM_PROFILE_TRAVEL);
   if (ok) gLmRt->lmguideHomed = false;
   return ok;
 }

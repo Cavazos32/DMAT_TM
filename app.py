@@ -63,7 +63,7 @@ LMGUIDE_STEPS_PER_MM = (770.0 / 45.0) * (550.0 / 548.0) # ServoLMGuide.h: fábri
 LMGUIDE_PUU_SIGN = -1 # El sentido de trabajo es PUU negativo.
 LMGUIDE_MM_RES = 0.01
 LMGUIDE_PR_RPM_MIN = 400.0
-LMGUIDE_PR_RPM_MAX = 3000.0
+LMGUIDE_PR_RPM_MAX = 5000.0
 LMGUIDE_TRAVEL_RPM = 3000.0
 LMGUIDE_TRAVEL_ACCEL_MS = 100
 LMGUIDE_TRAVEL_DECEL_MS = 100
@@ -232,6 +232,7 @@ _OVERLAP = {
     "feed_done": False,
     "holder_error": "",
     "holder_ready": threading.Event(),
+    "feed_after_t": 0.0,  # perf_counter: no disparar feed_stage antes (ms_before_overlap_feed)
     "feed": None,
     "blower_mm": None,
     "t0": None,
@@ -241,9 +242,10 @@ _OVERLAP = {
     "feed_t0": None,
     "sides": "",  # lados del ciclo solapado (catch-up puede diferir del actual)
 }
+_OVERLAP_FEED_LOCK = threading.Lock()
 _STEP4_CLOSES = False
 # Experimental: Suelto tras pinzas y ON otra vez antes de la descarga. False = servo siempre ON.
-CYCLE_FEEDER_SOFT_AFTER_GRIP = True
+CYCLE_FEEDER_SOFT_AFTER_GRIP = False
 
 _FEED_PRIME = {
     "ready": False,
@@ -268,6 +270,7 @@ _PROD_CADENCE_SAMPLES: list[float] = []
 _PROD_LOG_LOCK = threading.Lock()
 _PROD_CTX = {"piece": 1, "step_id": "1", "t0": 0.0}
 _PROD_STEP_DESC = {
+    "0": "Sync config Motion→drives",
     "1": "Configuración inicial",
     "2": "Holder + encoder",
     "3": "Alimentación L/R",
@@ -276,6 +279,8 @@ _PROD_STEP_DESC = {
     "6": "Corte R/L",
     "7": "Descarga de pieza",
     "8": "ReleasePart home + blower",
+    "SRV": "ServoCAN habilitación",
+    "SYNC": "Espera sync ReleasePart∩Feed",
 }
 def _lot_cycle_sides_now() -> str:
     """Lados efectivos del ciclo actual (catch-up puede ser R o L solo)."""
@@ -727,6 +732,8 @@ _DEFAULT_CYCLE_PARAMS = {
     "ms_cutter_on": 50,
     "ms_after_cutter": 100,
     "ms_after_grip_release": 50,
+    # Tras holder listo en solape: espera antes de mandar feed_stage / V1.
+    "ms_before_overlap_feed": 50,
     "ms_blower_delay": 200,
     "ms_at_home_end": 50,
     "tolerance_mm": 2.0,
@@ -1063,13 +1070,42 @@ _MOTION_DATA = {
     "measure_comp_mm": 0.0,
 }
 
+# Config Motion aplicada a drives (set_tune/set_data). Régimen: órdenes slim.
+_MOTION_CFG = {
+    "ok": False,  # perfiles LM + PV confirmados por set_tune.applied
+    "tune_fp": "",
+    "data_fp": "",  # último set_data publicado
+    "last_sync_s": 0.0,
+}
+
+
+def _motion_data_fingerprint(data: dict | None = None) -> str:
+    d = data if isinstance(data, dict) else _MOTION_DATA
+    return (
+        f"{d.get('modelo_id') or ''}|"
+        f"{float(d.get('target_length_mm') or 0):.4f}|"
+        f"{float(d.get('tolerance_mm') or 2):.4f}|"
+        f"{float(d.get('measure_comp_mm') or 0):.4f}"
+    )
+
+
+def _motion_tune_fingerprint(tune: dict | None = None) -> str:
+    t = _canonical_motion_tune(tune or _load_motion_tune())
+    return _compact(_motion_tune_flat(t))
+
+
+def _motion_cfg_invalidate(reason: str = "") -> None:
+    _MOTION_CFG["ok"] = False
+    if reason:
+        _push_event(f"Config Motion inválida: {reason}.", "warn")
+
+
+def _lm_profile_name(*, for_cut: bool = False) -> str:
+    return "cut" if for_cut else "travel"
+
 
 def _lm_cmd_fields(tune: dict | None = None, *, for_cut: bool = False) -> dict:
-    """Campos LM Guide embebidos en cada orden de movimiento / set_tune.
-
-    for_cut=True: RPM/accel/decel de corte (Motion.json) — jalar / posición de corte.
-    for_cut=False: RPM/accel/decel de movimientos comunes (home, descarga, jog, etc.).
-    """
+    """Rampas LM embebidas (compat / sync). Ciclo slim usa profile cut|travel."""
     lm = _canonical_motion_tune(tune or {})["lmguide"]
     if for_cut:
         return {
@@ -1082,6 +1118,14 @@ def _lm_cmd_fields(tune: dict | None = None, *, for_cut: bool = False) -> dict:
         "lm_accel_ms": lm["travel_accel_ms"],
         "lm_decel_ms": lm["travel_decel_ms"],
     }
+
+
+def _lm_move_exec_fields(tune: dict | None = None, *, for_cut: bool = False) -> dict:
+    """Campos de ejecución LM: profile si config OK; rampas si no."""
+    fields = {"profile": _lm_profile_name(for_cut=for_cut)}
+    if not _MOTION_CFG.get("ok"):
+        fields.update(_lm_cmd_fields(tune, for_cut=for_cut))
+    return fields
 
 
 def _motion_tune_flat(tune: dict) -> dict:
@@ -1102,8 +1146,14 @@ def _motion_tune_flat(tune: dict) -> dict:
         "feed_dual_speed_enable": fs["dual_speed_enable"],
         "feed_r_speed_switch_ms": feed["R"]["speed_switch_ms"],
         "feed_l_speed_switch_ms": feed["L"]["speed_switch_ms"],
+        # Corte (PR1) + viaje (PR2) en el mismo set_tune.
+        "lm_pr_speed_rpm": lm["pr_speed_rpm"],
+        "lm_accel_ms": lm["accel_ms"],
+        "lm_decel_ms": lm["decel_ms"],
+        "lm_travel_pr_speed_rpm": lm["travel_pr_speed_rpm"],
+        "lm_travel_accel_ms": lm["travel_accel_ms"],
+        "lm_travel_decel_ms": lm["travel_decel_ms"],
     }
-    flat.update(_lm_cmd_fields(tune, for_cut=True))
     return flat
 
 
@@ -1664,7 +1714,9 @@ def _build_motion_lines(op: str, tune: dict, body: dict):
     if op == "lmguide_move_home":
         payload = {"op": "lmguide_move", "target": "home"}
         payload.update(
-            _lm_cmd_fields(tune, for_cut=_parse_bool(body.get("for_cut"), False))
+            _lm_move_exec_fields(
+                tune, for_cut=_parse_bool(body.get("for_cut"), False)
+            )
         )
         return tune, [_compact(payload)]
     if op == "lmguide_move":
@@ -1673,9 +1725,11 @@ def _build_motion_lines(op: str, tune: dict, body: dict):
         puu = _mm_to_puu(body.get("mm"), tune)
         tune["lmguide"]["pos_puu"] = puu
         payload = {"op": "lmguide_move", "puu": puu}
-        # Manual: for_cut elige perfil de corte o movimientos comunes.
+        # Manual: for_cut elige cut (PR1) o travel (PR2).
         payload.update(
-            _lm_cmd_fields(tune, for_cut=_parse_bool(body.get("for_cut"), False))
+            _lm_move_exec_fields(
+                tune, for_cut=_parse_bool(body.get("for_cut"), False)
+            )
         )
         return tune, [_compact(payload)]
     if op == "lmguide_jog":
@@ -1687,7 +1741,7 @@ def _build_motion_lines(op: str, tune: dict, body: dict):
         direction = 1 if int(body.get("dir") or 1) >= 0 else -1
         delta = _mm_to_puu(direction * abs(jog_mm), tune)
         payload = {"op": "lmguide_jog", "delta_puu": delta}
-        payload.update(_lm_cmd_fields(tune, for_cut=False))
+        payload.update(_lm_move_exec_fields(tune, for_cut=False))
         return tune, [_compact(payload)]
     if op == "lmguide_stop":
         return tune, ['{"op":"lmguide_stop"}']
@@ -1721,8 +1775,9 @@ def _build_motion_lines(op: str, tune: dict, body: dict):
         }
         return tune, [_compact(payload)]
     if op == "release_part":
-        payload = {"op": "release_part"}
-        payload.update(_lm_cmd_fields(tune, for_cut=False))
+        payload = {"op": "release_part", "profile": "travel"}
+        if not _MOTION_CFG.get("ok"):
+            payload.update(_lm_cmd_fields(tune, for_cut=False))
         if body.get("clear_puu") is not None:
             payload["clear_puu"] = int(body["clear_puu"])
         for key in ("blower_delay_ms", "blower_ms", "home_settle_ms"):
@@ -1852,6 +1907,9 @@ def _close_motion_serial() -> None:
             except Exception:
                 pass
             _motion_serial = None
+    _MOTION_CFG["ok"] = False
+    _MOTION_CFG["tune_fp"] = ""
+    _MOTION_CFG["data_fp"] = ""
 
 
 def _plc_mirror_invalidate() -> None:
@@ -2272,22 +2330,10 @@ def _read_lines_until_op(
             seen.add(op)
             if on_line is not None:
                 on_line(msg)
-        if want_op not in seen:
-            return False
-        # La descarga sigue al llegar el LM. El feed async se recoge después.
-        # ReleasePart espera feed_stage si el solape ya mandó feed (aunque
-        # inject sea None porque el feed salió en la descarga).
-        # REVERTIR: exigir también inject is not None (feed solo si se inyecta
-        # en esta misma orden).
-        overlap_feed_pending = (
-            want_op == "release_part"
-            and _OVERLAP.get("on")
-            and _OVERLAP.get("feed_sent")
-            and not _OVERLAP.get("feed_done")
-            and not _OVERLAP.get("feed_error")
-            and "feed_stage" not in seen
-        )
-        return not overlap_feed_pending
+        # ReleasePart / lmguide_move terminan por su propio ack.
+        # feed_stage del solape se recoge por on_line/poll; no bloquear el
+        # bloque principal (sync solo antes del STEP 04).
+        return want_op in seen
 
     while time.time() < deadline and len(out) < max_lines:
         if _cycle_should_abort():
@@ -3469,7 +3515,10 @@ def _joint_enter_purga_after_cut() -> None:
 
 def _feed_clean_side(side: str | None):
     """FeedStage clean 3 s; side R/L o ambos si None/RL."""
-    payload = _feed_stage_payload(side if side in ("R", "L") else None)
+    payload = _feed_stage_payload(
+        side if side in ("R", "L") else None,
+        with_tune=not bool(_MOTION_CFG.get("ok")),
+    )
     payload["mode"] = "clean"
     payload["timeout_ms"] = PURGE_CLEAN_MS
     sent = _cycle_motion_send(payload, timeout_s=8.0)
@@ -4583,6 +4632,87 @@ def _send_motion_serial(
     return {"sent": True, "reason": "", "replies": replies}
 
 
+def _send_motion_fire(lines, peek_s: float = 0.25, on_line=None, *, nonblocking: bool = False):
+    """Escribe órdenes y asoma respuestas inmediatas; no espera ops largas (feed async)."""
+    port = _serial_port("motion")
+    if not port:
+        return {
+            "sent": False,
+            "reason": "Sin puerto de Motion. Elígelo en Parámetros, pestaña Conexión.",
+            "replies": [],
+        }
+    try:
+        import serial
+    except ImportError:
+        return {
+            "sent": False,
+            "reason": "Falta pyserial para abrir el puerto.",
+            "replies": [],
+        }
+    replies: list[str] = []
+    global _motion_serial
+    acquired = _serial_lock.acquire(blocking=not nonblocking)
+    if not acquired:
+        return {"sent": False, "reason": "Motion ocupado.", "replies": [], "busy": True}
+    try:
+        if (
+            _motion_serial is None
+            or not _motion_serial.is_open
+            or getattr(_motion_serial, "port", None) != port
+        ):
+            if _motion_serial is not None:
+                try:
+                    _motion_serial.close()
+                except Exception:
+                    pass
+            ser = serial.Serial()
+            ser.port = port
+            ser.baudrate = int(os.environ.get("MOTION_SERIAL_BAUD", "115200"))
+            ser.timeout = 0.05
+            ser.write_timeout = 2
+            ser.dtr = False
+            ser.rts = False
+            ser.open()
+            time.sleep(0.05)
+            _serial_rx_flush(ser)
+            _motion_serial = ser
+        ser = _motion_serial
+        for line in lines:
+            print(f"[Motion TX] {line}", flush=True)
+            with _motion_write_lock:
+                ser.write((line + "\n").encode("ascii", "replace"))
+                ser.flush()
+            _push_event(f"[Motion] {line}")
+        deadline = time.time() + max(0.05, float(peek_s))
+        carry = bytearray()
+        while time.time() < deadline:
+            rem = deadline - time.time()
+            if rem <= 0:
+                break
+            line = _read_serial_line(ser, min(0.05, rem), carry)
+            if not line:
+                time.sleep(0.01)
+                continue
+            replies.append(line)
+            print(f"[Motion RX] {line}", flush=True)
+            if on_line is not None:
+                try:
+                    on_line(json.loads(line))
+                except (TypeError, json.JSONDecodeError):
+                    pass
+    except Exception as exc:
+        try:
+            _invalidate_serial_handle(_motion_serial)
+        except Exception:
+            pass
+        _motion_serial = None
+        return {"sent": False, "reason": str(exc), "replies": replies}
+    finally:
+        if _serial_lock.locked():
+            _serial_lock.release()
+    return {"sent": True, "reason": "", "replies": replies}
+
+
 def _send_motion_urgent(lines):
     """Escribe paros sin esperar el lock ocupado por una orden larga."""
     global _motion_serial
@@ -4689,6 +4819,9 @@ def _apply_modelo_selection(modelo_id: str, longitud_mm=None, desc: str | None =
         _MACHINE_STATE["longitud_modelo_mm"] = length
         _MOTION_DATA["modelo_id"] = entry["modelo"]
         _MOTION_DATA["target_length_mm"] = length
+        # Fuerza set_data en el próximo sync / solape (fingerprint distinto).
+        if _MOTION_CFG.get("data_fp") != _motion_data_fingerprint():
+            _MOTION_CFG["data_fp"] = ""
         return True, ""
 
     if not mid and length is None:
@@ -4697,6 +4830,7 @@ def _apply_modelo_selection(modelo_id: str, longitud_mm=None, desc: str | None =
         _MACHINE_STATE["longitud_modelo_mm"] = None
         _MOTION_DATA["modelo_id"] = ""
         _MOTION_DATA["target_length_mm"] = None
+        _MOTION_CFG["data_fp"] = ""
         return True, ""
 
     if length is None:
@@ -4707,6 +4841,8 @@ def _apply_modelo_selection(modelo_id: str, longitud_mm=None, desc: str | None =
     _MACHINE_STATE["longitud_modelo_mm"] = length
     _MOTION_DATA["modelo_id"] = mid or f"L{length:g}"
     _MOTION_DATA["target_length_mm"] = length
+    if _MOTION_CFG.get("data_fp") != _motion_data_fingerprint():
+        _MOTION_CFG["data_fp"] = ""
     return True, ""
 
 
@@ -5774,13 +5910,61 @@ def _encoder_counts_from_msg(msg: dict | None) -> dict:
     return out
 
 
+def _cycle_sync_motion_config(*, reason: str = "sync") -> bool:
+    """Publica set_tune (cut+travel+feed) y aplica a drives. Start/Resume/Kanban."""
+    t0 = time.perf_counter()
+    tune = _load_motion_tune()
+    flat = _motion_tune_flat(tune)
+    sent = _cycle_motion_send(flat, timeout_s=4.0)
+    dt = time.perf_counter() - t0
+    _MOTION_CFG["last_sync_s"] = dt
+    if not sent.get("sent"):
+        _MOTION_CFG["ok"] = False
+        _cycle_fail(sent.get("code") or "E043")
+        return False
+    msg = _motion_reply_op(sent, "set_tune")
+    applied = bool(msg and (msg.get("applied") is True or msg.get("ok") is True))
+    # Firmware nuevo exige applied; legado solo ok.
+    if msg and "applied" in msg:
+        applied = bool(msg.get("applied"))
+    _MOTION_CFG["ok"] = applied
+    _MOTION_CFG["tune_fp"] = _motion_tune_fingerprint(tune)
+    _prod_log_op(
+        "0",
+        dt,
+        status="OK" if applied else "ERROR",
+        detail=f"cfg_sync:{reason}|applied={applied}",
+    )
+    if not applied:
+        _push_event(f"set_tune no aplicado ({reason}).", "error")
+        _cycle_fail("E043", mensaje="Config Motion no aplicada a los drives.")
+        return False
+    _push_event(f"Config Motion sincronizada ({reason}, {dt:.3f} s).")
+    return True
+
+
+def _cycle_push_set_data_if_needed(*, force: bool = False) -> bool:
+    """Envía set_data solo si cambió (o force). Actualiza fingerprint."""
+    fp = _motion_data_fingerprint()
+    if not force and fp == _MOTION_CFG.get("data_fp") and _MOTION_CFG.get("data_fp"):
+        return True
+    sent = _cycle_motion_send(_motion_data_flat(_MOTION_DATA), timeout_s=2.0)
+    if not _motion_cmd_serial_ok(sent, "E043"):
+        return False
+    if not _motion_cmd_ok(sent, "set_data"):
+        _cycle_fail("E043")
+        return False
+    _MOTION_CFG["data_fp"] = fp
+    return True
+
+
 def _cycle_move_lm_send(
     mm: float, inject=None, on_line=None, *, for_cut: bool = False
 ) -> dict:
     tune = _load_motion_tune()
     puu = _mm_to_puu(mm)
     payload = {"op": "lmguide_move", "puu": puu}
-    payload.update(_lm_cmd_fields(tune, for_cut=for_cut))
+    payload.update(_lm_move_exec_fields(tune, for_cut=for_cut))
     return _cycle_motion_send(
         payload,
         timeout_s=_MOTION_LM_MOVE_TIMEOUT_S,
@@ -5806,7 +5990,7 @@ def _cycle_lm_home_absolute(*, with_set_data: bool = False) -> bool:
     global _CYCLE_SET_DATA_ON_HOME
     tune = _load_motion_tune()
     payload = {"op": "lmguide_move", "target": "home"}
-    payload.update(_lm_cmd_fields(tune, for_cut=False))
+    payload.update(_lm_move_exec_fields(tune, for_cut=False))
     if with_set_data:
         flat = _motion_data_flat(_MOTION_DATA)
         payload["target_length_mm"] = flat.get("target_length_mm")
@@ -5819,6 +6003,8 @@ def _cycle_lm_home_absolute(*, with_set_data: bool = False) -> bool:
     if with_set_data:
         msg = _motion_reply_op(sent, "lmguide_move")
         _CYCLE_SET_DATA_ON_HOME = bool(msg and msg.get("set_data") is True)
+        if _CYCLE_SET_DATA_ON_HOME:
+            _MOTION_CFG["data_fp"] = _motion_data_fingerprint()
         if not _CYCLE_SET_DATA_ON_HOME:
             # Firmware antiguo sin set_data embebido: el paso 1 lo reenvía.
             _CYCLE_SET_DATA_ON_HOME = False
@@ -6031,15 +6217,14 @@ def _cycle_run_step(step_id: str, params: dict) -> bool:
         if _CYCLE_SET_DATA_ON_HOME:
             _CYCLE_SET_DATA_ON_HOME = False
             return True
-        flat = _motion_data_flat(_MOTION_DATA)
-        return _motion_cmd_serial_ok(_cycle_motion_send(flat, timeout_s=2.0), "E043")
+        return _cycle_push_set_data_if_needed(force=True)
 
     # Step 2. Cerrar holder+encoder para alimentar (siempre ambos ON).
     # FeedStage (paso 3) marca set0 al iniciar: no hace falta encoder_set0 aquí.
     if step_id == "2":
         return _cycle_close_holder_encoder_for_feed(params, mark_latch=True)
 
-    # Step 3. Alimentar (tune + FeedStage en una sola orden). CAPTURA A en la reply.
+    # Step 3. Alimentar. CAPTURA A en la reply. Tune solo si config inválida.
     if step_id == "3":
         sides = _run_sides()
         if not sides:
@@ -6050,7 +6235,10 @@ def _cycle_run_step(step_id: str, params: dict) -> bool:
                 en_curso=bool(_LOT.get("active")),
             )
             return False
-        payload = _feed_stage_payload(sides if sides in ("R", "L") else None)
+        payload = _feed_stage_payload(
+            sides if sides in ("R", "L") else None,
+            with_tune=not bool(_MOTION_CFG.get("ok")),
+        )
         side_name = {"R": "derecho", "L": "izquierdo", "LR": "L y R"}.get(sides, sides)
         _set_machine_ui(mensaje=_cycle_piece_prefix() + f"Alimentación {side_name}.")
         sent = _cycle_motion_send(payload, timeout_s=_MOTION_FEED_TIMEOUT_S)
@@ -6149,6 +6337,12 @@ def _cycle_run_step(step_id: str, params: dict) -> bool:
         move_sent = _cycle_move_lm_send(cut_mm, for_cut=True)
         if not _motion_cmd_serial_ok(move_sent, "E043"):
             return False
+        mv = _motion_reply_op(move_sent, "lmguide_move") or {}
+        if "modbus_writes" in mv:
+            _prod_write(
+                f"{_prod_qty_tag()} | {_prod_rl_tag(preview=True)} | "
+                f"STEP 05 | LM cut | MODBUS_WRITES={int(mv.get('modbus_writes') or 0)}"
+            )
         if not _cycle_sleep_ms(int(params["ms_lm_at_cut"])):
             return False
         global _PIECE_ENC_AT_LM
@@ -6187,10 +6381,9 @@ def _cycle_run_step(step_id: str, params: dict) -> bool:
             return True
 
         def finish_after_cutters_off(*, pulsed: bool) -> bool:
-            """El paralelo de la siguiente pieza arranca con los cortadores ya apagados.
+            """Tras cortadores OFF: arma el bloque paralelo de la siguiente pieza.
 
-            REVERTIR: no armar aquí. El solape arrancaba al confirmar pinzas
-            abiertas en el depósito (paso 7) y el feed solo iba con ReleasePart.
+            No espera STEP 07/08. Con compensaciones R/L, se llama tras el último corte.
             """
             if (
                 _next_piece_follows()
@@ -6207,7 +6400,14 @@ def _cycle_run_step(step_id: str, params: dict) -> bool:
                     return False
             if not pulsed:
                 return True
-            return _cycle_sleep_ms(int(params["ms_after_cutter"]))
+            # Durante la espera post-corte el holder puede listo → intentar feed.
+            deadline = time.time() + (max(0, int(params["ms_after_cutter"])) / 1000.0)
+            while time.time() < deadline:
+                if _cycle_wait_if_paused():
+                    return False
+                _overlap_try_start_feed()
+                time.sleep(0.02)
+            return not _cycle_should_abort()
 
         first_valve = _joint_valve_allowed(str(plan["first_valve"]))
         if first_valve:
@@ -6238,8 +6438,22 @@ def _cycle_run_step(step_id: str, params: dict) -> bool:
                 f"LM Guide a corte 2/{plan['second_label']}: {second_mm:.2f} mm "
                 f"(comp R {plan['comp_r_mm']:+.2f} / L {plan['comp_l_mm']:+.2f})."
             )
-            if not _cycle_move_lm_mm(second_mm, for_cut=True):
+            t_comp = time.perf_counter()
+            sent_comp = _cycle_move_lm_send(second_mm, for_cut=True)
+            if not _motion_cmd_serial_ok(sent_comp, "E043"):
                 return False
+            _prod_log_op(
+                "6",
+                time.perf_counter() - t_comp,
+                detail="second_cut_move",
+            )
+            mv2 = _motion_reply_op(sent_comp, "lmguide_move") or {}
+            if "modbus_writes" in mv2:
+                _prod_write(
+                    f"{_prod_qty_tag()} | {_prod_rl_tag(preview=True)} | "
+                    f"STEP 06 | LM cut2 | MODBUS_WRITES="
+                    f"{int(mv2.get('modbus_writes') or 0)}"
+                )
             if not _cycle_sleep_ms(int(params["ms_lm_at_cut"])):
                 return False
         elif second_valve:
@@ -6260,9 +6474,7 @@ def _cycle_run_step(step_id: str, params: dict) -> bool:
             return False
         return finish_after_cutters_off(pulsed=True)
 
-    # Step 7. Depósito + soltar pinzas.
-    # Feed del solape: solo en paso 8 (ReleasePart). Aquí el láser aún ve la
-    # pieza cortada (ON) y el flanco edge no arma → V2 lento o cuelgue.
+    # Step 7. Depósito + soltar pinzas (en paralelo con alimentación N+1).
     if step_id == "7":
         # Warning antes de corte: retener pinzas y LM en posición de corte.
         # False detiene la pieza aquí (sin descarga/home ni crédito automático).
@@ -6282,26 +6494,7 @@ def _cycle_run_step(step_id: str, params: dict) -> bool:
             _push_event(travel_err, "error")
             return False
         _push_event(f"Depósito montón {stack}: {disc_mm:.2f} mm.")
-        # Gripper OFF espera llegada al montón (lmguide_move ok + settle).
-        # Descarga: viaje 3000 rpm (perfil de corte solo en paso 5/6).
-        # Feed del solape NO va aquí: con edge el láser sigue ON por la pieza
-        # cortada → flanco imposible / V2 a 5 rpm / cuelgue. Va en ReleasePart
-        # (pinzas ya abiertas, láser puede hacer OFF→ON).
-        if not _cycle_move_lm_mm(disc_mm, for_cut=False):
-            return False
-        if not _cycle_sleep_ms(int(params["ms_lm_at_discharge"])):
-            return False
-        # Error en el tramo con pieza sujeta: no abrir pinzas (retención).
-        if _cycle_should_abort():
-            return False
-        # Abrir pinzas + conteo UI en paralelo; no esperar settle/ack para el paso 8.
-        if not _cycle_gripper_off_overlap_wait(params):
-            return False
-        _gripper_holding_set(False)
-        # Cadencia = mando de abrir + conteo local (no fin del paso 8).
-        _cadence_on_gripper_off()
-        # REVERTIR: este era el arranque del solape (pinzas ya abiertas).
-        # Hoy solo cubre si el paso 6 no alcanzó a armar.
+        # Fallback si el paso 6 no armó el solape.
         if (
             _next_piece_follows()
             and not _OVERLAP["on"]
@@ -6312,9 +6505,33 @@ def _cycle_run_step(step_id: str, params: dict) -> bool:
         ):
             if not _overlap_arm(params):
                 return False
+        _overlap_try_start_feed()
+        # Viaje a depósito: inyectar feed async si holder ya listo.
+        # Motion arranca V1 de inmediato; el OFF→ON solo valida llegada (no retrasa V1).
+        feed_inject, feed_line = _overlap_feed_hook()
+        sent_dep = _cycle_move_lm_send(
+            disc_mm, inject=feed_inject, on_line=feed_line, for_cut=False
+        )
+        _overlap_try_accept_from_replies(sent_dep.get("replies") or [])
+        if not _motion_cmd_serial_ok(sent_dep, "E043"):
+            return False
+        if not _cycle_sleep_ms(int(params["ms_lm_at_discharge"])):
+            return False
+        _overlap_try_start_feed()
+        _overlap_poll_feed(0.05)
+        # Error en el tramo con pieza sujeta: no abrir pinzas (retención).
+        if _cycle_should_abort():
+            return False
+        # Abrir pinzas + conteo UI en paralelo; no esperar settle/ack para el paso 8.
+        if not _cycle_gripper_off_overlap_wait(params):
+            return False
+        _gripper_holding_set(False)
+        # Cadencia = mando de abrir + conteo local (no fin del paso 8).
+        _cadence_on_gripper_off()
         return True
 
     # Step 8. ReleasePart: despeje → home + blower (una orden Motion).
+    # Termina por lm_homed; no espera FeedStage (sync antes del STEP 04).
     if step_id == "8":
         pos = _active_cut_deposit()
         if pos is None:
@@ -6355,9 +6572,11 @@ def _cycle_run_step(step_id: str, params: dict) -> bool:
             "blower_delay_ms": int(params["ms_blower_delay"]),
             "blower_ms": blower_ms,
             "home_settle_ms": int(params["ms_at_home_end"]),
+            "profile": "travel",
         }
-        # Despeje + home: viaje 3000 rpm / rampa normal (no decel de corte).
-        payload.update(_lm_cmd_fields(_load_motion_tune(), for_cut=False))
+        # Compat: rampas solo si config aún no aplicada a drives.
+        if not _MOTION_CFG.get("ok"):
+            payload.update(_lm_cmd_fields(_load_motion_tune(), for_cut=False))
         if abs(clear_at - deposit) >= 0.05:
             payload["clear_puu"] = _mm_to_puu(clear_at)
             _push_event(
@@ -6370,20 +6589,8 @@ def _cycle_run_step(step_id: str, params: dict) -> bool:
                 f"(L {_cycle_blower_length_mm():.1f} mm)."
             )
 
-        # ServoCAN ON justo antes del feed solapado (paso 4 lo apaga tras pinzas).
-        if (
-            _OVERLAP["on"]
-            and not _OVERLAP["feed_done"]
-            and not _OVERLAP.get("feed_sent")
-            and CYCLE_FEEDER_SOFT_AFTER_GRIP
-        ):
-            if not _cycle_feeder_servo(True):
-                _push_event(
-                    "ServoCAN ON (antes de ReleasePart/feed) no confirmó.",
-                    "warn",
-                )
-                return False
-
+        # ServoCAN ON pertenece al bloque de alimentación, no a ReleasePart.
+        _overlap_try_start_feed()
         feed_inject, feed_line = _overlap_feed_hook()
         sent = _cycle_motion_send(
             payload,
@@ -6397,7 +6604,7 @@ def _cycle_run_step(step_id: str, params: dict) -> bool:
             )
             return False
         replies = sent.get("replies") or []
-        _overlap_ensure_feed_collected(replies, budget_s=4.0)
+        _overlap_try_accept_from_replies(replies)
         if not _motion_cmd_serial_ok(sent, "E043"):
             return False
         rp = _motion_reply_op(sent, "release_part")
@@ -6406,7 +6613,7 @@ def _cycle_run_step(step_id: str, params: dict) -> bool:
             return False
         if _OVERLAP["on"] and not _OVERLAP["feed_done"] and not _OVERLAP["feed_sent"]:
             _overlap_start_feed_task()
-        # Settle ya corrió en Motion; poll solape residual breve.
+        # Poll breve: no alargar STEP 08 con espera de alimentación.
         t_end = time.time() + 0.05
         while time.time() < t_end:
             if _cycle_wait_if_paused():
@@ -6414,8 +6621,6 @@ def _cycle_run_step(step_id: str, params: dict) -> bool:
                 return False
             _overlap_poll_feed(0.05)
             time.sleep(0.02)
-        # feed_error del solape es del SIGUIENTE ciclo; ReleasePart de esta pieza ya cerró.
-        # _overlap_wait_feed_done corta el lote antes de acreditar/cortar la fantasma.
         return True
 
     return True
@@ -6447,6 +6652,7 @@ def _overlap_reset() -> None:
     _OVERLAP["feed_sent"] = False
     _OVERLAP["feed_done"] = False
     _OVERLAP["holder_error"] = ""
+    _OVERLAP["feed_after_t"] = 0.0
     _OVERLAP["feed"] = None
     _OVERLAP["blower_mm"] = None
     _OVERLAP["t0"] = None
@@ -6517,8 +6723,11 @@ def _feed_prime_run(params: dict) -> bool:
     _push_event(f"Priming alimentación ({sides}) — fuera de tiempo de ciclo.")
     if not _cycle_close_holder_encoder_for_feed(params, cycle_fail=False):
         return False
-    # FeedStage aplica tune + set0 interno: una sola orden Motion.
-    payload = _feed_stage_payload(sides if sides in ("R", "L") else None)
+    # FeedStage + set0 interno; tune solo si config no aplicada.
+    payload = _feed_stage_payload(
+        sides if sides in ("R", "L") else None,
+        with_tune=not bool(_MOTION_CFG.get("ok")),
+    )
     sent = _cycle_motion_send(payload, timeout_s=_MOTION_FEED_TIMEOUT_S)
     if _cycle_should_stop():
         return False
@@ -6633,6 +6842,8 @@ def _overlap_start_holder(params: dict) -> None:
         if _OVERLAP["gen"] != gen:
             return
         # FeedStage del solape hace set0 al arrancar; no hace falta encoder_set0 aquí.
+        delay_ms = max(0, int(params.get("ms_before_overlap_feed") or 0))
+        _OVERLAP["feed_after_t"] = time.perf_counter() + (delay_ms / 1000.0)
         _OVERLAP["holder_ready"].set()
         _prod_log_op(
             "2",
@@ -6645,21 +6856,20 @@ def _overlap_start_holder(params: dict) -> None:
 
 
 def _overlap_arm(params: dict) -> bool:
-    """Paso 1 del siguiente ciclo tras apagar cortadores. Holder ya; feed en la descarga."""
+    """Tras cortadores OFF: set_data si cambió + holder; feed al tener holder listo."""
     if _OVERLAP["on"] or _OVERLAP["feed_done"]:
         return True
     t_arm = time.perf_counter()
-    if not _motion_cmd_serial_ok(
-        _cycle_motion_send(_motion_data_flat(_MOTION_DATA), timeout_s=2.0),
-        "E043",
-    ):
+    if not _cycle_push_set_data_if_needed():
+        _cycle_fail("E043")
         return False
-    # Tune va embebido en el feed_stage del solape (sin set_tune aparte).
+    # Tune ya sincronizado en Start/Resume; feed slim salvo config inválida.
     _OVERLAP["on"] = True
     _OVERLAP["t0"] = time.time()
     _OVERLAP["feed_sent"] = False
     _OVERLAP["feed_done"] = False
     _OVERLAP["holder_error"] = ""
+    _OVERLAP["feed_after_t"] = 0.0
     _OVERLAP["feed"] = None
     _OVERLAP["blower_mm"] = None
     _OVERLAP["feed_error"] = False
@@ -6677,7 +6887,7 @@ def _overlap_arm(params: dict) -> bool:
         ),
     )
     _push_event(
-        f"Ciclo {nxt} de {total}: paso 1 ({next_sides}) en paralelo tras apagar cortadores."
+        f"Ciclo {nxt} de {total}: bloque paralelo tras apagar cortadores ({next_sides})."
     )
     _prod_log_op(
         "1",
@@ -6686,14 +6896,14 @@ def _overlap_arm(params: dict) -> bool:
         parallel=True,
     )
     _overlap_start_holder(params)
+    _overlap_start_feed_task()
     return True
 
 
 def _overlap_feed_hook():
-    """Alimentación del siguiente ciclo mientras el eje todavía se mueve.
+    """Inyecta feed async durante lmguide_move/release_part si aún no salió.
 
-    Si feed_stage ya se inyectó (p. ej. en el depósito), no reenviar inject en
-    ReleasePart; sí se mantiene on_line para no perder el ack del solape.
+    Si ya se disparó (try_start / hilo), solo on_line para no perder el ack.
     """
     if not _OVERLAP["on"] or _OVERLAP["feed_done"] or _OVERLAP.get("feed_error"):
         return None, None
@@ -6710,13 +6920,43 @@ def _overlap_on_feed_line(msg: dict) -> None:
     _set_machine_ui(
         mensaje=(
             _cycle_piece_prefix()
-            + "Pasos 1 a 3 listos. Esperando home con pinzas abiertas para cerrar."
+            + "Pasos 1 a 3 listos. Esperando ReleasePart para sincronizar."
         ),
     )
 
 
+def _overlap_claim_feed_send(next_sides: str) -> bool:
+    """True si este caller debe enviar feed_stage (evita doble disparo)."""
+    with _OVERLAP_FEED_LOCK:
+        if (
+            not _OVERLAP["on"]
+            or _OVERLAP["feed_done"]
+            or _OVERLAP["feed_sent"]
+            or _OVERLAP.get("feed_error")
+        ):
+            return False
+        if not next_sides or _joint_blocks_next_piece():
+            return False
+        _OVERLAP["sides"] = next_sides
+        _OVERLAP["feed_sent"] = True
+        _OVERLAP["feed_t0"] = time.perf_counter()
+        return True
+
+
+def _overlap_unclaim_feed_send() -> None:
+    with _OVERLAP_FEED_LOCK:
+        if not _OVERLAP["feed_done"]:
+            _OVERLAP["feed_sent"] = False
+
+
+def _overlap_feed_delay_pending() -> bool:
+    """True si aún no vence ms_before_overlap_feed tras holder listo."""
+    t_after = float(_OVERLAP.get("feed_after_t") or 0.0)
+    return bool(t_after and time.perf_counter() < t_after)
+
+
 def _overlap_feed_inject():
-    """None sigue esperando al holder. [] no escribe. Una lista se manda una vez."""
+    """None sigue esperando al holder/retardo. [] no escribe. Una lista se manda una vez."""
     if (
         not _OVERLAP["on"]
         or _OVERLAP["feed_done"]
@@ -6728,15 +6968,13 @@ def _overlap_feed_inject():
         return []
     if not _OVERLAP["holder_ready"].is_set():
         return None
-    _OVERLAP["feed_sent"] = True
-    _OVERLAP["feed_t0"] = time.perf_counter()
+    if _overlap_feed_delay_pending():
+        return None
+    next_sides = _lot_predict_next_cycle_sides()
+    if not _overlap_claim_feed_send(next_sides):
+        return []
     nxt = int(_LOT["cycles_done"]) + 2
     total = int(_LOT["cycles_total"])
-    next_sides = _lot_predict_next_cycle_sides()
-    if not next_sides or _joint_blocks_next_piece():
-        _OVERLAP["feed_sent"] = False
-        return []
-    _OVERLAP["sides"] = next_sides
     _set_machine_ui(
         paralelo_id="3",
         mensaje=_cycle_piece_prefix() + f"Ciclo {nxt} de {total} alimenta en paralelo ({next_sides}).",
@@ -6745,12 +6983,81 @@ def _overlap_feed_inject():
         f"Ciclo {nxt} de {total}: alimentación {next_sides} en paralelo."
     )
     payload = _feed_stage_payload(
-        next_sides if next_sides in ("R", "L") else None, edge=True
+        next_sides if next_sides in ("R", "L") else None,
+        with_tune=not bool(_MOTION_CFG.get("ok")),
+        edge=True,
     )
-    # REVERTIR: quitar async. Sin esta clave Motion solo suelta el feed
-    # durante release_part y el viaje al montón no lo atendía en paralelo.
     payload["async"] = True
     return [_compact(payload)]
+
+
+def _overlap_fire_feed_async(next_sides: str) -> bool:
+    """Dispara feed_stage async sin retener el puerto hasta el flanco."""
+    if _OVERLAP.get("feed_sent") or _OVERLAP.get("feed_done"):
+        return True
+    if not _overlap_claim_feed_send(next_sides):
+        return bool(_OVERLAP.get("feed_sent") or _OVERLAP.get("feed_done"))
+    nxt = int(_LOT["cycles_done"]) + 2
+    total = int(_LOT["cycles_total"])
+    _set_machine_ui(
+        paralelo_id="3",
+        mensaje=_cycle_piece_prefix()
+        + f"Ciclo {nxt} de {total} alimenta en paralelo ({next_sides}).",
+    )
+    _push_event(f"Ciclo {nxt} de {total}: alimentación {next_sides} en paralelo.")
+    payload = _feed_stage_payload(
+        next_sides if next_sides in ("R", "L") else None,
+        with_tune=not bool(_MOTION_CFG.get("ok")),
+        edge=True,
+    )
+    payload["async"] = True
+    sent = _send_motion_fire(
+        [_compact(payload)], peek_s=0.25, on_line=_overlap_on_feed_line, nonblocking=True
+    )
+    if not sent.get("sent"):
+        _overlap_unclaim_feed_send()
+        if sent.get("busy"):
+            return False
+        _OVERLAP["feed_error"] = True
+        _OVERLAP["feed_error_name"] = "feed_no_reply"
+        return False
+    _overlap_try_accept_from_replies(sent.get("replies") or [])
+    return True
+
+
+def _overlap_try_start_feed() -> bool:
+    """Si holder listo, retardo vencido y feed aún no salió: ServoCAN (soft) + feed async."""
+    if not _OVERLAP["on"] or _OVERLAP["feed_done"] or _OVERLAP.get("feed_error"):
+        return bool(_OVERLAP.get("feed_done"))
+    if _OVERLAP.get("feed_sent"):
+        return True
+    if _cycle_should_abort() or _OVERLAP.get("holder_error"):
+        return False
+    if not _OVERLAP["holder_ready"].is_set():
+        return False
+    if _overlap_feed_delay_pending():
+        return False
+    next_sides = str(_OVERLAP.get("sides") or "") or _lot_predict_next_cycle_sides()
+    if not next_sides or _joint_blocks_next_piece():
+        return False
+    nxt = int(_LOT["cycles_done"]) + 2
+    if CYCLE_FEEDER_SOFT_AFTER_GRIP:
+        t_srv = time.perf_counter()
+        if not _cycle_feeder_servo(True):
+            _push_event(
+                "ServoCAN ON (bloque alimentación paralelo) no confirmó.",
+                "warn",
+            )
+            _OVERLAP["feed_error"] = True
+            _OVERLAP["feed_error_name"] = "feeder_servo"
+            return False
+        _prod_log_op(
+            "SRV",
+            time.perf_counter() - t_srv,
+            piece=nxt,
+            parallel=True,
+        )
+    return _overlap_fire_feed_async(next_sides)
 
 
 def _replies_have_op(replies, op: str) -> bool:
@@ -6877,7 +7184,7 @@ def _overlap_ensure_feed_collected(replies, budget_s: float = 3.0) -> None:
 
 
 def _overlap_send_feed_blocking() -> bool:
-    """Envía feed_stage y procesa respuesta (hilo o espera antes del paso 4)."""
+    """Asegura feed disparado y, si ya corrió, recoge el ack (sync / fallback)."""
     if _OVERLAP["feed_done"]:
         return True
     if _cycle_should_stop():
@@ -6890,28 +7197,54 @@ def _overlap_send_feed_blocking() -> bool:
             return False
         _cycle_fail(_OVERLAP["holder_error"] or "E010")
         return False
-    if _OVERLAP["feed_sent"]:
-        _overlap_poll_feed(2.0)
-        return bool(_OVERLAP["feed_done"])
-    _OVERLAP["feed_sent"] = True
-    _OVERLAP["feed_t0"] = time.perf_counter()
-    _set_machine_ui(paralelo_id="3")
-    next_sides = str(_OVERLAP.get("sides") or "") or _lot_predict_next_cycle_sides()
-    _OVERLAP["sides"] = next_sides
-    payload = _feed_stage_payload(
-        next_sides if next_sides in ("R", "L") else None, edge=True
-    )
-    sent = _cycle_motion_send(payload, timeout_s=_MOTION_FEED_TIMEOUT_S)
-    if _cycle_should_stop():
-        return False
-    if not sent.get("sent"):
-        _cycle_fail(sent.get("code") or "E043")
-        return False
-    return _overlap_accept_feed(sent.get("replies") or [])
+    # Esperar ms_before_overlap_feed sin bloquear abort.
+    while _overlap_feed_delay_pending():
+        if _cycle_should_stop() or _cycle_should_abort():
+            return False
+        time.sleep(0.01)
+    if not _OVERLAP["feed_sent"]:
+        if not _overlap_try_start_feed():
+            if _OVERLAP.get("feed_error"):
+                return False
+            # Puerto ocupado: reintentar con lock bloqueante vía fire directo.
+            next_sides = str(_OVERLAP.get("sides") or "") or _lot_predict_next_cycle_sides()
+            if CYCLE_FEEDER_SOFT_AFTER_GRIP:
+                nxt = int(_LOT["cycles_done"]) + 2
+                t_srv = time.perf_counter()
+                if not _cycle_feeder_servo(True):
+                    _OVERLAP["feed_error"] = True
+                    _OVERLAP["feed_error_name"] = "feeder_servo"
+                    return False
+                _prod_log_op(
+                    "SRV",
+                    time.perf_counter() - t_srv,
+                    piece=nxt,
+                    parallel=True,
+                )
+            if not _overlap_fire_feed_async(next_sides):
+                # Último recurso: feed bloqueante (solo si async no pudo; sync).
+                if not _overlap_claim_feed_send(next_sides):
+                    _overlap_poll_feed(2.0)
+                    return bool(_OVERLAP["feed_done"]) or not _OVERLAP.get("feed_error")
+                payload = _feed_stage_payload(
+                    next_sides if next_sides in ("R", "L") else None,
+                    with_tune=not bool(_MOTION_CFG.get("ok")),
+                    edge=True,
+                )
+                sent = _cycle_motion_send(payload, timeout_s=_MOTION_FEED_TIMEOUT_S)
+                if _cycle_should_stop():
+                    return False
+                if not sent.get("sent"):
+                    _overlap_unclaim_feed_send()
+                    _cycle_fail(sent.get("code") or "E043")
+                    return False
+                return _overlap_accept_feed(sent.get("replies") or [])
+    _overlap_poll_feed(2.0)
+    return bool(_OVERLAP["feed_done"]) or not _OVERLAP.get("feed_error")
 
 
 def _overlap_start_feed_task() -> None:
-    """Alimentación del siguiente ciclo sin bloquear el paso 8 en curso."""
+    """Arranca alimentación N+1 sin bloquear descarga/ReleasePart."""
     if (
         not _OVERLAP["on"]
         or _OVERLAP["feed_done"]
@@ -6929,7 +7262,20 @@ def _overlap_start_feed_task() -> None:
         try:
             if _OVERLAP["gen"] != gen or _cycle_should_abort():
                 return
-            _overlap_send_feed_blocking()
+            if not _OVERLAP["holder_ready"].wait(_OVERLAP_HOLDER_WAIT_S):
+                return
+            # Reintentos breves si el puerto está en lmguide_move/release_part.
+            deadline = time.time() + 6.0
+            while time.time() < deadline:
+                if _OVERLAP["gen"] != gen or _cycle_should_abort():
+                    return
+                if _OVERLAP["feed_sent"] or _OVERLAP["feed_done"]:
+                    return
+                if _OVERLAP.get("feed_error") or _OVERLAP.get("holder_error"):
+                    return
+                if _overlap_try_start_feed():
+                    return
+                time.sleep(0.05)
         finally:
             if not _OVERLAP["feed_sent"] and not _OVERLAP["feed_done"]:
                 _OVERLAP["feed_task_started"] = False
@@ -6938,7 +7284,7 @@ def _overlap_start_feed_task() -> None:
 
 
 def _overlap_wait_feed_done(timeout_s: float = _MOTION_FEED_OVERLAP_TIMEOUT_S) -> bool:
-    """Espera la alimentación solapada antes de entregar el paso 4 al siguiente ciclo.
+    """Punto único de sync: ReleasePart ya OK; espera FeedStage antes del STEP 04.
 
     Tope Python = firmware FeedStage (4 s) + margen COM; el MCU reporta E033/E034.
     """
@@ -6949,14 +7295,16 @@ def _overlap_wait_feed_done(timeout_s: float = _MOTION_FEED_OVERLAP_TIMEOUT_S) -
         return False
     if _OVERLAP["feed_done"]:
         return True
+    t_sync = time.perf_counter()
     total = int(_LOT["cycles_total"])
     nxt = int(_LOT["cycles_done"]) + 1
+    sync_piece = int(_LOT["cycles_done"]) + 2
     _set_machine_ui(
         estado="running",
         estado_label="Ciclo en marcha",
         mensaje=(
             _cycle_piece_prefix()
-            + f"Pieza {nxt} de {total}: esperando alimentación (paso 3 en paralelo)…"
+            + f"Pieza {nxt} de {total}: sync ReleasePart∩Feed (paso 3 en paralelo)…"
         ),
         en_curso=True,
     )
@@ -6968,6 +7316,12 @@ def _overlap_wait_feed_done(timeout_s: float = _MOTION_FEED_OVERLAP_TIMEOUT_S) -
         if _cycle_should_abort():
             return False
         if _OVERLAP["feed_done"]:
+            _prod_log_op(
+                "SYNC",
+                time.perf_counter() - t_sync,
+                piece=sync_piece,
+                parallel=True,
+            )
             return True
         if _OVERLAP["feed_error"]:
             _overlap_apply_feed_error()
@@ -6988,6 +7342,12 @@ def _overlap_wait_feed_done(timeout_s: float = _MOTION_FEED_OVERLAP_TIMEOUT_S) -
     # Último intento de drenar antes de declarar timeout.
     _overlap_poll_feed(2.0)
     if _OVERLAP["feed_done"]:
+        _prod_log_op(
+            "SYNC",
+            time.perf_counter() - t_sync,
+            piece=sync_piece,
+            parallel=True,
+        )
         return True
     if _OVERLAP["feed_error"]:
         _overlap_apply_feed_error()
@@ -7093,7 +7453,7 @@ def _home_after_tray() -> bool:
     home = {
         "op": "lmguide_move",
         "target": "home",
-        **_lm_cmd_fields(_load_motion_tune(), for_cut=False),
+        **_lm_move_exec_fields(_load_motion_tune(), for_cut=False),
     }
     sent = _cycle_motion_send(home, timeout_s=_MOTION_LM_MOVE_TIMEOUT_S)
     if _motion_cmd_serial_ok(sent, "E043"):
@@ -7153,6 +7513,9 @@ def _run_one_piece(start_index: int, started_at: float | None = None) -> bool:
             step_id="1",
             step_index=0,
         )
+        # Sync perfiles cut/travel + PV antes del home (una vez por lote fresco).
+        if not _cycle_sync_motion_config(reason="start"):
+            return False
         if not _cycle_lm_home_absolute(with_set_data=True):
             return False
         # Home primero, también si el material ya está en el láser.
@@ -7656,6 +8019,9 @@ def _cycle_resume() -> tuple[bool, str]:
         idx = len(CYCLE_STEPS) - 1
     if idx < 0:
         idx = 0
+    # Re-aplica perfiles a drives sin reiniciar servos ni progreso del lote.
+    if not _cycle_sync_motion_config(reason="resume"):
+        return False, "No se pudo sincronizar la configuración Motion al reanudar."
     step_mode = bool(_CYCLE_CTRL.get("step_mode"))
     global _PIECE_TICK0
     # Tras error+purga el reloj de pieza arranca en 0 (reintento).
@@ -8377,19 +8743,24 @@ def _purga_abort_keep_fault() -> None:
         _enter_machine_error(fault[0], fault[1])
 
 
-def _feed_stage_payload(side: str | None = None, *, with_tune: bool = True, edge: bool = False) -> dict:
-    """Una sola orden feed_stage; opcionalmente lleva tune embebido (sin set_tune aparte).
+def _feed_stage_payload(side: str | None = None, *, with_tune: bool = False, edge: bool = False) -> dict:
+    """Orden feed_stage. with_tune solo si config inválida o prueba manual.
 
-    No incluye lm_pr_speed/accel/decel: el solape corre dentro de release_part y
-    esas claves pisaban el perfil de viaje (3000 rpm) con el de corte.
+    No incluye lm_*: cut/travel viven en PR1/PR2; el solape no debe tocarlos.
     """
     tune = _load_motion_tune()
     if with_tune:
         payload = _motion_tune_flat(tune)
         payload["op"] = "feed_stage"
-        payload.pop("lm_pr_speed_rpm", None)
-        payload.pop("lm_accel_ms", None)
-        payload.pop("lm_decel_ms", None)
+        for k in (
+            "lm_pr_speed_rpm",
+            "lm_accel_ms",
+            "lm_decel_ms",
+            "lm_travel_pr_speed_rpm",
+            "lm_travel_accel_ms",
+            "lm_travel_decel_ms",
+        ):
+            payload.pop(k, None)
         # Doble velocidad OFF: no mandar V2/switch que el MCU pueda aplicar
         # por un latch viejo (dual=false debe quedar inequívoco en el JSON).
         if not bool(tune["feed_stage"]["dual_speed_enable"]):
@@ -8413,12 +8784,25 @@ def _feed_stage_payload(side: str | None = None, *, with_tune: bool = True, edge
 
 
 def _push_saved_motion_tune() -> dict:
-    """Publica Motion.json. El MCU no conserva el botón entre reinicios."""
-    return _cycle_motion_send(_motion_tune_flat(_load_motion_tune()), timeout_s=2.0)
+    """Publica Motion.json y aplica perfiles a drives (set_tune.applied)."""
+    tune = _load_motion_tune()
+    sent = _cycle_motion_send(_motion_tune_flat(tune), timeout_s=4.0)
+    msg = _motion_reply_op(sent, "set_tune") if sent.get("sent") else None
+    applied = bool(msg and msg.get("applied") is True) or bool(
+        msg and msg.get("ok") is True and "applied" not in (msg or {})
+    )
+    if msg and "applied" in msg:
+        applied = bool(msg.get("applied"))
+    _MOTION_CFG["ok"] = applied
+    if applied:
+        _MOTION_CFG["tune_fp"] = _motion_tune_fingerprint(tune)
+    else:
+        _MOTION_CFG["ok"] = False
+    return sent
 
 
 def _feed_once(side: str | None):
-    payload = _feed_stage_payload(side)
+    payload = _feed_stage_payload(side, with_tune=not bool(_MOTION_CFG.get("ok")))
     sent = _cycle_motion_send(payload, timeout_s=_MOTION_FEED_TIMEOUT_S)
     found, ok, error_name, feed, warn_name = _read_feed_stage(sent)
     _set_machine_ui(feed=feed)
@@ -8570,7 +8954,7 @@ def _purga_error_action_guide(code: str = "", *, fallback: str = "") -> str:
 def _feed_laser():
     """Purga: lados activos (feed_sides) hasta su láser. Sin encoder ni compensación."""
     side = _purge_feed_side()
-    payload = _feed_stage_payload(side)
+    payload = _feed_stage_payload(side, with_tune=not bool(_MOTION_CFG.get("ok")))
     payload["mode"] = "laser"
     sent = _cycle_motion_send(payload, timeout_s=20.0)
     found, ok, error_name, feed, warn_name = _read_feed_stage(sent)
@@ -8586,7 +8970,9 @@ def _feed_laser():
 def _feed_clean(side: str | None = None):
     """Expulsar (clean). side R|L fuerza un lado; None = lados activos de purga."""
     feed_side = side if side in ("R", "L") else _purge_feed_side()
-    payload = _feed_stage_payload(feed_side)
+    payload = _feed_stage_payload(
+        feed_side, with_tune=not bool(_MOTION_CFG.get("ok"))
+    )
     payload["mode"] = "clean"
     payload["timeout_ms"] = PURGE_CLEAN_MS
     sent = _cycle_motion_send(payload, timeout_s=8.0)
