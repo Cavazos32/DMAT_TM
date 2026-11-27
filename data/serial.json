@@ -1,25 +1,9 @@
 {
-  "motion": "COM8",
-  "plc": "COM16",
+  "motion": "",
+  "plc": "",
   "andon": "",
-  "prefeeder": "COM18",
+  "prefeeder": "",
   "andon_disabled": true,
   "checklist_bypass": true,
-  "online": {
-    "motion": {
-      "port": "COM8",
-      "ok": true,
-      "message": "MOTION en COM8 en l\u00ednea."
-    },
-    "plc": {
-      "port": "COM16",
-      "ok": true,
-      "message": "PLC en COM16 en l\u00ednea."
-    },
-    "prefeeder": {
-      "port": "COM18",
-      "ok": true,
-      "message": "PREFEEDER en COM18 en l\u00ednea."
-    }
-  }
+  "online": {}
 }

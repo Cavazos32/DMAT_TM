@@ -47,9 +47,6 @@ enum FeedStageError {
   FEED_STAGE_ERR_LASER_L,
   FEED_STAGE_ERR_SAFETY,
   FEED_STAGE_ERR_STOP,
-  FEED_STAGE_ERR_JOINT_R,
-  FEED_STAGE_ERR_JOINT_L,
-  FEED_STAGE_ERR_JOINT_RL,
   FEED_STAGE_ERR_MATERIAL_R,
   FEED_STAGE_ERR_MATERIAL_L,
   FEED_STAGE_ERR_MATERIAL_RL,
@@ -57,8 +54,7 @@ enum FeedStageError {
 
 enum FeedStageSideWarn : uint8_t {
   FEED_WARN_NONE = 0,
-  FEED_WARN_JOINT = 1,
-  FEED_WARN_MATERIAL = 2,
+  FEED_WARN_MATERIAL = 1,
 };
 
 struct FeedStageSideResult {
@@ -74,7 +70,6 @@ struct FeedStageRequest {
   bool useR;
   bool useL;
   bool ignoreLaser;
-  bool ignoreJoint;     // purga / Probar: no abortar por Joint
   bool ignoreMaterial;  // purga: material puede seguir ausente
   bool waitNewEdge;     // solape tras corte: ON heredado no cuenta
   uint32_t laserTimeoutMs;
@@ -179,26 +174,14 @@ static bool laserIsOn(MotionSide side) {
   return level == LOW;
 }
 
-static volatile bool gJointOn[MOTION_SIDE_COUNT] = {false, false};
-static volatile bool gJointEvent[MOTION_SIDE_COUNT] = {false, false};  // latch OFF→ON
-static uint32_t gJointEdgeMs[MOTION_SIDE_COUNT] = {0, 0};
-
 static volatile bool gMaterialOn[MOTION_SIDE_COUNT] = {false, false};  // ON = presente
 static volatile bool gMaterialGoneEvent[MOTION_SIDE_COUNT] = {false, false};  // latch ON→OFF
 static uint32_t gMaterialEdgeMs[MOTION_SIDE_COUNT] = {0, 0};
 static bool gMaterialInited = false;
 
 // Avisos Serial diferidos (la tarea FreeRTOS no escribe Serial).
-static volatile bool gNotifyJointOn[MOTION_SIDE_COUNT] = {false, false};
 static volatile bool gNotifyMaterialOff[MOTION_SIDE_COUNT] = {false, false};
 static TaskHandle_t gSensorTaskHandle = nullptr;
-
-static bool jointRawOn(MotionSide side) {
-  int pin = (side == MOTION_SIDE_R) ? JOINT_PIN_R : JOINT_PIN_L;
-  int level = digitalRead(pin);
-  if (JOINT_ACTIVE_HIGH) return level == HIGH;
-  return level == LOW;
-}
 
 static bool materialRawOn(MotionSide side) {
   if (!PARAM_MATERIAL_SENSOR_ENABLE) return true;  // sin sensor: siempre presente
@@ -217,30 +200,8 @@ static void printSensorEventJson(MotionSide side, const char* kind, bool active)
   Serial.print(active ? "true" : "false");
   Serial.println(F("}"));
 }
-static void jointPoll(uint32_t nowMs) {
-  for (int i = 0; i < MOTION_SIDE_COUNT; i++) {
-    bool raw = jointRawOn((MotionSide)i);
-    if (raw == gJointOn[i]) {
-      gJointEdgeMs[i] = 0;
-      continue;
-    }
-    uint32_t needMs = raw ? PARAM_JOINT_DEBOUNCE_ON_MS : PARAM_JOINT_DEBOUNCE_OFF_MS;
-    if (gJointEdgeMs[i] == 0) {
-      gJointEdgeMs[i] = nowMs;
-    } else if ((nowMs - gJointEdgeMs[i]) >= needMs) {
-      gJointOn[i] = raw;
-      gJointEdgeMs[i] = 0;
-      if (raw) {
-        gJointEvent[i] = true;
-        gNotifyJointOn[i] = true;
-      } else {
-        // Sensor OFF: no conservar latch huérfano (falso joint_rl con LEDs apagados).
-        gJointEvent[i] = false;
-        gNotifyJointOn[i] = false;
-      }
-    }
-  }
 
+static void materialPoll(uint32_t nowMs) {
   if (!gMaterialInited) {
     for (int i = 0; i < MOTION_SIDE_COUNT; i++) {
       gMaterialOn[i] = materialRawOn((MotionSide)i);
@@ -277,12 +238,9 @@ static void jointPoll(uint32_t nowMs) {
     }
   }
 }
+
 static void sensorEventsService() {
   for (int i = 0; i < MOTION_SIDE_COUNT; i++) {
-    if (gNotifyJointOn[i]) {
-      gNotifyJointOn[i] = false;
-      printSensorEventJson((MotionSide)i, "joint", true);
-    }
     if (gNotifyMaterialOff[i]) {
       gNotifyMaterialOff[i] = false;
       printSensorEventJson((MotionSide)i, "material", false);
@@ -294,7 +252,7 @@ static void sensorTask(void* /*arg*/) {
   const TickType_t period = pdMS_TO_TICKS(PARAM_SENSOR_TASK_PERIOD_MS);
   TickType_t last = xTaskGetTickCount();
   for (;;) {
-    jointPoll(millis());
+    materialPoll(millis());
     vTaskDelayUntil(&last, period);
   }
 }
@@ -311,10 +269,6 @@ static void sensorTaskStart() {
       0);
 }
 
-static bool jointIsOn(MotionSide side) {
-  return gJointOn[side];
-}
-
 static bool materialIsOn(MotionSide side) {
   return gMaterialOn[side];
 }
@@ -326,20 +280,13 @@ static bool materialGoneDetected(MotionSide side) {
 
 static void sensorEventsClear(bool clearR, bool clearL) {
   if (clearR) {
-    gJointEvent[MOTION_SIDE_R] = false;
     gMaterialGoneEvent[MOTION_SIDE_R] = false;
-    gNotifyJointOn[MOTION_SIDE_R] = false;
     gNotifyMaterialOff[MOTION_SIDE_R] = false;
   }
   if (clearL) {
-    gJointEvent[MOTION_SIDE_L] = false;
     gMaterialGoneEvent[MOTION_SIDE_L] = false;
-    gNotifyJointOn[MOTION_SIDE_L] = false;
     gNotifyMaterialOff[MOTION_SIDE_L] = false;
   }
-}
-
-static void jointClearPulses() {
 }
 
 static void motionPollEncoders() {
@@ -364,12 +311,6 @@ static const char* feedStageErrorName(FeedStageError err) {
       return "safety";
     case FEED_STAGE_ERR_STOP:
       return "stopped";
-    case FEED_STAGE_ERR_JOINT_R:
-      return "joint_r";
-    case FEED_STAGE_ERR_JOINT_L:
-      return "joint_l";
-    case FEED_STAGE_ERR_JOINT_RL:
-      return "joint_rl";
     case FEED_STAGE_ERR_MATERIAL_R:
       return "material_r";
     case FEED_STAGE_ERR_MATERIAL_L:
@@ -385,16 +326,9 @@ static FeedStageError feedStageWarnToError(FeedStageSideWarn wR, FeedStageSideWa
                                           bool useR, bool useL) {
   bool r = useR && wR != FEED_WARN_NONE;
   bool l = useL && wL != FEED_WARN_NONE;
-  if (r && l) {
-    if (wR == FEED_WARN_JOINT || wL == FEED_WARN_JOINT) return FEED_STAGE_ERR_JOINT_RL;
-    return FEED_STAGE_ERR_MATERIAL_RL;
-  }
-  if (r) {
-    return (wR == FEED_WARN_JOINT) ? FEED_STAGE_ERR_JOINT_R : FEED_STAGE_ERR_MATERIAL_R;
-  }
-  if (l) {
-    return (wL == FEED_WARN_JOINT) ? FEED_STAGE_ERR_JOINT_L : FEED_STAGE_ERR_MATERIAL_L;
-  }
+  if (r && l) return FEED_STAGE_ERR_MATERIAL_RL;
+  if (r) return FEED_STAGE_ERR_MATERIAL_R;
+  if (l) return FEED_STAGE_ERR_MATERIAL_L;
   return FEED_STAGE_OK;
 }
 
@@ -594,7 +528,6 @@ static FeedStageRequest feedStageDefaultRequest() {
   req.useR = true;
   req.useL = true;
   req.ignoreLaser = false;
-  req.ignoreJoint = false;
   req.ignoreMaterial = false;
   req.waitNewEdge = false;
   req.laserTimeoutMs = PARAM_FEED_STAGE_LASER_TIMEOUT_MS;
@@ -624,7 +557,7 @@ static bool feedStageStopForLaser(MotionSide side) {
   return true;
 }
 
-/** Detiene un lado por Warning y lo marca como cerrado (sin timeout de láser). */
+/** Detiene un lado por warn (material) y lo marca como cerrado (sin timeout de láser). */
 static void feedStageWarnSide(MotionSide side, FeedStageSideWarn warn) {
   int i = (int)side;
   if (gFeedSideWarn[i] != FEED_WARN_NONE) return;
@@ -739,17 +672,11 @@ static bool feedStageBegin(FeedStageRequest req) {
   gFeedSideValidated[MOTION_SIDE_R] = !req.useR;
   gFeedSideValidated[MOTION_SIDE_L] = !req.useL;
 
-  // Joint: solo estado físico. Un joint_event viejo con sensor OFF no debe
-  // abortar la alimentación (material presente y Joint apagado = operable).
-  if (!req.ignoreJoint && req.useR && jointIsOn(MOTION_SIDE_R)) {
-    feedStageWarnSide(MOTION_SIDE_R, FEED_WARN_JOINT);
-  } else if (!req.ignoreMaterial && req.useR && !materialIsOn(MOTION_SIDE_R)) {
+  if (!req.ignoreMaterial && req.useR && !materialIsOn(MOTION_SIDE_R)) {
     gMaterialGoneEvent[MOTION_SIDE_R] = true;
     feedStageWarnSide(MOTION_SIDE_R, FEED_WARN_MATERIAL);
   }
-  if (!req.ignoreJoint && req.useL && jointIsOn(MOTION_SIDE_L)) {
-    feedStageWarnSide(MOTION_SIDE_L, FEED_WARN_JOINT);
-  } else if (!req.ignoreMaterial && req.useL && !materialIsOn(MOTION_SIDE_L)) {
+  if (!req.ignoreMaterial && req.useL && !materialIsOn(MOTION_SIDE_L)) {
     gMaterialGoneEvent[MOTION_SIDE_L] = true;
     feedStageWarnSide(MOTION_SIDE_L, FEED_WARN_MATERIAL);
   }
@@ -821,7 +748,7 @@ static bool feedStageBegin(FeedStageRequest req) {
     return false;
   }
 
-  // Ambos lados ya cerrados (láser al inicio/probe y/o Warning): cerrar ya.
+  // Ambos lados ya cerrados (láser al inicio/probe y/o warn): cerrar ya.
   if (gFeedSideValidated[MOTION_SIDE_R] && gFeedSideValidated[MOTION_SIDE_L]) {
     bool anyHealthy = feedStageHealthyDone(MOTION_SIDE_R) || feedStageHealthyDone(MOTION_SIDE_L);
     if (!anyHealthy) {
@@ -912,14 +839,6 @@ static bool feedStageTick() {
     gFeedFail = FEED_STAGE_ERR_STOP;
   } else if (safetyIsActive()) {
     gFeedFail = FEED_STAGE_ERR_SAFETY;
-  } else if (!gFeedReq.ignoreJoint && gFeedReq.useR &&
-             gFeedSideWarn[MOTION_SIDE_R] == FEED_WARN_NONE &&
-             jointIsOn(MOTION_SIDE_R)) {
-    feedStageWarnSide(MOTION_SIDE_R, FEED_WARN_JOINT);
-  } else if (!gFeedReq.ignoreJoint && gFeedReq.useL &&
-             gFeedSideWarn[MOTION_SIDE_L] == FEED_WARN_NONE &&
-             jointIsOn(MOTION_SIDE_L)) {
-    feedStageWarnSide(MOTION_SIDE_L, FEED_WARN_JOINT);
   } else if (!gFeedReq.ignoreMaterial && gFeedReq.useR &&
              gFeedSideWarn[MOTION_SIDE_R] == FEED_WARN_NONE &&
              materialGoneDetected(MOTION_SIDE_R) && gMaterialGoneEvent[MOTION_SIDE_R]) {
@@ -1083,7 +1002,6 @@ static void feedStageServiceAsync() {
 }
 
 static const char* feedWarnName(FeedStageSideWarn w) {
-  if (w == FEED_WARN_JOINT) return "joint";
   if (w == FEED_WARN_MATERIAL) return "material";
   return "";
 }
@@ -1097,11 +1015,11 @@ static void printFeedStageResultJson(const FeedStageResult& r) {
   Serial.print(feedStageErrorName(r.error));
   Serial.print(F("\",\"warn\":\""));
   if (wR != FEED_WARN_NONE && wL != FEED_WARN_NONE) {
-    Serial.print((wR == FEED_WARN_JOINT || wL == FEED_WARN_JOINT) ? "joint_rl" : "material_rl");
+    Serial.print("material_rl");
   } else if (wR != FEED_WARN_NONE) {
-    Serial.print(wR == FEED_WARN_JOINT ? "joint_r" : "material_r");
+    Serial.print("material_r");
   } else if (wL != FEED_WARN_NONE) {
-    Serial.print(wL == FEED_WARN_JOINT ? "joint_l" : "material_l");
+    Serial.print("material_l");
   }
   Serial.print(F("\",\"R\":{\"laser\":"));
   Serial.print(r.side[MOTION_SIDE_R].laserOn ? "true" : "false");
@@ -1536,10 +1454,6 @@ static void printStatusJson() {
     Serial.print(sideTag[i]);
     Serial.print(F("\":{\"laser\":"));
     Serial.print(laserIsOn(side) ? "true" : "false");
-    Serial.print(F(",\"joint\":"));
-    Serial.print(jointIsOn(side) ? "true" : "false");
-    Serial.print(F(",\"joint_event\":"));
-    Serial.print(gJointEvent[side] ? "true" : "false");
     Serial.print(F(",\"material\":"));
     Serial.print(materialIsOn(side) ? "true" : "false");
     Serial.print(F(",\"material_event\":"));
@@ -1658,13 +1572,9 @@ static void handleSerialLine(char* line) {
     else if (strstr(line, "\"side\":\"L\"")) clearR = false;
     sensorEventsClear(clearR, clearL);
     Serial.print(F("{\"op\":\"sensor_events_clear\",\"ok\":true"));
-    Serial.print(F(",\"R\":{\"joint_event\":"));
-    Serial.print(gJointEvent[MOTION_SIDE_R] ? "true" : "false");
-    Serial.print(F(",\"material_event\":"));
+    Serial.print(F(",\"R\":{\"material_event\":"));
     Serial.print(gMaterialGoneEvent[MOTION_SIDE_R] ? "true" : "false");
-    Serial.print(F("},\"L\":{\"joint_event\":"));
-    Serial.print(gJointEvent[MOTION_SIDE_L] ? "true" : "false");
-    Serial.print(F(",\"material_event\":"));
+    Serial.print(F("},\"L\":{\"material_event\":"));
     Serial.print(gMaterialGoneEvent[MOTION_SIDE_L] ? "true" : "false");
     Serial.println(F("}}"));
     return;
@@ -1806,16 +1716,11 @@ static void handleSerialLine(char* line) {
     else if (strstr(line, "\"side\":\"R\"")) req.useL = false;
     if (strstr(line, "\"mode\":\"clean\"")) {
       req.ignoreLaser = true;
-      req.ignoreJoint = true;      // purga: Joint puede seguir ON
       req.ignoreMaterial = true;   // purga: material puede seguir ausente
       req.laserTimeoutMs = 3000u;
     } else if (strstr(line, "\"mode\":\"laser\"")) {
-      req.ignoreJoint = true;
       req.ignoreMaterial = true;
       req.laserTimeoutMs = 10000u;
-    }
-    if (strstr(line, "\"ignore_joint\":true") || strstr(line, "\"ignore_joint\": true")) {
-      req.ignoreJoint = true;
     }
     if (strstr(line, "\"ignore_material\":true") || strstr(line, "\"ignore_material\": true")) {
       req.ignoreMaterial = true;

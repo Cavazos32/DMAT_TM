@@ -46,6 +46,7 @@
 
   <div class="main-layout">
     <div class="status-banner status-banner--idle status-banner--full" id="statusBanner" role="status">
+      <button type="button" class="status-banner__close" id="statusBannerClose" data-action="purga_terminar" hidden aria-label="Terminar purga" title="Terminar">×</button>
       <div class="status-banner__lead">
         <span class="status-banner__eyebrow">Estado de la máquina</span>
         <div class="status-banner__main">
@@ -58,11 +59,17 @@
       <div class="status-banner__divider" aria-hidden="true"></div>
       <button type="button" class="btn btn-reset status-banner__open-error" id="btnOpenRecovery" hidden>Abrir</button>
       <div class="status-banner__actions" id="statusBannerActions" hidden>
-        <button type="button" class="btn btn-manual" data-action="purga_alimentar">Alimentar</button>
-        <button type="button" class="btn btn-manual" data-plc-op="valve" data-plc-name="holder_encoder" data-plc-keep-label aria-pressed="false" title="Abrir o cerrar holder y encoder juntos">Liberar</button>
-        <button type="button" class="btn btn-start" data-action="charola_vacia" hidden>Charola vacía</button>
-        <button type="button" class="btn btn-resume" data-action="purga_continuar">Continuar</button>
-        <button type="button" class="btn btn-secondary" data-action="purga_terminar">Terminar</button>
+        <div class="status-banner__actions-proceso" data-banner-group="proceso">
+          <button type="button" class="btn btn-resume" data-action="purga_continuar">Continuar</button>
+          <button type="button" class="btn btn-stop" data-action="purga_detener">Detener</button>
+          <button type="button" class="btn btn-start" data-action="charola_vacia" hidden>Charola vacía</button>
+        </div>
+        <div class="status-banner__actions-sep" data-banner-sep hidden aria-hidden="true"></div>
+        <div class="status-banner__actions-helpers" data-banner-group="helpers">
+          <span class="status-banner__actions-label">Helpers</span>
+          <button type="button" class="btn btn-manual" data-action="purga_alimentar">Alimentar</button>
+          <button type="button" class="btn btn-manual" data-plc-op="valve" data-plc-name="holder_encoder" data-plc-keep-label aria-pressed="false" title="Abrir o cerrar holder y encoder juntos">Liberar</button>
+        </div>
       </div>
     </div>
 
@@ -158,19 +165,31 @@
           </div>
         </article>
 
-        <div class="prod-blocks" aria-label="Tiempos de producción">
-          <article class="metric-card">
-            <span class="metric-label">Tiempo de ciclo</span>
-            <span class="metric-value" id="metricTiempoCiclo">—</span>
-          </article>
-          <article class="metric-card">
-            <span class="metric-label">Tiempo restante</span>
-            <span class="metric-value" id="metricTiempoEstimado">—</span>
-          </article>
-          <article class="metric-card">
-            <span class="metric-label">Tiempo transcurrido</span>
-            <span class="metric-value" id="metricTiempoCorriendo">0.0 s</span>
-          </article>
+        <div class="prod-metrics" aria-label="Ritmo y tiempos de producción">
+          <div class="prod-blocks prod-blocks--rates" aria-label="Ritmo de producción">
+            <article class="metric-card">
+              <span class="metric-label">Producción por hora</span>
+              <span class="metric-value" id="metricProdHora">—</span>
+            </article>
+            <article class="metric-card">
+              <span class="metric-label">Producción por minuto</span>
+              <span class="metric-value" id="metricProdMinuto">—</span>
+            </article>
+          </div>
+          <div class="prod-blocks" aria-label="Tiempos de producción">
+            <article class="metric-card">
+              <span class="metric-label">Tiempo de ciclo</span>
+              <span class="metric-value" id="metricTiempoCiclo">—</span>
+            </article>
+            <article class="metric-card">
+              <span class="metric-label">Tiempo restante</span>
+              <span class="metric-value" id="metricTiempoEstimado">—</span>
+            </article>
+            <article class="metric-card">
+              <span class="metric-label">Tiempo transcurrido</span>
+              <span class="metric-value" id="metricTiempoCorriendo">0.0 s</span>
+            </article>
+          </div>
         </div>
       </section>
 
@@ -178,7 +197,6 @@
         <section class="panel panel--prefeeder" data-block="prealimentador">
           <h2 class="panel-title">Prealimentador</h2>
           <div class="btn-grid">
-            <button type="button" class="btn btn-start" data-action="iniciar">Iniciar prealimentador</button>
             <button type="button" class="btn btn-feeder" data-pf-hold="R" data-action="alimentar_derecha">Prealimentar (R)</button>
             <button type="button" class="btn btn-feeder" data-pf-hold="L" data-action="alimentar_izquierda">Prealimentar (L)</button>
           </div>
@@ -216,6 +234,7 @@
           <button type="button" class="btn btn-config" data-action="parametros">Parámetros</button>
           <button type="button" class="btn btn-config" data-action="mantenimiento">Mantenimiento</button>
           <button type="button" class="btn btn-config" data-action="checklist">Checklist</button>
+          <button type="button" class="btn btn-config" data-action="checklist_sim">Simular checklist</button>
         </div>
 
         <div class="settings-divider" role="separator"></div>
@@ -361,11 +380,6 @@
                       <span class="motion-laser__name">Láser</span>
                       <span class="motion-laser__state">Sin detección</span>
                     </p>
-                    <p class="motion-laser" id="jointLedR" role="status" aria-label="Joint lado R sin detección">
-                      <span class="motion-laser__led" aria-hidden="true"></span>
-                      <span class="motion-laser__name">Joint</span>
-                      <span class="motion-laser__state">Sin detección</span>
-                    </p>
                     <p class="motion-laser" id="materialLedR" role="status" aria-label="Material lado R ausente">
                       <span class="motion-laser__led" aria-hidden="true"></span>
                       <span class="motion-laser__name">Material</span>
@@ -380,11 +394,6 @@
                     <p class="motion-laser" id="laserLedL" role="status" aria-label="Láser lado L sin detección">
                       <span class="motion-laser__led" aria-hidden="true"></span>
                       <span class="motion-laser__name">Láser</span>
-                      <span class="motion-laser__state">Sin detección</span>
-                    </p>
-                    <p class="motion-laser" id="jointLedL" role="status" aria-label="Joint lado L sin detección">
-                      <span class="motion-laser__led" aria-hidden="true"></span>
-                      <span class="motion-laser__name">Joint</span>
                       <span class="motion-laser__state">Sin detección</span>
                     </p>
                     <p class="motion-laser" id="materialLedL" role="status" aria-label="Material lado L ausente">
@@ -732,38 +741,6 @@
         <div class="recovery-error-box" id="recoveryErrorBox" hidden>
           <p class="recovery-error-box__code" id="recoveryCode"></p>
           <p class="recovery-error-box__desc" id="recoveryErrorDesc"></p>
-        </div>
-        <div class="recovery-joint-legend" id="recoveryJointLegend" hidden>
-          <p class="recovery-joint-legend__title">Funciones Extras</p>
-          <div class="recovery-joint-cards">
-            <article class="recovery-joint-card recovery-joint-card--alimentar">
-              <header class="recovery-joint-card__head">
-                <span class="recovery-joint-card__name">Alimentar</span>
-                <span class="recovery-joint-card__tag">Extra</span>
-              </header>
-              <p class="recovery-joint-card__desc">
-                Avanza un poco el material del lado afectado. Puedes repetirlo.
-              </p>
-            </article>
-            <article class="recovery-joint-card recovery-joint-card--liberar">
-              <header class="recovery-joint-card__head">
-                <span class="recovery-joint-card__name">Liberar</span>
-                <span class="recovery-joint-card__tag">Extra</span>
-              </header>
-              <p class="recovery-joint-card__desc">
-                Suelta las sujeciones para retirar o acomodar material a mano.
-              </p>
-            </article>
-            <article class="recovery-joint-card recovery-joint-card--continuar">
-              <header class="recovery-joint-card__head">
-                <span class="recovery-joint-card__name">Continuar</span>
-                <span class="recovery-joint-card__tag">Siguiente</span>
-              </header>
-              <p class="recovery-joint-card__desc">
-                Inicia la limpieza automática. No metas las manos.
-              </p>
-            </article>
-          </div>
         </div>
         <p class="recovery-text" id="recoveryText"></p>
         <div class="recovery-sensors" id="recoverySensors" hidden>

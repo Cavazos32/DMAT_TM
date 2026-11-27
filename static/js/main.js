@@ -39,6 +39,8 @@
     metricCutCompL: document.getElementById("metricCutCompL"),
     pieceTube: document.getElementById("pieceTube"),
     metricTiempoCiclo: document.getElementById("metricTiempoCiclo"),
+    metricProdHora: document.getElementById("metricProdHora"),
+    metricProdMinuto: document.getElementById("metricProdMinuto"),
     metricPiezasProducidas: document.getElementById("metricPiezasProducidas"),
     metricPiezasTotal: document.getElementById("metricPiezasTotal"),
     metricTiempoEstimado: document.getElementById("metricTiempoEstimado"),
@@ -96,6 +98,7 @@
     cycleStepStop: document.getElementById("cycleStepStop"),
     cycleStepTestHint: document.getElementById("cycleStepTestHint"),
     statusBannerActions: document.getElementById("statusBannerActions"),
+    statusBannerClose: document.getElementById("statusBannerClose"),
     checklistModal: document.getElementById("checklistModal"),
     checklistModalClose: document.getElementById("checklistModalClose"),
     checklistBody: document.getElementById("checklistBody"),
@@ -120,7 +123,6 @@
     recoveryCode: document.getElementById("recoveryCode"),
     recoveryErrorDesc: document.getElementById("recoveryErrorDesc"),
     recoveryText: document.getElementById("recoveryText"),
-    recoveryJointLegend: document.getElementById("recoveryJointLegend"),
     recoverySensors: document.getElementById("recoverySensors"),
     recoverySensorR: document.getElementById("recoverySensorR"),
     recoverySensorL: document.getElementById("recoverySensorL"),
@@ -149,8 +151,219 @@
   let plcPollTimer = null;
   /** Último espejo PLC del /api/state (para Liberar en purga). */
   let lastPlcOutputs = null;
+  let lastPrefeederStatus = null;
+  let lastMotionSnap = { lm_homed: null, encoder: null };
   let pfPollTimer = null;
+  let checklistPfHoldSide = null;
   let checklistViewKey = "";
+  let lastChecklistState = null;
+  const CHECKLIST_SIM_SCENES = [
+    {
+      id: "p1",
+      label: "1 · Empleado",
+      mensaje: "",
+      checklist: {
+        ok: false,
+        paso: 1,
+        empleado: "",
+        aire_ok: false,
+        eje_ok: false,
+        recorrido_ok: false,
+        alimentador_ok: false,
+        purga_ok: false,
+        piezas_cortadas: false,
+      },
+    },
+    {
+      id: "p2",
+      label: "2 · Aire",
+      mensaje: "",
+      checklist: {
+        ok: false,
+        paso: 2,
+        empleado: "12345",
+        aire_ok: false,
+        eje_ok: false,
+        recorrido_ok: false,
+        alimentador_ok: false,
+        purga_ok: false,
+        piezas_cortadas: false,
+      },
+    },
+    {
+      id: "p3",
+      label: "3 · Holgura",
+      mensaje: "",
+      checklist: {
+        ok: false,
+        paso: 3,
+        empleado: "12345",
+        aire_ok: true,
+        eje_ok: false,
+        recorrido_ok: false,
+        alimentador_ok: false,
+        purga_ok: false,
+        piezas_cortadas: false,
+      },
+    },
+    {
+      id: "p4a",
+      label: "4 · Referencia",
+      mensaje: "",
+      checklist: {
+        ok: false,
+        paso: 4,
+        empleado: "12345",
+        aire_ok: true,
+        eje_ok: false,
+        recorrido_ok: false,
+        alimentador_ok: false,
+        purga_ok: false,
+        piezas_cortadas: false,
+      },
+    },
+    {
+      id: "p4b",
+      label: "4 · Tras home",
+      mensaje: "Eje en referencia. Haz el recorrido y confirma que regresó.",
+      checklist: {
+        ok: false,
+        paso: 4,
+        empleado: "12345",
+        aire_ok: true,
+        eje_ok: true,
+        recorrido_ok: false,
+        alimentador_ok: false,
+        purga_ok: false,
+        piezas_cortadas: false,
+      },
+    },
+    {
+      id: "p4c",
+      label: "4 · Tras recorrido",
+      mensaje: "Recorrido listo. Confirma que el eje regresó.",
+      checklist: {
+        ok: false,
+        paso: 4,
+        empleado: "12345",
+        aire_ok: true,
+        eje_ok: true,
+        recorrido_ok: true,
+        alimentador_ok: false,
+        purga_ok: false,
+        piezas_cortadas: false,
+      },
+    },
+    {
+      id: "p5a",
+      label: "5 · Preparar",
+      mensaje: "",
+      checklist: {
+        ok: false,
+        paso: 5,
+        empleado: "12345",
+        aire_ok: true,
+        eje_ok: true,
+        recorrido_ok: true,
+        alimentador_ok: false,
+        purga_ok: false,
+        piezas_cortadas: false,
+      },
+    },
+    {
+      id: "p5b",
+      label: "5 · Tras preparar",
+      mensaje: "Motion y PreAlimentador listos.",
+      checklist: {
+        ok: false,
+        paso: 5,
+        empleado: "12345",
+        aire_ok: true,
+        eje_ok: true,
+        recorrido_ok: true,
+        alimentador_ok: true,
+        purga_ok: false,
+        piezas_cortadas: false,
+      },
+    },
+    {
+      id: "p5c",
+      label: "5 · Tras purga",
+      mensaje: "Purga de revisión lista.",
+      checklist: {
+        ok: false,
+        paso: 5,
+        empleado: "12345",
+        aire_ok: true,
+        eje_ok: true,
+        recorrido_ok: true,
+        alimentador_ok: true,
+        purga_ok: true,
+        piezas_cortadas: false,
+      },
+    },
+    {
+      id: "p6a",
+      label: "6 · Cortar",
+      mensaje: "",
+      checklist: {
+        ok: false,
+        paso: 6,
+        empleado: "12345",
+        aire_ok: true,
+        eje_ok: true,
+        recorrido_ok: true,
+        alimentador_ok: true,
+        purga_ok: true,
+        piezas_cortadas: false,
+      },
+    },
+    {
+      id: "p6b",
+      label: "6 · Medición",
+      mensaje: "Piezas cortadas. Anota la longitud medida de cada lado.",
+      checklist: {
+        ok: false,
+        paso: 6,
+        empleado: "12345",
+        aire_ok: true,
+        eje_ok: true,
+        recorrido_ok: true,
+        alimentador_ok: true,
+        purga_ok: true,
+        piezas_cortadas: true,
+      },
+    },
+    {
+      id: "ok",
+      label: "Completo",
+      mensaje: "Revisión de arranque completa. Ya se puede iniciar.",
+      checklist: {
+        ok: true,
+        paso: 6,
+        empleado: "12345",
+        aire_ok: true,
+        eje_ok: true,
+        recorrido_ok: true,
+        alimentador_ok: true,
+        purga_ok: true,
+        piezas_cortadas: true,
+      },
+    },
+  ];
+  let checklistSim = {
+    active: false,
+    scene: 0,
+    mensaje: "",
+    rutina: "",
+    checklist: null,
+    ciclos_mant_r: 120,
+    ciclos_mant_l: 95,
+    log: [
+      { fecha: "2026-03-20 08:12", empleado: "12345", resultado: "ok" },
+      { fecha: "2026-03-19 14:40", empleado: "67890", resultado: "ok" },
+    ],
+  };
   let mantViewKey = "";
   let mantResetSide = "";
   let empleadoWait = null;
@@ -218,6 +431,15 @@
       return m + " min " + String(r).padStart(2, "0") + " s";
     }
     return n.toFixed(1) + " s";
+  }
+
+  function formatProdRate(cycleS, perSeconds) {
+    const t = Number(cycleS);
+    if (!Number.isFinite(t) || t <= 0) return "—";
+    const rate = perSeconds / t;
+    if (!Number.isFinite(rate) || rate <= 0) return "—";
+    const digits = rate >= 100 ? 0 : rate >= 10 ? 1 : 2;
+    return rate.toFixed(digits) + " pza";
   }
 
   function formatPiezasCount(n) {
@@ -435,23 +657,16 @@
     let bannerEstado = estado;
     const recNow = state.recovery || {};
     const recStep = String(recNow.step || "");
-    const jointWarn =
-      !!recNow.active && (recNow.kind === "joint" || recNow.kind === "material");
     // listo = recuperación terminada: ya no es banner de error (ni texto rojo al lado).
-    const recoveryErrorActive =
-      !!recNow.active &&
-      recNow.kind !== "joint" &&
-      recNow.kind !== "material" &&
-      recStep !== "listo";
+    const recoveryErrorActive = !!recNow.active && recStep !== "listo";
     if (state.rutina_manos) bannerEstado = "stopped";
     else if (state.rutina) bannerEstado = "manual";
-    else if (jointWarn) bannerEstado = "warning";
     else if (recoveryErrorActive || estado === "error") bannerEstado = "error";
     els.statusBanner.className =
       "status-banner status-banner--full " +
       (bannerClassByEstado[bannerEstado] || bannerClassByEstado.idle);
     const showErrorLine =
-      recoveryErrorActive || estado === "error" || jointWarn;
+      recoveryErrorActive || estado === "error";
     if (showErrorLine) {
       const errCode = recNow.code || state.ciclo_error || "";
       const errMsg = recNow.mensaje || state.mensaje || "";
@@ -466,7 +681,7 @@
       let detail = handsWarn ? "NO INTRODUCIR MANOS" : "";
       if (!detail && state.sin_material) {
         detail = "Se requiere material en ambos lados";
-      } else if (!detail && state.poco_material && !jointWarn) {
+      } else if (!detail && state.poco_material) {
         detail = "Trabajando con poco material";
       }
       els.statusBannerDetail.textContent = detail;
@@ -502,6 +717,12 @@
     updatePieceVisual(state);
     if (els.metricTiempoCiclo) {
       els.metricTiempoCiclo.textContent = formatSeconds(state.tiempo_ciclo_s);
+    }
+    if (els.metricProdHora) {
+      els.metricProdHora.textContent = formatProdRate(state.tiempo_ciclo_s, 3600);
+    }
+    if (els.metricProdMinuto) {
+      els.metricProdMinuto.textContent = formatProdRate(state.tiempo_ciclo_s, 60);
     }
     if (els.metricPiezasProducidas) {
       els.metricPiezasProducidas.textContent = formatPiezasCount(
@@ -977,42 +1198,21 @@
     if (!els.recoveryModal || els.recoveryModal.hidden) return;
     recoveryPollBusy = true;
     try {
-      const mode = String(els.recoveryModal.dataset.sensorMode || "");
-      if (mode === "joint" || mode === "laser") {
+      if (String(els.recoveryModal.dataset.sensorMode || "") === "laser") {
         const res = await fetch("/api/motion/status");
         const data = await res.json();
         const enc = (data && data.encoder) || {};
         const busy =
           !!els.recoveryModal &&
           els.recoveryModal.dataset.recoveryBusy === "1";
-        if (mode === "joint") {
-          const onR = !!(enc.R && enc.R.joint === true);
-          const onL = !!(enc.L && enc.L.joint === true);
-          setRecoverySensorEl(els.recoverySensorR, onR);
-          setRecoverySensorEl(els.recoverySensorL, onL);
-          const cont = els.recoveryActions
-            ? els.recoveryActions.querySelector(
-                '[data-recovery="joint_continuar"]'
-              )
-            : null;
-          if (cont) {
-            const side = String(
-              (els.recoveryModal && els.recoveryModal.dataset.jointSide) || ""
-            ).toUpperCase();
-            const blocked =
-              side === "L" ? onL : side === "R" ? onR : onR || onL;
-            cont.disabled = busy || blocked;
-          }
-        } else {
-          const onR = !!(enc.R && enc.R.laser === true);
-          const onL = !!(enc.L && enc.L.laser === true);
-          setRecoverySensorEl(els.recoverySensorR, onR);
-          setRecoverySensorEl(els.recoverySensorL, onL);
-          const cont = els.recoveryActions
-            ? els.recoveryActions.querySelector('[data-recovery="manguera"]')
-            : null;
-          if (cont) cont.disabled = busy || onR || onL;
-        }
+        const onR = !!(enc.R && enc.R.laser === true);
+        const onL = !!(enc.L && enc.L.laser === true);
+        setRecoverySensorEl(els.recoverySensorR, onR);
+        setRecoverySensorEl(els.recoverySensorL, onL);
+        const cont = els.recoveryActions
+          ? els.recoveryActions.querySelector('[data-recovery="manguera"]')
+          : null;
+        if (cont) cont.disabled = busy || onR || onL;
       }
     } catch (e) {
       /* ignore */
@@ -1049,9 +1249,9 @@
     return false;
   }
 
-  function syncRecoverySkipLink(step, rutina, jointKind) {
+  function syncRecoverySkipLink(step, rutina) {
     if (!els.recoverySkipLink) return;
-    const show = !jointKind && recoverySkipAvailable(step, rutina);
+    const show = recoverySkipAvailable(step, rutina);
     els.recoverySkipLink.hidden = !show;
     const row = els.recoverySkipLink.closest(".recovery-step-row");
     if (row) row.hidden = !show;
@@ -1069,93 +1269,10 @@
     return group;
   }
 
-  function renderRecoveryActions(step, jointCtx, rutina) {
+  function renderRecoveryActions(step, rutina) {
     if (!els.recoveryActions) return;
     els.recoveryActions.innerHTML = "";
-    const joint = jointCtx || null;
-    syncRecoverySkipLink(step, rutina, !!joint);
-    if (joint) {
-      const busy = !!(joint && joint.busy);
-      // Tras Reset el Warning sigue el flujo normal piezas → manguera → purga.
-      if (
-        step === "piezas" ||
-        step === "manguera" ||
-        step === "purga" ||
-        step === "purga_error"
-      ) {
-        /* cae al render de recuperación estándar más abajo */
-      } else if (
-        step === "await_piece" ||
-        step === "post_cut" ||
-        step === "await_home" ||
-        step === "park"
-      ) {
-        const wait = recoveryPrimaryButton(
-          step === "await_piece"
-            ? "Terminando pieza del lado sano… espera"
-            : step === "post_cut"
-              ? "Terminando descarga… luego Reset"
-              : step === "await_home"
-                ? "Regresando a Home… espera"
-                : "Preparando… espera",
-          "btn-secondary",
-          "wait"
-        );
-        wait.disabled = true;
-        els.recoveryActions.appendChild(wait);
-        return;
-      } else if (step === "await_reset" || step === "segregate" || step === "operator") {
-        const required = recoveryActionsGroup("required", "Siguiente");
-        const resetBtn = recoveryPrimaryButton(
-          "Reset",
-          "btn-reset",
-          "reset"
-        );
-        resetBtn.disabled = busy;
-        required.appendChild(resetBtn);
-        els.recoveryActions.appendChild(required);
-        return;
-      } else if (step === "classify") {
-        const required = recoveryActionsGroup("required", "Clasificación");
-        if (joint.segregateOnly) {
-          const done = recoveryPrimaryButton(
-            "Confirmar segregación",
-            "btn-start",
-            "joint_segregate_done"
-          );
-          done.disabled = busy;
-          required.appendChild(done);
-        } else {
-          const good = recoveryPrimaryButton(
-            "Pieza buena",
-            "btn-start",
-            "joint_classify_good"
-          );
-          const bad = recoveryPrimaryButton(
-            "Pieza mala",
-            "btn-secondary",
-            "joint_classify_bad"
-          );
-          good.disabled = busy;
-          bad.disabled = busy;
-          required.appendChild(good);
-          required.appendChild(bad);
-        }
-        els.recoveryActions.appendChild(required);
-        return;
-      } else if (step === "listo") {
-        els.recoveryActions.appendChild(
-          recoveryPrimaryButton(
-            "Volver a la pantalla principal",
-            "btn-start",
-            "listo"
-          )
-        );
-        return;
-      } else {
-        return;
-      }
-    }
+    syncRecoverySkipLink(step, rutina);
     if (step === "error") {
       els.recoveryActions.appendChild(
         recoveryPrimaryButton("Reset", "btn-reset", "reset")
@@ -1237,7 +1354,6 @@
     const rec = state.recovery || {};
     const active = !!rec.active;
     const step = String(rec.step || "");
-    const jointKind = rec.kind === "joint" || rec.kind === "material";
     const enError = state.estado === "error" || !!state.ciclo_error;
     const code = rec.code || state.ciclo_error || "";
     const linkCom = isLinkComError(code);
@@ -1250,12 +1366,6 @@
       els.btnOpenRecovery.disabled = !showBtn;
       if (linkCom) {
         els.btnOpenRecovery.textContent = "Abrir";
-      } else if (jointKind) {
-        if (step === "listo") {
-          els.btnOpenRecovery.textContent = "Ver Warning";
-        } else {
-          els.btnOpenRecovery.textContent = "Abrir Warning";
-        }
       } else if (step === "listo") {
         els.btnOpenRecovery.textContent = "Ver recuperación";
       } else if (enError) {
@@ -1266,7 +1376,7 @@
     }
 
     // COM/enlace: no popup de recuperación; Abrir lleva a Conexión.
-    if (linkCom && enError && !jointKind) {
+    if (linkCom && enError) {
       setRecoveryPoll(false);
       recoveryWantOpen = false;
       if (els.recoveryModal && !els.recoveryModal.hidden) {
@@ -1300,7 +1410,7 @@
       "|" +
       String(code || "") +
       "|" +
-      (jointKind ? "j" : "x") +
+      "x" +
       "|" +
       String(viewStep || "");
     if (autoKey !== recoveryAutoKey) {
@@ -1317,7 +1427,7 @@
       "|" +
       code +
       "|" +
-      (jointKind ? "j" : "e") +
+      "e" +
       "|" +
       String(rec.side || "") +
       "|" +
@@ -1341,28 +1451,11 @@
       openRecoveryModal();
     }
 
-    if (els.recoveryModal) {
-      els.recoveryModal.dataset.jointMode = jointKind ? "1" : "";
-    }
-
     if (els.recoveryModalTitle) {
-      if (jointKind) {
-        const side = String(rec.side || "");
-        const sideLabel =
-          side === "RL" ? "R y L" : side === "L" ? "L" : side === "R" ? "R" : "";
-        const warnTitle =
-          rec.kind === "material" ? "Warning Material" : "Warning Joint";
-        els.recoveryModalTitle.textContent =
-          viewStep === "listo"
-            ? "Warning listo"
-            : warnTitle + (sideLabel ? " · " + sideLabel : "");
-      } else {
-        els.recoveryModalTitle.textContent =
-          viewStep === "listo" ? "Listo" : "Recuperación";
-      }
+      els.recoveryModalTitle.textContent =
+        viewStep === "listo" ? "Listo" : "Recuperación";
     }
 
-    const jointOrigin = String(rec.origin || "");
     const errorFixed = String(rec.mensaje || "").trim();
     const stepGuide = String(rec.guide || "").trim();
     if (els.recoveryStepLabel) {
@@ -1370,13 +1463,13 @@
       els.recoveryStepLabel.textContent = "";
     }
     if (els.recoveryLead) {
-      const showHandsWarn = !jointKind && viewStep === "purga";
+      const showHandsWarn = viewStep === "purga";
       els.recoveryLead.hidden = !showHandsWarn;
       els.recoveryLead.textContent = showHandsWarn ? "NO INTRODUCIR MANOS" : "";
       els.recoveryLead.classList.toggle("is-hands-warn", showHandsWarn);
     }
     if (els.recoveryText) {
-      if (!stepGuide || (!jointKind && viewStep === "purga")) {
+      if (!stepGuide || viewStep === "purga") {
         els.recoveryText.hidden = true;
         els.recoveryText.textContent = "";
         els.recoveryText.classList.remove("is-hands-warn");
@@ -1384,10 +1477,7 @@
         els.recoveryText.hidden = false;
         els.recoveryText.innerHTML =
           '<span class="recovery-text__label">INSTRUCCIONES:</span> ' + stepGuide;
-        els.recoveryText.classList.toggle(
-          "is-hands-warn",
-          !!(jointKind && viewStep === "park")
-        );
+        els.recoveryText.classList.toggle("is-hands-warn", false);
       }
     }
     if (els.recoveryModal) {
@@ -1395,9 +1485,8 @@
       if (panel) panel.classList.toggle("is-hands-warn", viewStep === "purga");
     }
 
-   const showErrorBox =
+    const showErrorBox =
       (!!active && !!code) ||
-      jointKind ||
       viewStep === "error" ||
       viewStep === "purga_error";
     const parsed = parseRecoveryError(code, errorFixed);
@@ -1419,34 +1508,12 @@
 
     const nameR = document.getElementById("recoverySensorNameR");
     const nameL = document.getElementById("recoverySensorNameL");
-    if (jointKind) {
-      if (nameR) nameR.textContent = "Joint Right";
-      if (nameL) nameL.textContent = "Joint Left";
-    } else {
-      if (nameR) nameR.textContent = "Sensor láser derecho";
-      if (nameL) nameL.textContent = "Sensor láser izquierdo";
-    }
+    if (nameR) nameR.textContent = "Sensor láser derecho";
+    if (nameL) nameL.textContent = "Sensor láser izquierdo";
 
-    const showSensors =
-      (jointKind &&
-        (viewStep === "segregate" ||
-          viewStep === "await_reset" ||
-          viewStep === "classify" ||
-          viewStep === "operator" ||
-          viewStep === "await_piece" ||
-          viewStep === "piezas" ||
-          viewStep === "manguera")) ||
-      (!jointKind && (viewStep === "manguera" || viewStep === "purga_error"));
-    if (els.recoveryJointLegend) {
-      // Las descripciones brves van en «Funciones Extras» de las acciones.
-      els.recoveryJointLegend.hidden = true;
-    }
+    const showSensors = viewStep === "manguera" || viewStep === "purga_error";
     if (els.recoveryModal) {
-      els.recoveryModal.dataset.jointMode = jointKind ? "1" : "";
-      els.recoveryModal.dataset.sensorMode = jointKind ? "joint" : "laser";
-      els.recoveryModal.dataset.jointSide = jointKind
-        ? String(rec.side || "")
-        : "";
+      els.recoveryModal.dataset.sensorMode = "laser";
       els.recoveryModal.dataset.lmAtPark = rec.lm_at_park ? "1" : "";
       els.recoveryModal.dataset.recoveryBusy = rec.busy ? "1" : "";
     }
@@ -1457,22 +1524,10 @@
 
     if (key !== recoveryViewKey) {
       recoveryViewKey = key;
-      renderRecoveryActions(
-        viewStep,
-        jointKind
-          ? {
-              origin: jointOrigin,
-              side: rec.side,
-              busy: !!rec.busy,
-              segregateOnly: !!rec.segregate_only,
-              healthySide: String(rec.healthy_side || ""),
-            }
-          : null,
-        rutina
-      );
+      renderRecoveryActions(viewStep, rutina);
       if (showSensors) pollRecoverySensors();
     } else {
-      syncRecoverySkipLink(viewStep, rutina, jointKind);
+      syncRecoverySkipLink(viewStep, rutina);
       if (showSensors) pollRecoverySensors();
     }
   }
@@ -2266,16 +2321,14 @@
   }
 
   function motionShowEncoder(encoder) {
-    // Poll de sensores Motion (láser/joint/material). Sin lectura de encoder OM.
+    // Poll de sensores Motion (láser/material). Sin lectura de encoder OM.
     ["R", "L"].forEach(function (side) {
       const laserLed = document.getElementById(side === "R" ? "laserLedR" : "laserLedL");
-      const jointLed = document.getElementById(side === "R" ? "jointLedR" : "jointLedL");
       const materialLed = document.getElementById(
         side === "R" ? "materialLedR" : "materialLedL"
       );
       const sideData = encoder && encoder[side];
       motionShowSensorLed(laserLed, side, "Láser", !!(sideData && sideData.laser === true));
-      motionShowSensorLed(jointLed, side, "Joint", !!(sideData && sideData.joint === true));
       if (materialLed) {
         const matOn = !!(sideData && sideData.material === true);
         const stateEl = materialLed.querySelector(".motion-laser__state");
@@ -2297,6 +2350,10 @@
       const res = await fetch("/api/motion/status");
       const data = await res.json();
       if (data.ok && data.sent) {
+        lastMotionSnap = {
+          lm_homed: data.lm_homed,
+          encoder: data.encoder || null,
+        };
         motionShowEncoder(data.encoder);
         if (typeof data.lm_servo_on === "boolean") latchLmServo(data.lm_servo_on);
         if (data.feeder_servo_on) {
@@ -2305,6 +2362,13 @@
           if (data.feeder_servo_on.R != null || data.feeder_servo_on.L != null) {
             latchFeederServo(rOn && lOn);
           }
+        }
+        if (document.getElementById("checklistLmIndicators")) {
+          const ch = (lastChecklistState && lastChecklistState.checklist) || {};
+          syncChecklistLmIndicators(lastMotionSnap, ch);
+        }
+        if (document.getElementById("checklistLaserIndicators")) {
+          syncChecklistLaserIndicators(data.encoder);
         }
       }
     } catch (err) {
@@ -2388,9 +2452,9 @@
       purga_limpiar_l: "Expulsar L",
       purga_continuar: "Continuar",
       purga_terminar: "Terminar",
+      purga_detener: "Detener",
       posicion_inicial: "Posición inicial",
       charola_vacia: "Charola vacía",
-      iniciar: "Iniciar (PreAlimentador)",
       alimentar_izquierda: "JOG - L",
       alimentar_derecha: "JOG - R",
       recovery_confirm_piezas: "Piezas bien",
@@ -2400,13 +2464,6 @@
       recovery_cancel_purga: "Cancelar purga",
       recovery_skip: "SKIP recuperación",
       recovery_done: "Volver",
-      joint_alimentar: "Joint Alimentar",
-      joint_liberar: "Joint Liberar",
-      joint_continuar: "Joint Continuar",
-      joint_retry: "Joint Retry",
-      joint_confirm: "Joint Confirm",
-      joint_continue: "Joint Continue",
-      joint_finish: "Joint Finish",
       materialista: "Materialista",
       tecnico: "Técnico",
       jefe: "Jefe de grupo",
@@ -3254,24 +3311,6 @@
       closeRecoveryModal();
       return;
     }
-    if (
-      op === "joint_alimentar" ||
-      op === "joint_liberar" ||
-      op === "joint_continuar" ||
-      op === "joint_retry" ||
-      op === "joint_confirm" ||
-      op === "joint_continue" ||
-      op === "joint_finish" ||
-      op === "joint_classify_good" ||
-      op === "joint_classify_bad" ||
-      op === "joint_segregate_done"
-    ) {
-      if (btn) btn.disabled = true;
-      await sendAction("operacion_manual", op);
-      recoveryWantOpen = true;
-      openRecoveryModal();
-      fetchState();
-    }
   }
 
   if (els.recoverySkipLink) {
@@ -3297,6 +3336,15 @@
   }
   if (els.checklistBody) {
     els.checklistBody.addEventListener("click", function (e) {
+      if (e.target.closest("[data-check-pf-hold]")) return;
+      const simNav = e.target.closest("[data-check-sim]");
+      if (simNav && checklistSim.active) {
+        const nav = simNav.getAttribute("data-check-sim");
+        if (nav === "prev") checklistSimGoto(checklistSim.scene - 1);
+        else if (nav === "next") checklistSimGoto(checklistSim.scene + 1);
+        else if (nav === "exit") closeChecklist();
+        return;
+      }
       const btn = e.target.closest("[data-check]");
       if (!btn || btn.disabled) return;
       const op = btn.getAttribute("data-check");
@@ -3311,8 +3359,37 @@
         extra.mm_l = left ? left.value : "";
         extra.mm_r = right ? right.value : "";
       }
+      if (checklistSim.active) {
+        applyChecklistSimAction(op, extra);
+        return;
+      }
       sendAction("checklist", op, extra);
     });
+
+    els.checklistBody.addEventListener("pointerdown", function (ev) {
+      const btn = ev.target.closest("[data-check-pf-hold]");
+      if (!btn || btn.disabled) return;
+      const side = String(btn.getAttribute("data-check-pf-hold") || "").toUpperCase();
+      if (side !== "L" && side !== "R") return;
+      ev.preventDefault();
+      try {
+        btn.setPointerCapture(ev.pointerId);
+      } catch (err) {
+        /* ignore */
+      }
+      checklistPfHoldSet(side, true);
+    });
+    function releaseChecklistPfHold(ev) {
+      const btn = ev.target.closest && ev.target.closest("[data-check-pf-hold]");
+      const side = btn
+        ? String(btn.getAttribute("data-check-pf-hold") || "").toUpperCase()
+        : checklistPfHoldSide;
+      if (side !== "L" && side !== "R") return;
+      checklistPfHoldSet(side, false);
+    }
+    els.checklistBody.addEventListener("pointerup", releaseChecklistPfHold);
+    els.checklistBody.addEventListener("pointercancel", releaseChecklistPfHold);
+    els.checklistBody.addEventListener("lostpointercapture", releaseChecklistPfHold);
   }
   if (els.mantModalClose) els.mantModalClose.addEventListener("click", closeMantenimiento);
   if (els.mantModal) {
@@ -3624,10 +3701,24 @@
         gripper: status.gripper === true,
         cutter_r: status.cutter_r === true,
         cutter_l: status.cutter_l === true,
+        fault_holder: status.fault_holder === true,
+        fault_encoder: status.fault_encoder === true,
+        fault_gripper: status.fault_gripper === true,
+        fault_cutter: status.fault_cutter === true,
       };
     }
     syncPlcHolderEncoderButton(status);
     syncMotionCuttersButton(status);
+    if (document.getElementById("checklistAirIndicators")) {
+      const base = lastChecklistState || {};
+      syncChecklistAirIndicators(
+        Object.assign({}, base, {
+          plc_outputs: Object.assign({}, lastPlcOutputs || {}, status, {
+            known: true,
+          }),
+        })
+      );
+    }
   }
 
   function clearPlcOutputs() {
@@ -3825,6 +3916,7 @@
 
   function applyPrefeederStatus(status) {
     if (!status) return;
+    lastPrefeederStatus = status;
     const tuneFromMaster = {};
     ["L", "R"].forEach(function (side) {
       const block = status[side];
@@ -3837,6 +3929,9 @@
     // No pisar valores que el operador está editando o aún no guardó.
     if (els.prefeederTuneForm && Object.keys(tuneFromMaster).length) {
       prefeederFormFromTune(tuneFromMaster);
+    }
+    if (document.getElementById("checklistHolguraIndicators")) {
+      syncChecklistHolguraIndicators(status);
     }
   }
 
@@ -4127,31 +4222,58 @@
         setButtonOn(btn, false);
       }
     });
-    const pfIniciar = document.querySelector('[data-block="prealimentador"] [data-action="iniciar"]');
-    if (pfIniciar) {
-      const pf = state.prefeeder || {};
-      if (pf.com === false) {
-        pfIniciar.title = "Sin COM del maestro (estabilización omitida).";
-      } else if (pf.ready) {
-        pfIniciar.title = "Ya está listo y bloqueado.";
-      } else if (pf.com && !pf.stable) {
-        pfIniciar.title = "Estabiliza ambos lados y bloquea.";
-      } else {
-        pfIniciar.title = "Estabiliza y bloquea el PreAlimentador.";
-      }
-    }
-
     if (els.statusBannerActions) {
-      const showPurge = purga && fase === "espera";
+      // Controles de purga siempre visibles mientras rutina=purga (también al alimentar).
+      const purgeIdle = purga && fase === "espera";
+      const purgeBusy =
+        purga &&
+        (fase === "segura" ||
+          fase === "alimentar" ||
+          fase === "limpiar" ||
+          fase === "corte");
+      const showPurge = purga;
       const showTray = !!state.charola_llena;
       els.statusBannerActions.hidden = !(showPurge || showTray);
+      const helpersGroup = els.statusBannerActions.querySelector(
+        '[data-banner-group="helpers"]'
+      );
+      const bannerSep = els.statusBannerActions.querySelector("[data-banner-sep]");
+      if (helpersGroup) helpersGroup.hidden = !showPurge;
+      if (bannerSep) bannerSep.hidden = !showPurge;
+      if (els.statusBannerClose) {
+        els.statusBannerClose.hidden = !showPurge;
+        els.statusBannerClose.disabled = !purgeIdle;
+      }
       els.statusBannerActions
         .querySelectorAll("[data-action], [data-plc-op]")
         .forEach(function (btn) {
-          const trayBtn = btn.dataset.action === "charola_vacia";
-          const show = trayBtn ? showTray : showPurge;
+          const action = btn.dataset.action || "";
+          const trayBtn = action === "charola_vacia";
+          const stopBtn = action === "purga_detener";
+          const continuarBtn = action === "purga_continuar";
+          const alimentarBtn = action === "purga_alimentar";
+          const liberarBtn = btn.dataset.plcOp === "valve";
+          let show = false;
+          if (trayBtn) show = showTray;
+          else if (continuarBtn || stopBtn) show = showPurge;
+          else if (alimentarBtn || liberarBtn) show = showPurge;
+          else show = showPurge;
           btn.hidden = !show;
-          btn.disabled = !show;
+          if (!show) {
+            btn.disabled = true;
+            return;
+          }
+          if (trayBtn) {
+            btn.disabled = false;
+          } else if (stopBtn) {
+            btn.disabled = !purgeBusy;
+          } else if (liberarBtn) {
+            // Liberar queda usable también en movimiento por si hay que abrir holder.
+            btn.disabled = false;
+          } else {
+            // Continuar / Alimentar solo en espera.
+            btn.disabled = !purgeIdle;
+          }
         });
       // Liberar sigue al espejo PLC (Alimentar/Continuar cambian válvulas sin /api/plc).
       const outs = state.plc_outputs;
@@ -4167,6 +4289,7 @@
         if (showPurge) syncPlcHolderEncoderButton(lastPlcOutputs);
       }
     }
+    lastChecklistState = state;
     renderChecklist(state);
     renderMantenimiento(state);
   }
@@ -4179,6 +4302,170 @@
     btn.setAttribute("data-check", op);
     btn.disabled = !!disabled;
     return btn;
+  }
+
+  function checklistBlankFlags() {
+    return {
+      ok: false,
+      paso: 1,
+      empleado: "",
+      aire_ok: false,
+      eje_ok: false,
+      recorrido_ok: false,
+      alimentador_ok: false,
+      purga_ok: false,
+      piezas_cortadas: false,
+    };
+  }
+
+  function checklistSimApplyScene(index) {
+    const scene = CHECKLIST_SIM_SCENES[index];
+    if (!scene) return;
+    checklistSim.scene = index;
+    checklistSim.checklist = Object.assign(checklistBlankFlags(), scene.checklist);
+    checklistSim.mensaje = scene.mensaje || "";
+    checklistSim.rutina = "";
+  }
+
+  function checklistSimState(base) {
+    const src = base || lastChecklistState || {};
+    return Object.assign({}, src, {
+      checklist_bypass: false,
+      checklist: Object.assign({}, checklistSim.checklist || checklistBlankFlags()),
+      checklist_log: checklistSim.log.slice(),
+      ciclos_mant_r: checklistSim.ciclos_mant_r,
+      ciclos_mant_l: checklistSim.ciclos_mant_l,
+      rutina: checklistSim.rutina,
+      mensaje: checklistSim.mensaje,
+    });
+  }
+
+  function checklistSimRefresh() {
+    checklistViewKey = "";
+    renderChecklist(lastChecklistState || {});
+  }
+
+  function checklistSimGoto(index) {
+    if (!checklistSim.active) return;
+    const next = Math.max(0, Math.min(CHECKLIST_SIM_SCENES.length - 1, index));
+    checklistSimApplyScene(next);
+    checklistSimRefresh();
+  }
+
+  function checklistSimMatchScene() {
+    const ch = checklistSim.checklist || {};
+    for (let i = 0; i < CHECKLIST_SIM_SCENES.length; i++) {
+      const scene = CHECKLIST_SIM_SCENES[i].checklist;
+      if (
+        !!scene.ok === !!ch.ok &&
+        Number(scene.paso || 1) === Number(ch.paso || 1) &&
+        !!scene.eje_ok === !!ch.eje_ok &&
+        !!scene.recorrido_ok === !!ch.recorrido_ok &&
+        !!scene.alimentador_ok === !!ch.alimentador_ok &&
+        !!scene.purga_ok === !!ch.purga_ok &&
+        !!scene.piezas_cortadas === !!ch.piezas_cortadas
+      ) {
+        checklistSim.scene = i;
+        return;
+      }
+    }
+  }
+
+  function applyChecklistSimAction(op, extra) {
+    const ch = Object.assign(checklistBlankFlags(), checklistSim.checklist || {});
+    extra = extra || {};
+    if (op === "checklist_empezar") {
+      const emp = String(extra.empleado || "").trim();
+      if (!/^\d{5}$/.test(emp)) {
+        checklistSim.mensaje = "Simulación: usa 5 dígitos de empleado.";
+        checklistSimRefresh();
+        return;
+      }
+      ch.empleado = emp;
+      ch.paso = 2;
+      checklistSim.mensaje = "Revisión iniciada.";
+    } else if (op === "checklist_aire") {
+      ch.aire_ok = true;
+      ch.paso = 3;
+      checklistSim.mensaje = "Aire correcto.";
+    } else if (op === "checklist_holgura") {
+      ch.paso = 4;
+      checklistSim.mensaje = "Holgura confirmada.";
+    } else if (op === "checklist_home") {
+      ch.eje_ok = true;
+      checklistSim.mensaje = "Eje en referencia. Haz el recorrido y confirma que regresó.";
+    } else if (op === "checklist_recorrido") {
+      ch.recorrido_ok = true;
+      checklistSim.mensaje = "Recorrido listo. Confirma que el eje regresó.";
+    } else if (op === "checklist_eje_listo") {
+      ch.paso = 5;
+      checklistSim.mensaje = "Eje confirmado.";
+    } else if (op === "checklist_preparar") {
+      ch.alimentador_ok = true;
+      checklistSim.mensaje = "Motion y PreAlimentador listos.";
+    } else if (op === "checklist_purga") {
+      ch.purga_ok = true;
+      checklistSim.mensaje = "Purga lista (simulada). Confirma con Purga lista.";
+    } else if (op === "checklist_purga_hecha") {
+      ch.paso = 6;
+      checklistSim.mensaje = "Purga de revisión lista.";
+    } else if (op === "checklist_piezas") {
+      ch.piezas_cortadas = true;
+      checklistSim.mensaje = "Piezas cortadas. Anota la longitud medida de cada lado.";
+    } else if (op === "checklist_medicion") {
+      const mmL = Number(extra.mm_l);
+      const mmR = Number(extra.mm_r);
+      if (!Number.isFinite(mmL) || !Number.isFinite(mmR)) {
+        checklistSim.mensaje = "Simulación: anota las dos longitudes.";
+        checklistSimRefresh();
+        return;
+      }
+      ch.ok = true;
+      checklistSim.mensaje = "Revisión de arranque completa. Ya se puede iniciar.";
+    } else {
+      return;
+    }
+    checklistSim.checklist = ch;
+    checklistSimMatchScene();
+    checklistSimRefresh();
+  }
+
+  function renderChecklistSimBar() {
+    const bar = document.createElement("div");
+    bar.className = "checklist-sim-bar";
+    const label = document.createElement("p");
+    label.className = "checklist-sim-bar__label";
+    const scene = CHECKLIST_SIM_SCENES[checklistSim.scene] || CHECKLIST_SIM_SCENES[0];
+    label.textContent =
+      "Simulación UI · " +
+      (scene ? scene.label : "") +
+      " (" +
+      (checklistSim.scene + 1) +
+      "/" +
+      CHECKLIST_SIM_SCENES.length +
+      ")";
+    const prev = document.createElement("button");
+    prev.type = "button";
+    prev.className = "btn btn-config";
+    prev.textContent = "Anterior";
+    prev.setAttribute("data-check-sim", "prev");
+    prev.disabled = checklistSim.scene <= 0;
+    const next = document.createElement("button");
+    next.type = "button";
+    next.className = "btn btn-config";
+    next.textContent = "Siguiente";
+    next.setAttribute("data-check-sim", "next");
+    next.disabled = checklistSim.scene >= CHECKLIST_SIM_SCENES.length - 1;
+    const exit = document.createElement("button");
+    exit.type = "button";
+    exit.className = "btn btn-config";
+    exit.textContent = "Salir sim";
+    exit.setAttribute("data-check-sim", "exit");
+    bar.appendChild(label);
+    bar.appendChild(prev);
+    bar.appendChild(next);
+    bar.appendChild(exit);
+    return bar;
   }
 
   function checklistSection(title) {
@@ -4252,13 +4539,281 @@
     return section;
   }
 
+  function checklistAirSample(view) {
+    const ch = (view && view.checklist) || {};
+    const sample = ch.aire_sample;
+    const outs = (view && view.plc_outputs) || {};
+    // Salida activa → espejo en vivo; si no, última captura de la prueba.
+    if (outs && outs.known && (outs.holder === true || outs.encoder === true)) {
+      return outs;
+    }
+    if (sample && typeof sample === "object") return sample;
+    if (outs && outs.known) return outs;
+    return null;
+  }
+
+  function renderChecklistAirIndicators(view) {
+    const wrap = document.createElement("div");
+    wrap.className = "checklist-air";
+    wrap.id = "checklistAirIndicators";
+
+    function row(name, outId, faultId) {
+      const r = document.createElement("div");
+      r.className = "checklist-air__row";
+      const label = document.createElement("span");
+      label.className = "checklist-air__name";
+      label.textContent = name;
+      const out = document.createElement("span");
+      out.className = "motion-laser checklist-air__out";
+      out.id = outId;
+      out.setAttribute("role", "status");
+      out.innerHTML =
+        '<span class="motion-laser__led" aria-hidden="true"></span>' +
+        '<span class="checklist-air__tag">Salida</span>';
+      const fault = document.createElement("span");
+      fault.className = "motion-laser plc-fault checklist-air__fault";
+      fault.id = faultId;
+      fault.setAttribute("role", "status");
+      fault.innerHTML =
+        '<span class="motion-laser__led" aria-hidden="true"></span>' +
+        '<span class="checklist-air__tag">Falla</span>';
+      r.appendChild(label);
+      r.appendChild(out);
+      r.appendChild(fault);
+      return r;
+    }
+
+    wrap.appendChild(row("Holder", "checkAirHolder", "checkAirFaultHolder"));
+    wrap.appendChild(row("Encoder", "checkAirEncoder", "checkAirFaultEncoder"));
+    return wrap;
+  }
+
+  function syncChecklistAirIndicators(view) {
+    const sample = checklistAirSample(view) || {};
+    const holderOn = sample.holder === true;
+    const encoderOn = sample.encoder === true;
+    const faultH = sample.fault_holder === true;
+    const faultE = sample.fault_encoder === true;
+    const elH = document.getElementById("checkAirHolder");
+    const elE = document.getElementById("checkAirEncoder");
+    const elFH = document.getElementById("checkAirFaultHolder");
+    const elFE = document.getElementById("checkAirFaultEncoder");
+    if (elH) {
+      elH.classList.toggle("is-on", holderOn);
+      const tag = elH.querySelector(".checklist-air__tag");
+      if (tag) tag.textContent = holderOn ? "Encendido" : "Apagado";
+    }
+    if (elE) {
+      elE.classList.toggle("is-on", encoderOn);
+      const tag = elE.querySelector(".checklist-air__tag");
+      if (tag) tag.textContent = encoderOn ? "Encendido" : "Apagado";
+    }
+    if (elFH) elFH.classList.toggle("is-on", faultH);
+    if (elFE) elFE.classList.toggle("is-on", faultE);
+  }
+
+  function checklistTabPollActive(tabId) {
+    const tab = document.querySelector('.modal-tab[data-tab="' + tabId + '"]');
+    return !!(tab && tab.classList.contains("is-active"));
+  }
+
+  function syncChecklistStepPolls(paso) {
+    const live = !checklistSim.active;
+    const wantPlc = live && paso === 2;
+    const wantPf = live && paso === 3;
+    const wantMotion = live && (paso === 4 || paso === 5);
+    if (wantPlc) setPlcPoll(true);
+    else if (!checklistTabPollActive("plc")) setPlcPoll(false);
+    if (wantPf) setPrefeederPoll(true);
+    else if (!checklistTabPollActive("prefeeder")) setPrefeederPoll(false);
+    if (wantMotion) setEncoderPoll(true);
+    else if (!checklistTabPollActive("motion")) setEncoderPoll(false);
+  }
+
+  function paintChecklistLed(el, on, onText, offText) {
+    if (!el) return;
+    el.classList.toggle("is-on", !!on);
+    const tag = el.querySelector(".checklist-sensors__tag, .checklist-air__tag");
+    if (tag) tag.textContent = on ? onText : offText;
+  }
+
+  function renderChecklistSensorRow(name, ledId) {
+    const row = document.createElement("div");
+    row.className = "checklist-sensors__row";
+    const label = document.createElement("span");
+    label.className = "checklist-sensors__name";
+    label.textContent = name;
+    const led = document.createElement("span");
+    led.className = "motion-laser checklist-sensors__led";
+    led.id = ledId;
+    led.setAttribute("role", "status");
+    led.innerHTML =
+      '<span class="motion-laser__led" aria-hidden="true"></span>' +
+      '<span class="checklist-sensors__tag">—</span>';
+    row.appendChild(label);
+    row.appendChild(led);
+    return row;
+  }
+
+  function renderChecklistHolguraPanel() {
+    const wrap = document.createElement("div");
+    wrap.className = "checklist-sensors";
+    wrap.id = "checklistHolguraIndicators";
+    wrap.appendChild(renderChecklistSensorRow("Holgura R", "checkHolgR"));
+    wrap.appendChild(renderChecklistSensorRow("Holgura L", "checkHolgL"));
+    const jogs = document.createElement("div");
+    jogs.className = "checklist-jogs";
+    ["R", "L"].forEach(function (side) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "btn btn-feeder";
+      btn.setAttribute("data-check-pf-hold", side);
+      btn.title = "Mantén pulsado para prealimentar " + side;
+      btn.textContent = "Prealimentar (" + side + ")";
+      jogs.appendChild(btn);
+    });
+    wrap.appendChild(jogs);
+    return wrap;
+  }
+
+  function syncChecklistHolguraIndicators(status) {
+    const st = status || lastPrefeederStatus || {};
+    const holgR = !!(st.R && st.R.sensors && st.R.sensors.holgura);
+    const holgL = !!(st.L && st.L.sensors && st.L.sensors.holgura);
+    paintChecklistLed(
+      document.getElementById("checkHolgR"),
+      holgR,
+      "Detectado",
+      "Sin detección"
+    );
+    paintChecklistLed(
+      document.getElementById("checkHolgL"),
+      holgL,
+      "Detectado",
+      "Sin detección"
+    );
+  }
+
+  function renderChecklistLmPanel(ch) {
+    const wrap = document.createElement("div");
+    wrap.className = "checklist-sensors";
+    wrap.id = "checklistLmIndicators";
+    wrap.appendChild(renderChecklistSensorRow("Home", "checkLmHome"));
+    wrap.appendChild(renderChecklistSensorRow("Referencia", "checkLmRef"));
+    wrap.appendChild(renderChecklistSensorRow("Recorrido", "checkLmTravel"));
+    wrap.dataset.ejeOk = ch && ch.eje_ok ? "1" : "0";
+    wrap.dataset.recorridoOk = ch && ch.recorrido_ok ? "1" : "0";
+    return wrap;
+  }
+
+  function syncChecklistLmIndicators(snap, ch) {
+    const homed = !!(snap && snap.lm_homed === true);
+    const ejeOk = !!(ch && ch.eje_ok);
+    const recOk = !!(ch && ch.recorrido_ok);
+    paintChecklistLed(
+      document.getElementById("checkLmHome"),
+      homed,
+      "En home",
+      "Fuera de home"
+    );
+    paintChecklistLed(
+      document.getElementById("checkLmRef"),
+      ejeOk,
+      "Listo",
+      "Pendiente"
+    );
+    paintChecklistLed(
+      document.getElementById("checkLmTravel"),
+      recOk,
+      "Listo",
+      "Pendiente"
+    );
+  }
+
+  function renderChecklistLaserPanel() {
+    const wrap = document.createElement("div");
+    wrap.className = "checklist-sensors";
+    wrap.id = "checklistLaserIndicators";
+    wrap.appendChild(renderChecklistSensorRow("Láser R", "checkLaserR"));
+    wrap.appendChild(renderChecklistSensorRow("Láser L", "checkLaserL"));
+    return wrap;
+  }
+
+  function syncChecklistLaserIndicators(encoder) {
+    const enc = encoder || (lastMotionSnap && lastMotionSnap.encoder) || {};
+    paintChecklistLed(
+      document.getElementById("checkLaserR"),
+      !!(enc.R && enc.R.laser === true),
+      "Detectado",
+      "Sin detección"
+    );
+    paintChecklistLed(
+      document.getElementById("checkLaserL"),
+      !!(enc.L && enc.L.laser === true),
+      "Detectado",
+      "Sin detección"
+    );
+  }
+
+  async function checklistPfHoldSet(side, on) {
+    if (side !== "L" && side !== "R") return;
+    if (on) {
+      if (checklistPfHoldSide && checklistPfHoldSide !== side) {
+        await checklistPfHoldSet(checklistPfHoldSide, false);
+      }
+      checklistPfHoldSide = side;
+    } else if (checklistPfHoldSide === side) {
+      checklistPfHoldSide = null;
+    }
+    els.checklistBody &&
+      els.checklistBody.querySelectorAll("[data-check-pf-hold]").forEach(function (btn) {
+        setButtonOn(btn, btn.getAttribute("data-check-pf-hold") === checklistPfHoldSide);
+      });
+    try {
+      await fetch("/api/prefeeder/cmd", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ op: "set_force_feed", side: side, on: !!on }),
+      });
+    } catch (err) {
+      /* sin servidor */
+    }
+  }
+
   function renderChecklist(state) {
     if (!els.checklistModal || els.checklistModal.hidden || !els.checklistBody) return;
-    const ch = state.checklist || {};
-    const logLen = Array.isArray(state.checklist_log) ? state.checklist_log.length : 0;
+    const view = checklistSim.active ? checklistSimState(state) : state;
+    const ch = view.checklist || {};
+    const logLen = Array.isArray(view.checklist_log) ? view.checklist_log.length : 0;
+    const title = document.getElementById("checklistModalTitle");
+    if (title) {
+      title.textContent = checklistSim.active
+        ? "Revisión de arranque (simulación)"
+        : "Revisión de arranque";
+    }
+    const airSample = ch.aire_sample || null;
+    const airKey = airSample
+      ? [
+          airSample.holder,
+          airSample.encoder,
+          airSample.fault_holder,
+          airSample.fault_encoder,
+        ].join(",")
+      : "";
+    const outs = view.plc_outputs || {};
+    const outsKey = outs.known
+      ? [
+          outs.holder,
+          outs.encoder,
+          outs.fault_holder,
+          outs.fault_encoder,
+        ].join(",")
+      : "";
     const key = [
+      checklistSim.active ? "sim" : "live",
+      checklistSim.active ? checklistSim.scene : "",
       ch.ok,
-      state.checklist_bypass,
+      view.checklist_bypass,
       ch.paso,
       ch.empleado,
       ch.eje_ok,
@@ -4266,49 +4821,80 @@
       ch.alimentador_ok,
       ch.purga_ok,
       ch.piezas_cortadas,
-      state.ciclos_mant_r,
-      state.ciclos_mant_l,
+      view.ciclos_mant_r,
+      view.ciclos_mant_l,
       logLen,
-      state.rutina,
-      state.mensaje || "",
+      view.rutina,
+      view.mensaje || "",
+      airKey,
+      outsKey,
     ].join("|");
     const live = document.getElementById("checklistLive");
+    const airPanel = document.getElementById("checklistAirIndicators");
+    const holgPanel = document.getElementById("checklistHolguraIndicators");
+    const lmPanel = document.getElementById("checklistLmIndicators");
+    const laserPanel = document.getElementById("checklistLaserIndicators");
+    const pasoNow = ch.ok || view.checklist_bypass ? 0 : ch.paso || 1;
     if (key === checklistViewKey && live) {
-      live.textContent = state.mensaje || "";
+      live.textContent = view.mensaje || "";
+      if (airPanel) syncChecklistAirIndicators(view);
+      if (holgPanel) syncChecklistHolguraIndicators(lastPrefeederStatus);
+      if (lmPanel) syncChecklistLmIndicators(lastMotionSnap, ch);
+      if (laserPanel) syncChecklistLaserIndicators(lastMotionSnap.encoder);
+      syncChecklistStepPolls(pasoNow);
+      return;
+    }
+    // Si solo cambió el espejo PLC / muestra de aire, actualiza LEDs sin rearmar el paso.
+    const baseKey = key.split("|").slice(0, -2).join("|");
+    const prevBase = checklistViewKey
+      ? checklistViewKey.split("|").slice(0, -2).join("|")
+      : "";
+    if ((airPanel || holgPanel || lmPanel || laserPanel) && live && baseKey && baseKey === prevBase) {
+      checklistViewKey = key;
+      live.textContent = view.mensaje || "";
+      if (airPanel) syncChecklistAirIndicators(view);
+      if (holgPanel) syncChecklistHolguraIndicators(lastPrefeederStatus);
+      if (lmPanel) syncChecklistLmIndicators(lastMotionSnap, ch);
+      if (laserPanel) syncChecklistLaserIndicators(lastMotionSnap.encoder);
+      syncChecklistStepPolls(pasoNow);
       return;
     }
     checklistViewKey = key;
     const body = els.checklistBody;
     body.innerHTML = "";
-    body.appendChild(renderChecklistLog(state));
+    if (checklistSim.active) body.appendChild(renderChecklistSimBar());
 
-    const revision = renderChecklistSideCounts(state);
     const hint = document.createElement("p");
     hint.className = "modal__hint";
     const liveLine = document.createElement("p");
     liveLine.id = "checklistLive";
     liveLine.className = "modal__hint";
-    liveLine.textContent = state.mensaje || "";
+    liveLine.textContent = view.mensaje || "";
     const actions = document.createElement("div");
     actions.className = "checklist-actions";
+    const step = checklistSection("Paso actual");
 
-    if (ch.ok || state.checklist_bypass) {
-      hint.textContent = state.checklist_bypass
+    if (ch.ok || view.checklist_bypass) {
+      syncChecklistStepPolls(0);
+      hint.textContent = view.checklist_bypass
         ? "Resultado: bypass activo. El ciclo puede iniciar sin completar esta revisión."
         : ch.empleado
           ? "Resultado: revisión completa. Empleado " + ch.empleado + "."
           : "Resultado: revisión completa.";
-      revision.appendChild(hint);
-      revision.appendChild(liveLine);
-      body.appendChild(revision);
+      step.appendChild(hint);
+      step.appendChild(liveLine);
+      body.appendChild(step);
       return;
     }
 
     const paso = ch.paso || 1;
+    syncChecklistStepPolls(paso);
     if (paso === 1) {
-      const ciclosR = Number(state.ciclos_mant_r) || 0;
-      const ciclosL = Number(state.ciclos_mant_l) || 0;
+      const ciclosR = Number(view.ciclos_mant_r) || 0;
+      const ciclosL = Number(view.ciclos_mant_l) || 0;
       const blocked = ciclosR >= 10000 || ciclosL >= 10000;
+      body.appendChild(renderChecklistLog(view));
+      const revision = renderChecklistSideCounts(view);
       hint.textContent =
         "Paso 1 de 6. Ciclos desde mantenimiento — R: " +
         ciclosR +
@@ -4323,6 +4909,7 @@
       input.maxLength = 5;
       input.inputMode = "numeric";
       input.autocomplete = "off";
+      if (checklistSim.active) input.value = "12345";
       field.appendChild(input);
       actions.appendChild(
         checkButton("Continuar", "checklist_empezar", blocked)
@@ -4335,26 +4922,57 @@
       return;
     }
     if (paso === 2) {
-      hint.textContent = "Paso 2 de 6. Prueba de aire: se accionan holder y encoder y se leen las fallas del PLC.";
+      hint.textContent =
+        "Paso 2 de 6. Prueba de aire: se accionan holder y encoder y se leen las fallas del PLC.";
+      step.appendChild(hint);
+      step.appendChild(renderChecklistAirIndicators(view));
       actions.appendChild(checkButton("Probar aire", "checklist_aire"));
+      step.appendChild(liveLine);
+      step.appendChild(actions);
+      body.appendChild(step);
+      syncChecklistAirIndicators(view);
+      return;
     } else if (paso === 3) {
-      hint.textContent = "Paso 3 de 6. Revisa a ojo que el material no quede ni flojo ni tenso en ambos lados.";
+      hint.textContent =
+        "Paso 3 de 6. Revisa la holgura en ambos lados. Usa Prealimentar R/L si hace falta ajustar material.";
+      step.appendChild(hint);
+      step.appendChild(renderChecklistHolguraPanel());
       actions.appendChild(checkButton("Confirmo holgura", "checklist_holgura"));
+      step.appendChild(liveLine);
+      step.appendChild(actions);
+      body.appendChild(step);
+      syncChecklistHolguraIndicators(lastPrefeederStatus);
+      return;
     } else if (paso === 4) {
-      hint.textContent = "Paso 4 de 6. Primero la referencia mecánica del eje. Después el recorrido y la confirmación de que regresó.";
-      actions.appendChild(checkButton("Llevar a referencia", "checklist_home", !!state.rutina));
-      actions.appendChild(checkButton("Hacer recorrido", "checklist_recorrido", !ch.eje_ok || !!state.rutina));
+      hint.textContent =
+        "Paso 4 de 6. Primero la referencia mecánica del eje. Después el recorrido y la confirmación de que regresó.";
+      step.appendChild(hint);
+      step.appendChild(renderChecklistLmPanel(ch));
+      actions.appendChild(checkButton("Llevar a referencia", "checklist_home", !!view.rutina));
+      actions.appendChild(checkButton("Hacer recorrido", "checklist_recorrido", !ch.eje_ok || !!view.rutina));
       actions.appendChild(checkButton("Regresó bien", "checklist_eje_listo", !ch.eje_ok || !ch.recorrido_ok));
+      step.appendChild(liveLine);
+      step.appendChild(actions);
+      body.appendChild(step);
+      syncChecklistLmIndicators(lastMotionSnap, ch);
+      return;
     } else if (paso === 5) {
       hint.textContent =
         "Paso 5 de 6. Prepara los alimentadores CAN y, si hay COM del PreAlimentador, estabilízalo. Luego la purga. Alimentar, Continuar y Terminar quedan en el banner; Alimentar L/R en Helpers.";
-      actions.appendChild(checkButton("Preparar alimentador", "checklist_preparar", !!state.rutina));
-      actions.appendChild(checkButton("Hacer purga", "checklist_purga", !ch.alimentador_ok || !!state.rutina));
+      step.appendChild(hint);
+      step.appendChild(renderChecklistLaserPanel());
+      actions.appendChild(checkButton("Preparar alimentador", "checklist_preparar", !!view.rutina));
+      actions.appendChild(checkButton("Hacer purga", "checklist_purga", !ch.alimentador_ok || !!view.rutina));
       actions.appendChild(checkButton("Purga lista", "checklist_purga_hecha", !ch.purga_ok));
+      step.appendChild(liveLine);
+      step.appendChild(actions);
+      body.appendChild(step);
+      syncChecklistLaserIndicators(lastMotionSnap.encoder);
+      return;
     } else {
       hint.textContent = "Paso 6 de 6. Corta dos piezas del modelo cargado. Cada lado debe medir la longitud del modelo (±3 mm de referencia visual). La LM Guide recorre esa longitud menos 55 mm.";
       if (!ch.piezas_cortadas) {
-        actions.appendChild(checkButton("Cortar 2 piezas", "checklist_piezas", !!state.rutina));
+        actions.appendChild(checkButton("Cortar 2 piezas", "checklist_piezas", !!view.rutina));
       } else {
         const left = document.createElement("label");
         left.className = "modal-field";
@@ -4362,6 +4980,7 @@
         const inL = document.createElement("input");
         inL.id = "checkMmL";
         inL.inputMode = "decimal";
+        if (checklistSim.active) inL.value = "100";
         left.appendChild(inL);
         const right = document.createElement("label");
         right.className = "modal-field";
@@ -4369,32 +4988,46 @@
         const inR = document.createElement("input");
         inR.id = "checkMmR";
         inR.inputMode = "decimal";
+        if (checklistSim.active) inR.value = "100";
         right.appendChild(inR);
-        revision.appendChild(hint);
-        revision.appendChild(left);
-        revision.appendChild(right);
-        revision.appendChild(liveLine);
+        step.appendChild(hint);
+        step.appendChild(left);
+        step.appendChild(right);
+        step.appendChild(liveLine);
         actions.appendChild(checkButton("Guardar medición", "checklist_medicion"));
-        revision.appendChild(actions);
-        body.appendChild(revision);
+        step.appendChild(actions);
+        body.appendChild(step);
         return;
       }
     }
-    revision.appendChild(hint);
-    revision.appendChild(liveLine);
-    revision.appendChild(actions);
-    body.appendChild(revision);
+    step.appendChild(hint);
+    step.appendChild(liveLine);
+    step.appendChild(actions);
+    body.appendChild(step);
   }
 
-  function openChecklist() {
+  function openChecklist(simulate) {
     checklistViewKey = "";
+    checklistSim.active = !!simulate;
+    if (checklistSim.active) checklistSimApplyScene(0);
     if (els.checklistModal) els.checklistModal.hidden = false;
+    if (checklistSim.active) {
+      checklistSimRefresh();
+      return;
+    }
     fetchState();
   }
 
   function closeChecklist() {
     if (els.checklistModal) els.checklistModal.hidden = true;
     checklistViewKey = "";
+    checklistSim.active = false;
+    if (checklistPfHoldSide) {
+      checklistPfHoldSet(checklistPfHoldSide, false);
+    }
+    syncChecklistStepPolls(0);
+    const title = document.getElementById("checklistModalTitle");
+    if (title) title.textContent = "Revisión de arranque";
   }
 
   function mantLastResetBySide(state) {
@@ -4611,6 +5244,14 @@
     });
   }
 
+  if (els.statusBannerClose) {
+    els.statusBannerClose.addEventListener("click", function () {
+      if (els.statusBannerClose.disabled || els.statusBannerClose.hidden) return;
+      flashButton(els.statusBannerClose);
+      sendAction("operacion_manual", "purga_terminar");
+    });
+  }
+
   document.querySelectorAll("[data-andon-call]").forEach(function (btn) {
     btn.addEventListener("click", function () {
       const call = btn.getAttribute("data-andon-call");
@@ -4732,7 +5373,12 @@
           return;
         }
         if (block === "configuracion" && action === "checklist") {
-          openChecklist();
+          openChecklist(false);
+          closeSettings();
+          return;
+        }
+        if (block === "configuracion" && action === "checklist_sim") {
+          openChecklist(true);
           closeSettings();
           return;
         }

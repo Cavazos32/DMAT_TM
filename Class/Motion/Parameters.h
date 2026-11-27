@@ -49,7 +49,8 @@ static const uint32_t PARAM_BLOWER_MIN_MS    = 200;
 static const uint32_t PARAM_BLOWER_MAX_MS    = 300000;
 static const uint32_t PARAM_BLOWER_DEFAULT_MS = 2000;
 
-// ── [A] Encoder OM (pines; lógica en Encoder.h / EncoderPCNT) + láser + joint ─
+// ── [A] Encoder OM (pines; lógica en Encoder.h / EncoderPCNT) + láser + material ─
+// Joint: solo GPIO reservados (sin lectura ni lógica).
 
 static const uint32_t PARAM_ENC_POLL_MS = 80;
 static const uint32_t PARAM_ENC_GLITCH_FILTER_NS = 5000;
@@ -65,9 +66,6 @@ static const int   PARAM_PIN_LASER_L        = 34;
 static const bool  PARAM_LASER_ACTIVE_HIGH  = false;
 static const int   PARAM_PIN_JOINT_R        = 12;
 static const int   PARAM_PIN_JOINT_L        = 13;
-static const bool  PARAM_JOINT_ACTIVE_HIGH  = false;
-static const uint32_t PARAM_JOINT_DEBOUNCE_ON_MS  = 25;
-static const uint32_t PARAM_JOINT_DEBOUNCE_OFF_MS = 25;
 static const bool  PARAM_MATERIAL_SENSOR_ENABLE = true;
 static const int   PARAM_PIN_MATERIAL_R       = 39;
 static const int   PARAM_PIN_MATERIAL_L       = 36;
@@ -239,7 +237,6 @@ static inline void motionDataSetDefaults(MotionData* data) {
 #define LASER_ACTIVE_HIGH PARAM_LASER_ACTIVE_HIGH
 #define JOINT_PIN_R       PARAM_PIN_JOINT_R
 #define JOINT_PIN_L       PARAM_PIN_JOINT_L
-#define JOINT_ACTIVE_HIGH PARAM_JOINT_ACTIVE_HIGH
 #define MATERIAL_PIN_R       PARAM_PIN_MATERIAL_R
 #define MATERIAL_PIN_L       PARAM_PIN_MATERIAL_L
 #define MATERIAL_ACTIVE_HIGH PARAM_MATERIAL_ACTIVE_HIGH

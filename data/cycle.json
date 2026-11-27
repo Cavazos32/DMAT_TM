@@ -19,7 +19,7 @@
   "gripper_clearance_mm": 20.0,
   "feed_sides": "L",
   "cantidad": 50,
-  "numero_modelo": "030-2780-1-A-T-TUBE-M",
-  "longitud_modelo_mm": 603.0,
-  "modelo_desc": "WIP, 7113-500009 (.603)"
+  "numero_modelo": "030-1200-A-T-TUBE-M",
+  "longitud_modelo_mm": 1600.0,
+  "modelo_desc": "WIP, 7113-500009 (1.600)"
 }

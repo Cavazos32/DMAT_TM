@@ -8,7 +8,7 @@
  *   idle/simple     = todo off
  *   trabajando      = LED verde
  *   error / tecnico = LED rojo + buzzer
- *   falta_material / materialista / joint = LED amarillo
+ *   falta_material / materialista = LED amarillo
  *   jefe            = buzzer
  *   terminado       = LED verde parpadeando + buzzer
  *   presostato HIGH = LED rojo + buzzer (prioridad)

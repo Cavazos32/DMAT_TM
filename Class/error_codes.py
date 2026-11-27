@@ -53,9 +53,6 @@ CATALOG: dict[str, tuple[str, str]] = {
     "E044": ("Motion", "No se confirmó la posición de destino del LM Guide."),
     "E045": ("Motion", "Alimentación interrumpida."),
     "E046": ("Main", "No se confirmó el restablecimiento del sistema."),
-    "E050": ("Motion", "Joint detectado en lado R."),
-    "E051": ("Motion", "Joint detectado en lado L."),
-    "E052": ("Motion", "Joint detectado en ambos lados."),
     "E053": ("Motion", "Material terminado en lado R."),
     "E054": ("Motion", "Material terminado en lado L."),
     "E055": ("Motion", "Material terminado en ambos lados."),
@@ -72,7 +69,7 @@ CATALOG: dict[str, tuple[str, str]] = {
     "E099": ("PreAlimentador", "No está listo ni estabilizado."),
 }
 
-# Error | Comunicación | Warning — según ERRORS.md.
+# Error | Comunicación — según ERRORS.md.
 CLASSIFICATION: dict[str, str] = {
     "E000": "Error",
     "E001": "Error",
@@ -112,9 +109,6 @@ CLASSIFICATION: dict[str, str] = {
     "E044": "Error",
     "E045": "Error",
     "E046": "Error",
-    "E050": "Error",
-    "E051": "Error",
-    "E052": "Error",
     "E053": "Error",
     "E054": "Error",
     "E055": "Error",
@@ -171,9 +165,6 @@ INSTRUCTIONS: dict[str, str] = {
     "E044": "Verifica la posición indicada y el estado del drive; no retires material ni ordenes movimiento hasta validar una posición segura.",
     "E045": "Verifica por qué se detuvo la alimentación y que no exista una orden de paro activa.",
     "E046": "Consulta si existe un código específico activo; si no se identifica la causa, solicita revisión técnica.",
-    "E050": "Verifica la unión en el lado derecho. Pulsa Reset y sigue la recuperación.",
-    "E051": "Verifica la unión en el lado izquierdo. Pulsa Reset y sigue la recuperación.",
-    "E052": "Verifica la unión en ambos lados. Pulsa Reset y sigue la recuperación.",
     "E053": "Verifica el suministro derecho. Pulsa Reset y sigue la recuperación.",
     "E054": "Verifica el suministro izquierdo. Pulsa Reset y sigue la recuperación.",
     "E055": "Verifica el suministro de ambos lados. Pulsa Reset y sigue la recuperación.",
@@ -204,9 +195,6 @@ FEED_STAGE_TO_CODE: dict[str, str] = {
     "comp_move": "E037",
     "safety": "E039",
     "stopped": "E045",
-    "joint_r": "E050",
-    "joint_l": "E051",
-    "joint_rl": "E052",
     "material_r": "E053",
     "material_l": "E054",
     "material_rl": "E055",
